@@ -101,6 +101,37 @@
         "type": "string",
         "default": "【微博@{account}】{date}-{index}：{title}.jpg",
         "description": "文件名模板"
+      },
+      "categories": {
+        "type": "string",
+        "default": "",
+        "description": "博主→分类目录映射（JSON，如 {\"示例博主A\": \"12、日常分享\"}；键可用 uid 或昵称）",
+        "hint": "留空则全部落到「未分类」目录；键写成 uid 时优先按 uid 匹配"
+      },
+      "enabled_uids": {
+        "type": "list",
+        "default": [],
+        "description": "只对这些博主跑管线（留空 = 全部归档博主）"
+      },
+      "auto_queue": {
+        "type": "bool",
+        "default": true,
+        "description": "归档完成后自动入队（关掉后只能手动补跑）"
+      },
+      "max_attempts": {
+        "type": "int",
+        "default": 3,
+        "description": "单张图最大尝试次数（超过后不再自动重试）"
+      },
+      "thumb_size": {
+        "type": "int",
+        "default": 720,
+        "description": "缩略图长边像素（与现网 720 一致）"
+      },
+      "thumb_quality": {
+        "type": "int",
+        "default": 72,
+        "description": "缩略图 JPEG 质量（与现网 72 一致）"
       }
     }
   },

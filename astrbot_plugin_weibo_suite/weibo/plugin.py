@@ -8,6 +8,7 @@ from .archive import ArchiveMixin
 from .archive_db import ArchiveStore
 from .commands import CommandsMixin
 from .monitor import MonitorMixin
+from .pipeline import PipelineMixin
 from .pusher import PusherMixin
 from .runtime import *
 from .visitor import VisitorMixin
@@ -20,6 +21,7 @@ class WeiboMonitorPlugin(
     PusherMixin,
     AlbumMixin,
     ArchiveMixin,
+    PipelineMixin,
     CommandsMixin,
     Star,
 ):
@@ -140,6 +142,14 @@ class WeiboMonitorPlugin(
         self._archive: ArchiveStore | None = None
         # 最近一次回填统计：archive.py 写，微博回填状态 指令读
         self._backfill_last_stats: dict[str, Any] = {}
+        # ---- 图床/向量管线（P4）：宿主状态在这里，业务全部在 pipeline.py ----
+        # 服务由 composite 注入（溯源域的 bed/vector/library）；未注入时管线整体降级
+        self._pipeline_services: Any | None = None
+        self._pipeline_queue: asyncio.Queue[str] | None = None
+        self._pipeline_worker_task: asyncio.Task | None = None
+        self._pipeline_pending: set[str] = set()
+        self._pipeline_last_error: str = ""
+        self._pipeline_backoff: float = 0.0
 
     async def initialize(self):
         self._data_dir = StarTools.get_data_dir(PLUGIN_NAME)
@@ -150,6 +160,11 @@ class WeiboMonitorPlugin(
             await self.archive_open()
         except Exception as e:  # 归档失败不阻断启动
             logger.warning(f"{PLUGIN_NAME} 归档库打开失败（归档功能降级）: {e}")
+        # 图床管线要读 archive.db，必须在归档库打开之后启动；没注入服务时只是空转
+        try:
+            self.pipeline_start()
+        except Exception as e:  # 管线失败同样不阻断监控主链
+            logger.warning(f"{PLUGIN_NAME} 图床管线启动失败（管线降级）: {e}")
         self._load_state()
         # 存量配置迁移放在 state 读取之后：迁移标记就在 state.json 里，
         # 先读标记才能保证"迁移过就永不再动"的语义
@@ -256,6 +271,12 @@ class WeiboMonitorPlugin(
             with contextlib.suppress(asyncio.CancelledError):
                 await self._backfill_task
             self._backfill_task = None
+        # 管线 worker 也在用 HTTP 与 archive.db：必须在关归档库之前停，否则它会
+        # 在关闭中的连接上继续跑单帖流程
+        try:
+            await self.pipeline_stop()
+        except Exception as e:  # 停止失败不影响其余收尾
+            logger.warning(f"{PLUGIN_NAME} 图床管线停止失败: {e}")
         try:
             await self.archive_close()
         except Exception as e:  # 关闭失败不影响其余收尾

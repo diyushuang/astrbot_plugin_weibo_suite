@@ -11,7 +11,7 @@ import zipfile
 from pathlib import Path
 
 PLUGIN_NAME = "astrbot_plugin_weibo_suite"
-EXPECTED_VERSION = "v0.4.0"
+EXPECTED_VERSION = "v0.5.0"
 
 # 目录项以 / 结尾，表示递归收录；文件项必须精确匹配。开发/测试/缓存文件不在白名单。
 PLUGIN_FILES = (

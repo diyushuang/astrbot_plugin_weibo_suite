@@ -668,3 +668,21 @@ class CommandsMixin:
         report = await self.archive_reconcile(uid)
         yield event.plain_result(self.format_reconcile(report))
 
+    @weibo.command("管线状态")
+    async def weibo_pipeline_status(self, event: AstrMessageEvent):
+        """查看图床/向量管线的队列与六态进度"""
+        yield event.plain_result(self.format_pipeline_status())
+
+    @weibo.command("管线补跑")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def weibo_pipeline_backfill(self, event: AstrMessageEvent):
+        """把归档库里没跑完图床/向量的帖子重新入队（管理员）"""
+        stats = await self.pipeline_backfill()
+        error = str((stats or {}).get("error") or "")
+        if error:
+            yield event.plain_result(f"管线补跑失败：{error}")
+            return
+        scanned = int((stats or {}).get("scanned") or 0)
+        queued = int((stats or {}).get("queued") or 0)
+        yield event.plain_result(f"管线补跑完成：已扫描 {scanned} 帖，入队 {queued} 帖")
+

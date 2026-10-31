@@ -257,6 +257,15 @@ class ArchiveMixin:
             queued = False
             if pics and self._archive_bool("download_originals", True):
                 queued = self.archive_enqueue_download(mid)
+            # 整帖交给图床/向量管线：是否真入队由 pipeline 自己按开关与容量判断。
+            # 用 getattr 探测而不是直接调用——单独跑微博域（没有 PipelineMixin 的
+            # 测试桩）时这里必须静默跳过。
+            notify = getattr(self, "pipeline_notify_archived", None)
+            if callable(notify):
+                try:
+                    notify(mid)
+                except Exception as e:  # 管线入队失败绝不能反过来让归档失败
+                    logger.warning(f"图床管线入队失败（mid={mid}）: {e}")
             return True, queued
         except asyncio.CancelledError:
             raise

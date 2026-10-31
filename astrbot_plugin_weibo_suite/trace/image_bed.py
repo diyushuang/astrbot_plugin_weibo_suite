@@ -117,6 +117,16 @@ def _same_origin(a, b) -> bool:
     return _host_port(a) == _host_port(b)
 
 
+def _clean_folder(folder: object) -> str:
+    """图床内目录名归一化：去首尾空白与首尾 "/"。
+
+    store(folder=...) 的四种模式共用这一份归一化：CFB 的 uploadFolder、
+    R2/OCI 的对象 key 前缀都按「无首尾斜杠」的形态拼接；空值表示沿用
+    各模式现状（CFB 回落到 cfi_upload_folder、对象存储不加前缀）。
+    """
+    return str(folder or "").strip().strip("/").strip()
+
+
 class ImageBedClient:
     def __init__(
         self,
@@ -134,8 +144,17 @@ class ImageBedClient:
 
     # ---------- 对外接口 ----------
 
-    async def store(self, src_path: str) -> StoreResult:
-        """登记原图的落库：优先上传图床/对象存储，失败回退本地副本。"""
+    async def store(self, src_path: str, *, folder: str = "") -> StoreResult:
+        """登记原图的落库：优先上传图床/对象存储，失败回退本地副本。
+
+        folder 是可选的床内目录（缩略图走 "thumbnails/"），各模式语义：
+        - cloudflare_imgbed：覆盖 URL 的 uploadFolder 参数，空则回落配置项；
+        - local：作为 local_dir 下的子目录；"../" 或绝对路径一律拒绝；
+        - cloudflare_r2 / oracle_oci：作为对象 key 前缀；
+        - generic_http：服务端没有目录概念，忽略并留一行 DEBUG。
+        folder 为空时与旧行为完全一致。
+        """
+        raw_folder = str(folder or "").strip()
         uploaders = {
             MODE_HTTP: (self._upload, "图床上传失败", "已上传至图床"),
             MODE_CFB: (self._upload_cf, "CloudFlare-ImgBed 上传失败", "已上传至 CloudFlare-ImgBed"),
@@ -145,17 +164,33 @@ class ImageBedClient:
         entry = uploaders.get(self.mode)
         if entry is not None:
             upload, failure, ok_message = entry
+            if self.mode == MODE_HTTP and raw_folder:
+                # 通用 HTTP 图床的目录由服务端 API 决定，客户端不传
+                logger.debug(f"generic_http 图床不支持目录参数，已忽略 folder={raw_folder!r}")
             try:
-                return StoreResult(ok=True, url=await upload(src_path), message=ok_message)
+                if raw_folder:
+                    url = await upload(src_path, _clean_folder(raw_folder))
+                else:
+                    # 保持单参调用，兼容既有单参上传实现与测试替身
+                    url = await upload(src_path)
+                return StoreResult(ok=True, url=url, message=ok_message)
             except Exception as e:
                 logger.warning(f"{failure}: {e}", exc_info=True)
-                local = await self._copy_local(src_path)
+                try:
+                    local = await self._copy_local(src_path, raw_folder)
+                except ValueError:
+                    # 床内目录在本地无意义（如 "../x"），回退到数据目录根下
+                    local = await self._copy_local(src_path)
                 return StoreResult(
                     ok=True,
                     file_path=local,
                     message=f"{failure}，已保存本地副本（详情见日志）",
                 )
-        local = await self._copy_local(src_path)
+        try:
+            local = await self._copy_local(src_path, raw_folder)
+        except ValueError as e:
+            logger.warning(f"图床目录不合法，已拒绝保存: {e}")
+            return StoreResult(ok=False, message=f"图床目录不合法：{e}（未保存）")
         if self.mode != MODE_LOCAL:
             # schema 的 options 会拦住常见笔误，但手工改配置文件可绕过；
             # 静默按 local 处理会让人误以为配置生效了
@@ -274,14 +309,37 @@ class ImageBedClient:
 
     # ---------- 通用 HTTP 图床 ----------
 
-    async def _copy_local(self, src_path: str) -> str:
+    async def _copy_local(self, src_path: str, folder: str = "") -> str:
         ext = os.path.splitext(src_path)[1].lower() or ".jpg"
-        dest = os.path.join(
-            self.local_dir, f"{time.strftime('%Y%m%d')}_{secrets.token_hex(8)}{ext}"
-        )
+        name = f"{time.strftime('%Y%m%d')}_{secrets.token_hex(8)}{ext}"
+        dest_dir = self._local_subdir(folder)
+        os.makedirs(dest_dir, exist_ok=True)
+        dest = os.path.join(dest_dir, name)
         # 文件复制放到线程里避免阻塞事件循环；大小上游已校验
         await asyncio.to_thread(shutil.copyfile, src_path, dest)
         return dest
+
+    def _local_subdir(self, folder: str) -> str:
+        """把 folder 解析为 local_dir 下的落盘目录（本地模式的越界防护）。
+
+        folder 来自面板配置，本地模式会真的落盘：绝对路径、"../" 这类
+        能逃出数据目录的取值必须在写文件前拒绝，而不是交给 makedirs。
+        """
+        text = str(folder or "").strip().replace("\\", "/")
+        if not text:
+            return self.local_dir
+        if text.startswith("/") or (len(text) > 1 and text[1] == ":"):
+            raise ValueError(f"不允许使用绝对路径: {text!r}")
+        segments = []
+        for segment in text.split("/"):
+            if segment in ("", "."):
+                continue
+            if segment == "..":
+                raise ValueError(f"不允许使用上级目录: {text!r}")
+            segments.append(segment)
+        if not segments:
+            return self.local_dir
+        return os.path.join(self.local_dir, *segments)
 
     def _timeout(self) -> aiohttp.ClientTimeout:
         """图床 HTTP 请求的统一超时（配置缺失或非法时取 30 秒）。"""
@@ -295,8 +353,13 @@ class ImageBedClient:
         file_bytes = await asyncio.to_thread(read_bytes, src_path)
         return file_bytes, filename, content_type
 
-    async def _upload(self, src_path: str) -> str:
-        """按配置调用通用 HTTP 上传接口，成功返回图片直链。"""
+    async def _upload(self, src_path: str, folder: str = "") -> str:
+        """按配置调用通用 HTTP 上传接口，成功返回图片直链。
+
+        通用 HTTP 图床的目录由服务端接口自身决定，folder 在此不起作用
+        （store 侧已记过 DEBUG）；保留参数只为与其它上传器同签名。
+        """
+        del folder  # 服务端不接受目录参数
         api_url = str(self.config.get("api_url") or "").strip()
         if not api_url:
             raise ValueError("未配置图床上传接口地址 api_url")
@@ -358,7 +421,7 @@ class ImageBedClient:
             raise ValueError("未配置 CloudFlare-ImgBed 站点地址 cfi_base_url")
         return base
 
-    async def _upload_cf(self, src_path: str) -> str:
+    async def _upload_cf(self, src_path: str, folder: str = "") -> str:
         """按官方文档调用 POST /upload（multipart，文件字段名 file）。
 
         鉴权二选一（可同时配置）：cfi_token 以 Authorization: Bearer
@@ -384,7 +447,10 @@ class ImageBedClient:
         channel_name = str(self.config.get("cfi_channel_name") or "").strip()
         if channel_name:
             params["channelName"] = channel_name
-        upload_folder = str(self.config.get("cfi_upload_folder") or "").strip()
+        # 显式传入的 folder（缩略图走 "thumbnails/"）覆盖配置里的默认目录；
+        # 未传时保持旧行为（只认 cfi_upload_folder）
+        configured_folder = str(self.config.get("cfi_upload_folder") or "").strip()
+        upload_folder = _clean_folder(folder) or configured_folder
         if upload_folder:
             params["uploadFolder"] = upload_folder
 
@@ -628,14 +694,27 @@ class ImageBedClient:
                         return key, True
         return "", False
 
-    async def _put_object_bytes(self, client: S3CompatClient, bucket: str, src_path: str) -> str:
-        """把文件上传为新的对象名，返回对象键（R2/OCI 共用）。"""
+    async def _put_object_bytes(
+        self,
+        client: S3CompatClient,
+        bucket: str,
+        src_path: str,
+        folder: str = "",
+    ) -> str:
+        """把文件上传为新的对象名，返回对象键（R2/OCI 共用）。
+
+        folder 非空时作为对象键前缀（缩略图走 "thumbnails/"）：同一存储桶里
+        原图与缩略图分开存放，按前缀批量清理/统计才有依据。
+        """
         key, ctype = self._object_name(src_path)
+        prefix = _clean_folder(folder)
+        if prefix:
+            key = f"{prefix}/{key}"
         data = await asyncio.to_thread(read_bytes, src_path)
         await client.put_object(bucket, key, data, ctype)
         return key
 
-    async def _upload_object(self, src_path: str) -> str:
+    async def _upload_object(self, src_path: str, folder: str = "") -> str:
         """上传到 R2 / OCI 对象存储，返回长期有效的公开直链。"""
         if self.mode == MODE_R2:
             client, bucket = self._r2_client()
@@ -646,8 +725,9 @@ class ImageBedClient:
                     " r2.dev 公开访问或绑定自定义域名，https:// 开头），溯源回图"
                     "需要长期有效的直链"
                 )
-            return _public_url(public_base, await self._put_object_bytes(client, bucket, src_path))
+            key = await self._put_object_bytes(client, bucket, src_path, folder)
+            return _public_url(public_base, key)
 
         # MODE_OCI
         client, bucket = self._oci_client()
-        return self._oci_public_url(await self._put_object_bytes(client, bucket, src_path))
+        return self._oci_public_url(await self._put_object_bytes(client, bucket, src_path, folder))

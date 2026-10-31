@@ -1,5 +1,33 @@
 # 更新日志
 
+## v0.5.0 - 2026-10-31
+
+- P4：新增图床 / 缩略图 / 向量入库管线（F2）。归档完成后按 `pipeline.enabled` +
+  `pipeline.auto_queue` + `pipeline.enabled_uids` 自动入队，单帖一次性完成原图
+  上传、720px JPEG q72 缩略图、pHash 与向量入库。
+- 命名规则独立成纯函数模块 `weibo/pipeline_naming.py`：默认目录
+  `{category}/【微博图集@{account}】/`、默认文件名
+  `【微博@{account}】{date}-{index}：{title}.jpg`，与现网 2.4 万点同构，
+  `/原图` 可按名直查；非法字符清洗、超长标题截断、非 jpg 扩展名替换而非叠加。
+- 溯源域新增三件套接口：`ImageBedClient.store(..., folder=)`（LOCAL / CFB / R2 /
+  OCI / generic_http 统一目录语义）、`compute_features_with_thumbnail(...)`
+  （一次解码同时产出 pHash 与缩略图，不放大、去 EXIF/ICC）、
+  `VectorEngine.upsert_file_batch(...)`（整帖一次 PUT，embed 并发上限 4，
+  `thumb_url` 写同一 Qdrant 点，空 `thumb_url` 时载荷与旧版逐键一致）。
+- 六态进度落 `media` 表（downloaded→album→bed→thumb→vector）断点续跑；
+  单图失败 `bump_media_attempt` 记次并原地写错误，达 `pipeline.max_attempts`
+  （默认 3）归 `exhausted`，不阻塞后续帖。
+- 队列语义：`asyncio.Queue` 单 worker 串行，失败退避 5→10→20→40→60s 封顶、
+  成功即重置；`pending` 集合去重；停机幂等排空；`PIPELINE_QUEUE_MAX=500`。
+- CFB 模式（`bed_mode` 为空或 `cloudflare_imgbed`）由图床侧钩子自动入库，
+  插件侧只补原图落盘，绝不推进 bed/thumb/vector 状态。
+- 原图一律读归档本地库，缺失时最多补调一次 `archive_download_post`，不重复下载。
+- 新增 2 条指令（共 25 条 `微博` 子指令）：`微博管线状态`、`微博管线补跑`
+  （管理员，按归档库扫描未完成帖重新入队）。
+- 归档侧 `_archive_save_post` 在下载入队后通知管线（`pipeline_notify_archived`），
+  通知或入队失败只记 warning，不影响推送与落账链路。
+- 测试：新增 95 个用例（命名 49 / 服务接口 22 / 管线编排 24），全仓 612 项通过。
+
 ## v0.4.0 - 2026-10-31
 
 - P3：新增整条微博归档域（F1）。`archive.db`（SQLite WAL）成为帖子、媒体、

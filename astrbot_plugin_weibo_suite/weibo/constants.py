@@ -7,7 +7,7 @@ from datetime import timedelta, timezone
 from urllib.parse import quote
 
 PLUGIN_NAME = "astrbot_plugin_weibo_suite"
-PLUGIN_VERSION = "v0.4.0"
+PLUGIN_VERSION = "v0.5.0"
 
 WEIBO_HOME_URL = "https://m.weibo.cn/"
 WEIBO_INDEX_URL = "https://m.weibo.cn/api/container/getIndex"
@@ -218,6 +218,13 @@ BACKFILL_SAFETY_MAX_PAGES = 1000
 # 媒体状态顺序即推进等级（rank 0..N），DB 层据此保证状态单调不回退
 MEDIA_STATES = ("pending", "downloaded", "album", "bed", "thumb", "vector")
 
+# ---- 图床/向量管线（P4）：队列上限与缩略图约定 ----
+# 与归档队列分开：归档只搬字节，管线要跑图床/embed，彼此不能互相反压
+PIPELINE_QUEUE_MAX = 500
+# 缩略图目录：与 img-indexer 现网一致（Qdrant payload.thumb_url 指向这里）
+THUMBNAIL_DIR_NAME = "thumbnails"
+PIPELINE_STAGE_DIR_NAME = "pipeline_stage"
+
 _MONTH_MAP = {
     "Jan": 1,
     "Feb": 2,
@@ -268,6 +275,8 @@ USAGE = (
     "微博归档导入 <文件路径> - 导入 JSON 种子文件到归档库（管理员）\n"
     "微博归档查询 [uid] [页码] - 查看归档微博（每页 10 条）\n"
     "微博对账 [uid] - 核对归档完整性（管理员）\n"
+    "微博管线状态 - 查看图床/向量管线的队列与六态进度\n"
+    "微博管线补跑 - 把归档库里没跑完图床/向量的帖子重新入队（管理员）\n"
     "WebUI 控制面板：AstrBot 管理面板 - 插件 - 本插件详情页打开"
 )
 

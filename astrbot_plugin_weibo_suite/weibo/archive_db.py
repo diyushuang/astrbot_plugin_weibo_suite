@@ -547,6 +547,41 @@ class ArchiveStore:
             ).fetchall()
         return [_post_row_to_dict(row) for row in rows]
 
+    def list_posts_for_pipeline(
+        self, uid: str | None = None, *, done_state: str = "vector", limit: int = 200
+    ) -> list[dict]:
+        """列出「还有图没跑到 done_state」的帖子（图床管线补跑用）。
+
+        只回帖子关键列与进度计数：media_total 为该帖入库图片数，media_done
+        为已达到 done_state 的数量；两者相等即整帖跑完。按 created_at DESC
+        排序——新帖先跑，用户能尽快在新内容上看到效果。
+        """
+        rank = _MEDIA_STATE_RANK.get(str(done_state))
+        if rank is None:
+            raise ValueError(f"非法的媒体状态: {done_state}")
+        where = " WHERE p.uid = ?" if uid else ""
+        params: list[Any] = [rank]
+        if uid:
+            params.append(str(uid))
+        params.append(max(1, _to_int(limit, 200)))
+        with self._lock:
+            connection = self._connection()
+            if connection is None:
+                return []
+            rows = connection.execute(
+                "SELECT p.mid AS mid, p.uid AS uid, p.author AS author,"
+                " p.created_at AS created_at, p.pic_total AS pic_total,"
+                " COUNT(m.pid) AS media_total,"
+                " COALESCE(SUM(CASE WHEN m.state_rank >= ? THEN 1 ELSE 0 END), 0)"
+                " AS media_done"
+                " FROM posts p JOIN media m ON m.mid = p.mid"
+                f"{where}"
+                " GROUP BY p.mid HAVING media_done < COUNT(m.pid)"
+                " ORDER BY p.created_at DESC, p.mid DESC LIMIT ?",
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def iter_pending_text_posts(self, uid: str | None = None) -> list[dict]:
         """cleaned_at 为空（正文尚未补全/清理）的帖子。"""
         where = ["cleaned_at = ''"]

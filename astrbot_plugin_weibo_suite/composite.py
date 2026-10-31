@@ -7,6 +7,7 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context
 
 from .trace.main import ImageTracePlugin
+from .weibo.pipeline import PipelineServices
 from .weibo.plugin import WeiboMonitorPlugin
 
 
@@ -21,11 +22,37 @@ class WeiboSuitePlugin(WeiboMonitorPlugin):
         self._trace_initialized = False
         self._weibo_initialized = False
 
+    def _bind_pipeline_services(self) -> None:
+        """把溯源域的图床/向量/图库交给图床管线。
+
+        双向隔离的代价是 weibo 域不能 import trace，跨域装配点只能是这里：
+        main.py / composite.py 是计划里唯一允许跨域调用的位置。
+        """
+        trace = self._trace_plugin
+        try:
+            bed_mode = ""
+            mode_fn = getattr(trace, "_bed_mode", None)
+            if callable(mode_fn):
+                bed_mode = str(mode_fn() or "")
+            services = PipelineServices(
+                bed=getattr(trace, "bed", None),
+                vector=getattr(trace, "vector", None),
+                library=getattr(trace, "library", None),
+                hash_size=int(getattr(trace, "hash_size", 16) or 16),
+                bed_mode=bed_mode,
+            )
+        except Exception as exc:  # 绑定失败只降级管线，不能影响监控主链
+            logger.warning(f"图床管线服务绑定失败（管线降级）: {exc}")
+            return
+        self.pipeline_bind(services)
+
     async def initialize(self) -> None:
         # Trace first: the monitoring initializer installs the shared logger last,
         # so one handler captures both domains' warnings and errors.
         await self._trace_plugin.initialize()
         self._trace_initialized = True
+        # 服务要在微博域 initialize 之前绑定：那边的 pipeline_start() 会起 worker
+        self._bind_pipeline_services()
         await super().initialize()
         self._weibo_initialized = True
 

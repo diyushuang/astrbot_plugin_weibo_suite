@@ -18,6 +18,7 @@ import io
 import os
 from dataclasses import dataclass
 from functools import cache, lru_cache
+from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -280,3 +281,50 @@ def compute_features_with_mime(path: str, hash_size: int = 16) -> tuple[ImageFea
     if mime is None:
         raise ValueError("不受支持的图片格式")
     return _features_from_image(im, size), mime
+
+
+def _thumbnail_jpeg_bytes(im: Image.Image, *, max_side: int, quality: int) -> bytes:
+    """把已解码的图像压成 JPEG 缩略图字节。
+
+    - 等比缩放到长边不超过 max_side；原图更小则按原尺寸输出（不放大，
+      放大只会让体积变大而信息量不变）；
+    - 一律转 RGB：JPEG 无 alpha 通道，PNG 的透明区在缩略图里只剩颜色值；
+    - 不携带 EXIF/ICC：缩略图是纯展示用途，元数据既无用又可能带隐私；
+    - quality 收敛到 1~95，与图床侧 720px/q72 的现网口径对齐。
+    """
+    limit = int(max_side)
+    if limit > 0 and max(im.size) > limit:
+        ratio = limit / float(max(im.size))
+        target = (max(1, round(im.width * ratio)), max(1, round(im.height * ratio)))
+        thumb = im.resize(target, _RESAMPLE)
+    else:
+        thumb = im.copy()
+    if thumb.mode != "RGB":
+        thumb = thumb.convert("RGB")
+    for key in ("exif", "icc_profile"):
+        thumb.info.pop(key, None)
+    buffer = io.BytesIO()
+    thumb.save(buffer, format="JPEG", quality=max(1, min(95, int(quality))))
+    return buffer.getvalue()
+
+
+def compute_features_with_thumbnail(
+    path: str | Path,
+    hash_size: int = 16,
+    *,
+    max_side: int = 720,
+    quality: int = 72,
+) -> tuple[ImageFeatures, str, bytes]:
+    """一次解码同时完成「格式校验 + 感知特征 + 缩略图」。
+
+    与 compute_features_with_mime 逐字段一致，只多返回一份 720px JPEG 字节：
+    归档链路本来要「算特征 + 传缩略图」，各读一次文件意味着同一张图解码两次、
+    峰值内存翻倍；这里共用同一次 Image.open()。
+    """
+    size = _validate_hash_size(hash_size)
+    im, mime = _load_rgb_info(path, require_supported=True)
+    if mime is None:
+        raise ValueError("不受支持的图片格式")
+    feats = _features_from_image(im, size)
+    thumb = _thumbnail_jpeg_bytes(im, max_side=max_side, quality=quality)
+    return feats, mime, thumb

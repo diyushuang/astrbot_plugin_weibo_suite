@@ -24,6 +24,8 @@ import math
 import os
 import time
 import uuid
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlparse, urlsplit
 
@@ -65,6 +67,10 @@ IMAGE_INPUTS = ("qwen-vl", "nemotron-vl", "dataurl", "jina-image")
 # 实测本部署重名组最多 4 份，50 有足够余量；设上限是为了防止极端脏数据
 # （某个名字挂着成百上千个点）把一次反查拖成大批量拉取。
 DUPLICATE_SCAN_CAP = 50
+
+# 批量登记时同时跑几个 embed：本地 embedding 服务并发过高会排队超时甚至 OOM，
+# 4 是本地单卡服务的保守上限，也足以把「一帖 9 图」的登记压到两轮。
+BATCH_EMBED_CONCURRENCY = 4
 
 
 class VectorEngineError(Exception):
@@ -147,6 +153,25 @@ def thumb_path_key(url) -> str:
     if "file" in segments:
         segments = segments[segments.index("file") + 1 :]
     return "/".join(segments)
+
+
+@dataclass(slots=True)
+class VectorPointInput:
+    """批量登记单张图所需的全部输入。
+
+    字段与 upsert_file 的参数一一对应，多出的 thumb_url 是批量通道才用的
+    缩略图直链（写入 payload.thumb_url，供「缩略图反查原图」）。
+    """
+
+    path: str
+    point_key: str
+    image_url: str
+    thumb_url: str = ""
+    file_size: int = 0
+    width: int | None = None
+    height: int | None = None
+    mime: str = ""
+    src: str = ""
 
 
 class VectorEngine:
@@ -1100,6 +1125,40 @@ class VectorEngine:
         """Qdrant point ID 只接受整数或 UUID；用 UUID5 从内容指纹派生，保证幂等。"""
         return str(uuid.uuid5(uuid.NAMESPACE_URL, point_key))
 
+    @staticmethod
+    def _point_payload(
+        *,
+        file_name: str,
+        image_url: str,
+        path: str,
+        mime: str,
+        file_size: int,
+        width: int | None,
+        height: int | None,
+        created_at: str,
+        src: str = "",
+        thumb_url: str = "",
+    ) -> dict[str, Any]:
+        """构造 payload（单条与批量共用，保证两条通道写入结构完全一致）。
+
+        file_name 由调用方决定（单条沿用直链文件名优先的旧口径，批量按合同取
+        本地文件名）；thumb_url 只在非空时出现，避免给老点写空字段。
+        """
+        payload: dict[str, Any] = {
+            "src": src or image_url,
+            "image_url": image_url,
+            "file_name": file_name,
+            "mime": mime or _mime_for(path),
+            "size_bytes": int(file_size or 0),
+            "width": width,
+            "height": height,
+            "created_at": created_at,
+            "channel": "",
+        }
+        if thumb_url:
+            payload["thumb_url"] = thumb_url
+        return payload
+
     async def upsert_file(
         self,
         path: str,
@@ -1122,23 +1181,78 @@ class VectorEngine:
         """
         # mime 为空时保持单参调用，兼容既有调用方/测试对 embed_file(path) 的替换
         vector = await (self.embed_file(path, mime=mime) if mime else self.embed_file(path))
-        file_name = os.path.basename(unquote(urlparse(image_url).path)) or os.path.basename(path)
-        payload = {
-            "src": src or image_url,
-            "image_url": image_url,
-            "file_name": file_name,
-            "mime": mime or _mime_for(path),
-            "size_bytes": int(file_size or 0),
-            "width": width,
-            "height": height,
-            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "channel": "",
-        }
+        file_name = os.path.basename(unquote(urlparse(image_url).path)) or Path(path).name
+        payload = self._point_payload(
+            file_name=file_name,
+            path=path,
+            image_url=image_url,
+            mime=mime,
+            file_size=file_size,
+            width=width,
+            height=height,
+            created_at=time.strftime("%Y-%m-%d %H:%M:%S"),
+            src=src,
+        )
         # Qdrant point ID 只接受整数或 UUID；用 UUID5 从内容指纹派生，保证幂等
         point_id = self.point_id_for(point_key)
         url = f"{self._points_url()}?wait=true"
         body = {"points": [{"id": point_id, "vector": vector, "payload": payload}]}
         await self._request_json("PUT", url, json_body=body, headers=self._qd_headers())
+
+    async def upsert_file_batch(self, entries: list[VectorPointInput]) -> int:
+        """批量写入/覆盖向量点：并发 embed 后一次 PUT 提交整批，返回写入的条数。
+
+        归档一个帖子常有 9 张图：逐张 upsert_file 会放大成 9 次 embed 往返 + 9 次
+        HTTP PUT，整帖耗时可差一个数量级。这里把 embed 并发压到
+        BATCH_EMBED_CONCURRENCY 以内，再合并成一次 PUT。
+        point ID 由 point_key 派生，同一批里重复的 entry 按 ID 幂等去重（保留后出现
+        的那条），调用方不必自己去重。整批共用同一个 created_at 时间戳。
+        任一 embed 或 PUT 失败整体抛出：要么整批可见，要么调用方拿到异常后按原逻辑
+        回退，不留「部分图静默没入库」的半成品。
+        """
+        if not entries:
+            return 0
+        if not self.enabled:
+            self._debug_disabled(f"批量登记 {len(entries)} 张图")
+            return 0
+        pending: dict[str, VectorPointInput] = {}
+        for entry in entries:
+            pending[self.point_id_for(entry.point_key)] = entry
+        created_at = time.strftime("%Y-%m-%d %H:%M:%S")
+        semaphore = asyncio.Semaphore(BATCH_EMBED_CONCURRENCY)
+
+        async def embed_one(entry: VectorPointInput) -> list[float]:
+            async with semaphore:
+                if entry.mime:
+                    return await self.embed_file(entry.path, mime=entry.mime)
+                # mime 为空时保持单参调用，兼容既有 embed_file(path) 替换
+                return await self.embed_file(entry.path)
+
+        ordered = list(pending.items())
+        vectors = await asyncio.gather(*(embed_one(entry) for _, entry in ordered))
+        points = [
+            {
+                "id": point_id,
+                "vector": vector,
+                "payload": self._point_payload(
+                    file_name=Path(entry.path).name,
+                    path=entry.path,
+                    image_url=entry.image_url,
+                    mime=entry.mime,
+                    file_size=entry.file_size,
+                    width=entry.width,
+                    height=entry.height,
+                    created_at=created_at,
+                    src=entry.src,
+                    thumb_url=entry.thumb_url,
+                ),
+            }
+            for (point_id, entry), vector in zip(ordered, vectors, strict=True)
+        ]
+        url = f"{self._points_url()}?wait=true"
+        body = {"points": points}
+        await self._request_json("PUT", url, json_body=body, headers=self._qd_headers())
+        return len(points)
 
     async def delete_point(self, point_key: str) -> None:
         """按内容指纹删除向量点；点或集合不存在时按已删除处理。
