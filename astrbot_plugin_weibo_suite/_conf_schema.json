@@ -1,0 +1,98 @@
+{
+  "monitor": {
+    "type": "object",
+    "description": "微博监控",
+    "items": {
+      "poll_interval": {
+        "type": "int",
+        "default": 120,
+        "description": "轮询间隔（秒）"
+      },
+      "monitored_uids": {
+        "type": "list",
+        "default": [],
+        "description": "监控 UID 列表"
+      },
+      "include_retweets": {
+        "type": "bool",
+        "default": true,
+        "description": "是否包含转发帖"
+      }
+    }
+  },
+  "push": {
+    "type": "object",
+    "description": "推送",
+    "items": {
+      "at_all": {
+        "type": "bool",
+        "default": false,
+        "description": "@全体总开关"
+      },
+      "message_format": {
+        "type": "string",
+        "default": "📢 微博更新\\n【{name}】{time}\\n{weibo}\\n🔗 {link}",
+        "description": "推送模板"
+      }
+    }
+  },
+  "album": {
+    "type": "object",
+    "description": "群相册",
+    "items": {
+      "album_enabled": {
+        "type": "bool",
+        "default": false,
+        "description": "启用群相册"
+      }
+    }
+  },
+  "archive": {
+    "type": "object",
+    "description": "归档与回填",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "启用增量归档"
+      },
+      "download_originals": {
+        "type": "bool",
+        "default": true,
+        "description": "异步下载原图"
+      }
+    }
+  },
+  "pipeline": {
+    "type": "object",
+    "description": "图床与向量管线",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "default": false,
+        "description": "启用微博图床管线"
+      },
+      "naming_directory": {
+        "type": "string",
+        "default": "{category}/【微博图集@{account}】/",
+        "description": "图床目录模板"
+      },
+      "naming_file": {
+        "type": "string",
+        "default": "【微博@{account}】{date}-{index}：{title}.jpg",
+        "description": "文件名模板"
+      }
+    }
+  },
+  "copylib": {
+    "type": "object",
+    "description": "签到文案库",
+    "items": {
+      "auto_clean": {
+        "type": "bool",
+        "default": true,
+        "description": "归档后自动清洗"
+      }
+    }
+  }
+}

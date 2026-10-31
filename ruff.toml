@@ -1,0 +1,11 @@
+exclude = ["_tools", ".venv", "dist", "build"]
+line-length = 100
+target-version = "py310"
+
+[lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["BLE001", "RUF001", "RUF002", "RUF003"]
+
+[format]
+quote-style = "double"
+indent-style = "space"
