@@ -7,7 +7,7 @@ from datetime import timedelta, timezone
 from urllib.parse import quote
 
 PLUGIN_NAME = "astrbot_plugin_weibo_suite"
-PLUGIN_VERSION = "v0.3.0"
+PLUGIN_VERSION = "v0.4.0"
 
 WEIBO_HOME_URL = "https://m.weibo.cn/"
 WEIBO_INDEX_URL = "https://m.weibo.cn/api/container/getIndex"
@@ -208,6 +208,16 @@ AT_ALL_NOTICE_TTL = 1800.0  # 同一条"没 @ 的原因"多久内不重复记日
 AT_ALL_API_TIMEOUT = 8.0
 AT_ALL_ROLE_NAMES = {"owner": "群主", "admin": "管理员", "member": "普通成员"}
 
+# ---- 归档（P3）：库文件与媒体根都落在 data_dir 下 ----
+ARCHIVE_DB_NAME = "archive.db"
+ARCHIVE_DIR_NAME = "archive"
+# 原图下载队列上限：队列满即丢弃（归档是旁路，永远不能反压推送/回填）
+ARCHIVE_QUEUE_MAX = 500
+# 回填翻页安全上限：异常数据（如游标不前进）时也必须能停下来
+BACKFILL_SAFETY_MAX_PAGES = 1000
+# 媒体状态顺序即推进等级（rank 0..N），DB 层据此保证状态单调不回退
+MEDIA_STATES = ("pending", "downloaded", "album", "bed", "thumb", "vector")
+
 _MONTH_MAP = {
     "Jan": 1,
     "Feb": 2,
@@ -252,6 +262,12 @@ USAGE = (
     "微博关键词相册列表 - 查看关键词路由规则\n"
     "微博检测 - 立即检查一轮（管理员）\n"
     "微博状态 - 查看运行状态\n"
+    "微博回填 <uid> [--since YYYY-MM-DD] [--full] - 全量回填该博主历史微博（管理员）\n"
+    "微博回填状态 - 查看回填进度、统计与游标\n"
+    "微博回填停止 - 中止当前回填（管理员，游标保留可续跑）\n"
+    "微博归档导入 <文件路径> - 导入 JSON 种子文件到归档库（管理员）\n"
+    "微博归档查询 [uid] [页码] - 查看归档微博（每页 10 条）\n"
+    "微博对账 [uid] - 核对归档完整性（管理员）\n"
     "WebUI 控制面板：AstrBot 管理面板 - 插件 - 本插件详情页打开"
 )
 

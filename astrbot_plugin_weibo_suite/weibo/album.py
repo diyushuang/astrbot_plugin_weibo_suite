@@ -440,9 +440,13 @@ class AlbumMixin:
         return gif
 
     async def _download_pics(
-        self, pics: list[dict[str, str]], folder: Path
+        self, pics: list[dict[str, str]], folder: Path, post_id: str = ""
     ) -> list[tuple[dict[str, str], Path]]:
-        """整批并发下载到批次目录（实况图优先转 GIF，失败回落封面静图）。"""
+        """整批并发下载到批次目录（实况图优先转 GIF，失败回落封面静图）。
+
+        post_id 为空或归档库未就绪时行为与旧版完全一致；命中归档本地文件时
+        直接复用、不发下载请求（实况图例外：还要转 GIF）。
+        """
         free_mb = (
             await asyncio.to_thread(lambda: shutil.disk_usage(self._album_tmp_root()).free)
         ) // 1048576
@@ -455,6 +459,16 @@ class AlbumMixin:
 
         async def one(pic: dict[str, str]) -> tuple[dict[str, str], Path] | None:
             async with sem:
+                # 本地优先：归档库里已落盘的原图直接复用。live 图要转 GIF，仍走
+                # 原逻辑（封面静图也在归档里，但转 GIF 需要原视频段）。
+                local = (
+                    self.archive_local_media(post_id, str(pic.get("pid") or ""))
+                    if post_id
+                    else None
+                )
+                if local is not None and pic.get("kind") != "live":
+                    logger.info(f"相册图片命中本地归档，跳过下载: {local}")
+                    return pic, local
                 if pic.get("kind") == "live" and want_gif and pic.get("video_url"):
                     gif = await self._live_gif(pic, folder)
                     if gif is not None:
@@ -644,7 +658,7 @@ class AlbumMixin:
         )
         try:
             dl_t0 = time.monotonic()
-            files = await self._download_pics(todo, folder)
+            files = await self._download_pics(todo, folder, post_id)
             dl_sec = time.monotonic() - dl_t0
             if not files:
                 await self._diag(f"批次 {folder.name}：{len(todo)} 张全部下载失败")

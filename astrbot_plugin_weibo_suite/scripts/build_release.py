@@ -11,7 +11,7 @@ import zipfile
 from pathlib import Path
 
 PLUGIN_NAME = "astrbot_plugin_weibo_suite"
-EXPECTED_VERSION = "v0.3.0"
+EXPECTED_VERSION = "v0.4.0"
 
 # 目录项以 / 结尾，表示递归收录；文件项必须精确匹配。开发/测试/缓存文件不在白名单。
 PLUGIN_FILES = (
@@ -72,6 +72,13 @@ def verify_manifest(root: Path | None = None) -> list[Path]:
     constants = (base / "constants.py").read_text(encoding="utf-8")
     if f'PLUGIN_VERSION = "{EXPECTED_VERSION}"' not in constants:
         raise ValueError(f"constants.py 版本与 {EXPECTED_VERSION} 不一致")
+    # 微博域历史上自己又定义了一份 PLUGIN_VERSION（日志里显示用）；两处不同步
+    # 会让"版本号到底是多少"取决于谁读的，这里一并校验。
+    domain_constants = base / "weibo" / "constants.py"
+    if domain_constants.is_file():
+        text = domain_constants.read_text(encoding="utf-8")
+        if 'PLUGIN_VERSION = "' in text and f'PLUGIN_VERSION = "{EXPECTED_VERSION}"' not in text:
+            raise ValueError(f"weibo/constants.py 版本与 {EXPECTED_VERSION} 不一致")
 
     files = iter_manifest_files(base)
     present = {path.relative_to(base).as_posix() for path in files}

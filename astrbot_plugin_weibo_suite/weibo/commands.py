@@ -1,8 +1,47 @@
-"""「微博」17 条管理指令。"""
+"""「微博」23 条管理指令。"""
 
 from __future__ import annotations
 
 from .runtime import *
+
+# 归档查询每页条数（archive_query 的 limit 默认也是 10，这里显式固化分页口径）
+ARCHIVE_QUERY_PAGE_SIZE = 10
+
+
+def _cmd_args(event: AstrMessageEvent) -> list[str]:
+    """返回指令名之后的参数词（与框架一致用空白正则分词）。"""
+    tokens = re.split(r"\s+", (event.message_str or "").strip())
+    return tokens[1:] if len(tokens) > 1 else []
+
+
+def _parse_backfill_args(args: list[str], uid_text: str) -> tuple[str, str, bool]:
+    """解析 微博回填 的 <uid> [--since 日期] [--full]。"""
+    uid = _extract_uid(uid_text)
+    since = ""
+    full = False
+    for idx, tok in enumerate(args):
+        if tok in {"--full", "-f"}:
+            full = True
+        elif tok.startswith("--since="):
+            since = tok.split("=", 1)[1].strip()
+        elif tok == "--since" and idx + 1 < len(args):
+            since = args[idx + 1].strip()
+    if not uid:
+        for tok in args:
+            if tok.startswith("-"):
+                continue
+            uid = _extract_uid(tok)
+            if uid:
+                break
+    return uid or "", since, full
+
+
+def _import_path(event: AstrMessageEvent, path_text: str) -> str:
+    """取 微博归档导入 的剩余文本（路径可能含空格，不能只取第一个 token）。"""
+    raw = (event.message_str or "").strip()
+    tokens = re.split(r"\s+", raw)
+    path = raw[len(tokens[0]) :].strip() if len(tokens) > 1 else path_text.strip()
+    return path.strip().strip('"').strip("'")
 
 
 class CommandsMixin:
@@ -445,6 +484,20 @@ class CommandsMixin:
         lines.append(f"监控账号：{len(self.accounts)} 个")
         lines.append(f"推送目标：{len(self._sessions())} 个")
         lines.append(f"待推送/重试：{len(self.pending)} 条")
+        store = self.archive_store()
+        if store is None:
+            lines.append("归档：未启用")
+        else:
+            try:
+                posts_n = store.count_posts()
+                media = store.media_stats()
+                lines.append(
+                    f"归档：{posts_n} 帖 / {int(media.get('total') or 0)} 图"
+                    f"（已落盘 {int(media.get('downloaded') or 0)}）"
+                )
+            except Exception as e:  # 归档统计坏了不能拖垮状态指令
+                logger.warning(f"读取归档统计失败: {e!r}")
+                lines.append("归档：统计读取失败")
         kw_rules = self._album_keyword_rules()
         kw_b = sum(1 for u, *_ in kw_rules if u is not None)
         lines.append(
@@ -471,3 +524,147 @@ class CommandsMixin:
         else:
             lines.append("控制面板：当前 AstrBot 版本不支持插件页面，未启用")
         yield event.plain_result("\n".join(lines))
+
+    # ---------------- 归档（P3） ----------------
+
+    @weibo.command("回填")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def weibo_backfill(self, event: AstrMessageEvent, uid_text: str = ""):
+        """全量回填某博主的全部历史微博到归档库（管理员）"""
+        uid, since, full = _parse_backfill_args(_cmd_args(event), uid_text)
+        if not uid:
+            yield event.plain_result(
+                "用法：微博回填 <uid> [--since YYYY-MM-DD] [--full]\n"
+                "例如：微博回填 1234567890 --since 2024-01-01"
+            )
+            return
+        # archive_backfill 自己也会拒绝并发，这里先挡一次：直接给出人话提示，
+        # 而不是让指令看起来"开始了"却立刻失败
+        if self.archive_backfill_running():
+            yield event.plain_result(
+                "已有回填任务在跑（微博回填状态 查看进度，微博回填停止 可中止）"
+            )
+            return
+        self._backfill_stop = False
+
+        async def _run() -> None:
+            # 后台任务：任何异常都只能记日志，否则会变成无人 await 的 task 异常
+            try:
+                await self.archive_backfill(uid, since=since, full=full)
+            except Exception as e:
+                logger.warning(f"回填任务异常: {e!r}")
+
+        self._backfill_task = asyncio.create_task(_run())
+        yield event.plain_result(
+            f"已开始回填 {uid}"
+            + (f"（since {since}）" if since else "")
+            + (f"（full {'开' if full else '关'}）" if full else "")
+            + "；微博回填状态 查看进度，微博回填停止 可中止"
+        )
+
+    @weibo.command("回填状态")
+    async def weibo_backfill_status(self, event: AstrMessageEvent):
+        """查看回填进度、最近一次统计与游标"""
+        running = self.archive_backfill_running()
+        lines = ["微博回填状态：", f"任务：{'进行中' if running else '空闲'}"]
+        stats = getattr(self, "_backfill_last_stats", None)
+        if stats:
+            formatted = self.format_backfill(stats)
+            if formatted:
+                lines.append(formatted.rstrip())
+        else:
+            lines.append("最近统计：暂无（微博回填 <uid> 开始）")
+        cursor_lines: list[str] = []
+        store = self.archive_store()
+        if store is not None:
+            for uid in list(self.accounts):
+                try:
+                    cur = store.get_cursor(uid)
+                except Exception as e:
+                    logger.warning(f"读取回填游标失败: {e!r}")
+                    continue
+                if not cur:
+                    continue
+                cursor_lines.append(
+                    f"{self._account_name(uid)}（{uid}）{cur.get('status', 'running')} "
+                    f"下一页 {int(cur.get('next_page') or 1)}"
+                )
+        lines.append("游标：" + ("；".join(cursor_lines) if cursor_lines else "无"))
+        yield event.plain_result("\n".join(lines))
+
+    @weibo.command("回填停止")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def weibo_backfill_stop(self, event: AstrMessageEvent):
+        """请求停止正在跑的回填（管理员，游标保留可续跑）"""
+        self.archive_backfill_stop()
+        yield event.plain_result("已请求停止回填：当前页处理完即退出，游标保留可续跑")
+
+    @weibo.command("归档导入")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def weibo_archive_import(self, event: AstrMessageEvent, path_text: str = ""):
+        """把 JSON 种子文件导入归档库（管理员）"""
+        path = _import_path(event, path_text)
+        if not path:
+            yield event.plain_result("用法：微博归档导入 <文件路径>")
+            return
+        yield event.plain_result("正在导入归档…")
+        stats = await self.archive_import_json(path)
+        if stats.get("error"):
+            yield event.plain_result(f"导入失败：{stats['error']}")
+            return
+        yield event.plain_result(self.format_import(stats))
+
+    @weibo.command("归档查询")
+    async def weibo_archive_query_cmd(self, event: AstrMessageEvent, uid_text: str = ""):
+        """查看归档库里的微博（每页 10 条）"""
+        args = _cmd_args(event)
+        uid = _extract_uid(uid_text) or ""
+        page = 1
+        rest = args
+        if uid and args and _extract_uid(args[0]) == uid:
+            rest = args[1:]
+        elif not uid:
+            for idx, tok in enumerate(args):
+                cand = _extract_uid(tok)
+                if cand:
+                    uid = cand
+                    rest = args[idx + 1 :]
+                    break
+        for tok in rest:
+            if tok.isdigit():
+                page = max(1, min(int(tok), 9999))
+                break
+        offset = (page - 1) * ARCHIVE_QUERY_PAGE_SIZE
+        rows = await self.archive_query(uid, limit=ARCHIVE_QUERY_PAGE_SIZE, offset=offset)
+        if not rows:
+            yield event.plain_result(f"归档暂无微博（{uid or '全部账号'}，第 {page} 页）")
+            return
+        lines = [f"微博归档（{uid or '全部账号'}，第 {page} 页，{len(rows)} 条）："]
+        for row in rows:
+            created = int(row.get("created_at") or 0)
+            when = (
+                datetime.fromtimestamp(created, tz=_TZ_CN).strftime("%Y-%m-%d %H:%M")
+                if created
+                else (str(row.get("created_raw") or "") or "时间未知")
+            )
+            text = re.sub(r"\s+", " ", str(row.get("text") or "")).strip()
+            snippet = text[:40] + ("…" if len(text) > 40 else "")
+            pics = row.get("pics") or []
+            author = row.get("author") or row.get("uid") or "未知"
+            lines.append(f"{when} @{author} {snippet or '（无正文）'}（{len(pics)} 图）")
+        yield event.plain_result("\n".join(lines))
+
+    @weibo.command("对账")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def weibo_archive_reconcile(self, event: AstrMessageEvent, uid_text: str = ""):
+        """核对归档完整性并列出缺口（管理员）"""
+        args = _cmd_args(event)
+        uid = _extract_uid(uid_text) or ""
+        if not uid:
+            for tok in args:
+                uid = _extract_uid(tok) or ""
+                if uid:
+                    break
+        report = await self.archive_reconcile(uid)
+        yield event.plain_result(self.format_reconcile(report))
+

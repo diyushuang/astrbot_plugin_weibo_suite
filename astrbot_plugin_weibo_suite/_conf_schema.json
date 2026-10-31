@@ -60,6 +60,26 @@
         "type": "bool",
         "default": true,
         "description": "异步下载原图"
+      },
+      "auto_archive": {
+        "type": "bool",
+        "default": true,
+        "description": "监控命中后自动写入归档账本"
+      },
+      "page_delay": {
+        "type": "float",
+        "default": 3.0,
+        "description": "全量回填页间最小间隔（秒）"
+      },
+      "since": {
+        "type": "string",
+        "default": "",
+        "description": "回填默认起始日期（YYYY-MM-DD，空为到底）"
+      },
+      "download_concurrency": {
+        "type": "int",
+        "default": 1,
+        "description": "归档原图下载并发（1 = 串行，最稳）"
       }
     }
   },

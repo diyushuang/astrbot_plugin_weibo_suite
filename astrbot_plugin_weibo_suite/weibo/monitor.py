@@ -258,6 +258,14 @@ class MonitorMixin:
             await self._apply_video(post)
             videos_enabled = self._videos_enabled()
             extracted = post.get("videos") or []
+            # 增量归档：挂在「通过全部过滤、确定要推」之后，pics/videos 已补全。
+            # 归档是旁路：任何异常只 warning，绝不阻塞推送；archive_post 内部只
+            # 落库 + 入队，不再发网络请求，所以这里不会拖慢 _check_account。
+            if self._archive_enabled() and self._archive_bool("auto_archive", True):
+                try:
+                    await self.archive_post(post)
+                except Exception as e:  # 归档失败绝不阻塞推送
+                    logger.warning(f"归档失败（不影响推送）: {e}")
             self.pending.append(
                 {
                     "post_id": post["id"],

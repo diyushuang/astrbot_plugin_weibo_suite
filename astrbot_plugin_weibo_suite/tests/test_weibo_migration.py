@@ -36,7 +36,30 @@ def test_weibo_domain_has_expected_modules():
     assert expected <= {path.name for path in root.glob("*.py")}
 
 
-def test_all_seventeen_weibo_commands_are_preserved():
+# P2 平移的 17 条微博指令：只保证不丢，不锁死总数。
+# P3 归档又加了 6 条，P4/P5 还会继续加；把总数写死会让每次扩展都踩红。
+LEGACY_WEIBO_COMMANDS = {
+    "weibo_help",
+    "weibo_bind",
+    "weibo_unbind",
+    "weibo_add",
+    "weibo_remove",
+    "weibo_list",
+    "weibo_album_bind",
+    "weibo_album_unbind",
+    "weibo_album_rules_cmd",
+    "weibo_album_list",
+    "weibo_keyword_album",
+    "weibo_keyword_album_remove",
+    "weibo_blogger_keyword_album",
+    "weibo_blogger_keyword_album_remove",
+    "weibo_keyword_album_list",
+    "weibo_check",
+    "weibo_status",
+}
+
+
+def test_all_legacy_weibo_commands_are_preserved():
     root = Path(__file__).resolve().parents[1] / "weibo"
     tree = ast.parse((root / "commands.py").read_text(encoding="utf-8"))
     methods: set[str] = set()
@@ -47,25 +70,8 @@ def test_all_seventeen_weibo_commands_are_preserved():
             text = ast.unparse(decorator)
             if text.startswith("weibo.command("):
                 methods.add(node.name)
-    assert methods == {
-        "weibo_help",
-        "weibo_bind",
-        "weibo_unbind",
-        "weibo_add",
-        "weibo_remove",
-        "weibo_list",
-        "weibo_album_bind",
-        "weibo_album_unbind",
-        "weibo_album_rules_cmd",
-        "weibo_album_list",
-        "weibo_keyword_album",
-        "weibo_keyword_album_remove",
-        "weibo_blogger_keyword_album",
-        "weibo_blogger_keyword_album_remove",
-        "weibo_keyword_album_list",
-        "weibo_check",
-        "weibo_status",
-    }
+    missing = LEGACY_WEIBO_COMMANDS - methods
+    assert not missing, f"P2 平移的微博指令在后续扩展中丢失: {sorted(missing)}"
 
 
 def test_mixins_compose_cooperatively(make_weibo_plugin):

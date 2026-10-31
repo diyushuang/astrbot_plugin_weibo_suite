@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from .album import AlbumMixin
 from .api import ApiMixin
+from .archive import ArchiveMixin
+from .archive_db import ArchiveStore
 from .commands import CommandsMixin
 from .monitor import MonitorMixin
 from .pusher import PusherMixin
@@ -17,6 +19,7 @@ class WeiboMonitorPlugin(
     MonitorMixin,
     PusherMixin,
     AlbumMixin,
+    ArchiveMixin,
     CommandsMixin,
     Star,
 ):
@@ -127,9 +130,26 @@ class WeiboMonitorPlugin(
         # 同一会话同一条原因的记录时间戳：投递失败/权限不足会连续命中，不做去重
         # 就是每轮推送往日志和动态里各刷一条
         self._at_all_notices: dict[str, float] = {}
+        # ---- 归档（P3）：这里只建宿主状态，业务全部在 archive.py（ArchiveMixin）----
+        # 有界队列：满即丢弃，归档永远是旁路，不能反压推送或回填。
+        self._archive_dl_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=ARCHIVE_QUEUE_MAX)
+        self._archive_worker_task: asyncio.Task | None = None
+        # 回填停止标记（指令置位，回填循环在当前页处理完后退出）
+        self._backfill_stop = False
+        self._backfill_task: asyncio.Task | None = None
+        self._archive: ArchiveStore | None = None
+        # 最近一次回填统计：archive.py 写，微博回填状态 指令读
+        self._backfill_last_stats: dict[str, Any] = {}
 
     async def initialize(self):
         self._data_dir = StarTools.get_data_dir(PLUGIN_NAME)
+        # 归档库先于轮询打开：增量归档钩子挂在 _check_account 上，store 未就绪
+        # 时钩子会静默跳过。archive_open 自身不抛，这里只是双保险：归档坏了
+        # 也绝不能让插件起不来。
+        try:
+            await self.archive_open()
+        except Exception as e:  # 归档失败不阻断启动
+            logger.warning(f"{PLUGIN_NAME} 归档库打开失败（归档功能降级）: {e}")
         self._load_state()
         # 存量配置迁移放在 state 读取之后：迁移标记就在 state.json 里，
         # 先读标记才能保证"迁移过就永不再动"的语义
@@ -229,6 +249,17 @@ class WeiboMonitorPlugin(
         if self._video_tasks:
             await asyncio.gather(*self._video_tasks, return_exceptions=True)
             self._video_tasks.clear()
+        # 归档：先撤回填（它可能正在用 HTTP 翻页/下载），再关下载 worker 与 SQLite。
+        # 顺序在关 HTTP 会话之前，否则在途下载会撞上已关闭的 session。
+        if self._backfill_task and not self._backfill_task.done():
+            self._backfill_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._backfill_task
+            self._backfill_task = None
+        try:
+            await self.archive_close()
+        except Exception as e:  # 关闭失败不影响其余收尾
+            logger.warning(f"{PLUGIN_NAME} 归档库关闭失败: {e}")
         if self._state_save_task and not self._state_save_task.done():
             self._state_save_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
