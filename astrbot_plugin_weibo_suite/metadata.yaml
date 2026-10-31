@@ -2,7 +2,7 @@ name: astrbot_plugin_weibo_suite
 display_name: 微博全链路助手
 desc: 整合微博监控转发、整条微博归档、图床与向量管线、签到文案库和图片溯源，并提供统一管理面板。
 short_desc: 微博监控转发、归档、图床向量、签到文案与图片溯源的一体化插件
-version: v0.2.0
+version: v0.3.0
 author: diyushuang
 repo: https://github.com/diyushuang/astrbot_plugin_weibo_suite
 astrbot_version: ">=4.28.2,<5"

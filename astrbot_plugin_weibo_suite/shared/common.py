@@ -7,8 +7,11 @@ image_bed / vector_search / s3_store 取用，避免同一份真值表与解析
 
 from __future__ import annotations
 
+import json
 import re
+import time
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 
 USER_AGENT = "AstrBot-Plugin-WeiboSuite/1.0"
 
@@ -152,3 +155,85 @@ def sanitize_error_text(value: Any, limit: int = 200) -> str:
     if len(text) > limit:
         text = text[:limit].rstrip() + "…"
     return text
+
+
+def redact_proxy(url: str) -> str:
+    """Hide credentials in a proxy URL before it reaches logs or the UI."""
+    parsed = urlparse(url)
+    if not (parsed.username or parsed.password):
+        return url
+    host = parsed.netloc.rsplit("@", 1)[-1]
+    return urlunparse(parsed._replace(netloc=f"***@{host}"))
+
+
+def parse_umo(umo: str) -> tuple[str, str, str]:
+    """Split AstrBot unified_msg_origin: platform_id:message_type:session_id."""
+    parts = (umo or "").split(":", 2)
+    return (parts[0], parts[1], parts[2]) if len(parts) == 3 else ("", "", "")
+
+
+def parse_cookie_string(raw: str) -> dict[str, str]:
+    """Parse ``k1=v1; k2=v2`` into a dictionary, preserving the last duplicate."""
+    cookies: dict[str, str] = {}
+    for part in (raw or "").split(";"):
+        key, sep, value = part.strip().partition("=")
+        if sep and key.strip():
+            cookies[key.strip()] = value.strip()
+    return cookies
+
+
+def merge_response_cookies(target: dict[str, str], response: Any) -> None:
+    """Merge Set-Cookie values from an aiohttp response, ignoring foreign domains."""
+    for key, morsel in response.cookies.items():
+        domain = morsel.get("domain") or ""
+        if domain and "weibo.cn" not in domain and "weibo.com" not in domain:
+            continue
+        target[str(key)] = str(morsel.value)
+
+
+def header_int(raw: Any) -> int:
+    """Parse an HTTP integer header; missing or invalid values become zero."""
+    try:
+        return int(str(raw or "").strip())
+    except (TypeError, ValueError):
+        return 0
+
+
+def jsonp_data(body: str) -> dict[str, Any] | None:
+    """Parse a JSONP response such as ``callback({...})``."""
+    match = re.search(r"\((\{.*\})\)\s*;?\s*$", (body or "").strip())
+    if not match:
+        return None
+    try:
+        value = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def album_rule_token(uid: str, gid: str, album: str) -> str:
+    """Serialize one album routing rule; the album tail may contain colons."""
+    return f"{uid}:{gid}:{album}"
+
+
+def keyword_rules_upsert(
+    rules: list[tuple[str | None, str, str, str]],
+    uid: str | None,
+    keyword: str,
+    gid: str,
+    album: str,
+) -> bool:
+    """Insert or replace a keyword route. Return True when an existing rule changed."""
+    for index, (scope_uid, existing_keyword, existing_gid, _album) in enumerate(rules):
+        if (scope_uid, existing_keyword, existing_gid) == (uid, keyword, gid):
+            rules[index] = (uid, keyword, gid, album)
+            return True
+    rules.append((uid, keyword, gid, album))
+    return False
+
+
+def cooldown_remaining_minutes(until_ts: float, now: float | None = None) -> int:
+    """Whole minutes left in a cooldown, rounded up; zero once it has expired."""
+    current = time.time() if now is None else now
+    remaining = float(until_ts or 0) - current
+    return max(0, int((remaining + 59.999999) // 60))

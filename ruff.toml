@@ -9,3 +9,7 @@ ignore = ["BLE001", "RUF001", "RUF002", "RUF003"]
 [format]
 quote-style = "double"
 indent-style = "space"
+
+[lint.per-file-ignores]
+"astrbot_plugin_weibo_suite/weibo/*.py" = ["F403", "F405"]
+"astrbot_plugin_weibo_suite/weibo/runtime.py" = ["F401", "RUF100"]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import re
 
 # "协议端没有这个接口"的真实文案：NapCat 对未实现的 action 抛 `不支持的API <action>`(retcode 1404)。
@@ -188,11 +189,16 @@ def _fail(action: str, detail: str, code: int = 0, note: str = "") -> NapCatErro
     )
 
 
-def _b64_payload(raw_b64: bytes) -> str:
-    """base64 字节拼成 NapCat 认的载荷串。
+def b64_payload(raw: bytes, *, prefix: bool = True) -> str:
+    """Encode bytes for NapCat in one place.
 
-    decode 出来的 ASCII 字符串与拼接结果又是两份 1.33 倍图片体积的拷贝（30MB
-    的原图各约 40MB）。它和 read_bytes / b64encode 一样是重活，必须一起丢线程池
-    ——留在事件循环里，并发上传几路就是每次都把整个 AstrBot 钉住几十到几百毫秒。
+    ``prefix=True`` returns the ``base64://`` file payload used by album/file
+    uploads. ``prefix=False`` returns the bare base64 value required by
+    AstrBot's ``Video.fromBase64``. Call this through ``asyncio.to_thread`` for
+    large media so encoding never blocks the event loop.
     """
-    return "base64://" + raw_b64.decode("ascii")
+    encoded = base64.b64encode(raw).decode("ascii")
+    return "base64://" + encoded if prefix else encoded
+
+
+_b64_payload = b64_payload

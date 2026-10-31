@@ -79,6 +79,12 @@ class _At:
         self.qq = qq
 
 
+class _AtAll:
+    def __init__(self, **kwargs):
+        self.qq = "all"
+        self.__dict__.update(kwargs)
+
+
 class _Video:
     def __init__(self, *, url=None):
         self.url = url
@@ -86,6 +92,33 @@ class _Video:
     @classmethod
     def fromURL(cls, url):
         return cls(url=url)
+
+    @classmethod
+    def fromFileSystem(cls, path, **kwargs):
+        return cls(url=None, **kwargs)
+
+    @classmethod
+    def fromBase64(cls, data, **kwargs):
+        return cls(url=None, **kwargs)
+
+
+class _Message:
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+
+
+class _MessageChain:
+    def __init__(self, chain=None, type_=None):
+        self.chain = list(chain or [])
+        self.type = type_
+
+    def message(self, text):
+        self.chain.append(_Plain(text))
+        return self
+
+    def __iter__(self):
+        return iter(self.chain)
 
 
 class _File:
@@ -130,6 +163,31 @@ def _permission_type(permission):
     return decorator
 
 
+class _CommandGroupNode:
+    def __init__(self, name, func=None):
+        self.name = name
+        self.func = func
+
+    def __getattr__(self, item):
+        def factory(*args, **kwargs):
+            def decorator(func):
+                func.command_group_name = self.name
+                func.command_name = kwargs.get("name") or (args[0] if args else item)
+                func.command_alias = set(kwargs.get("alias") or ())
+                return func
+
+            return decorator
+
+        return factory
+
+
+def _command_group(name):
+    def decorator(func):
+        return _CommandGroupNode(name, func)
+
+    return decorator
+
+
 class _PermissionType:
     ADMIN = "admin"
 
@@ -137,6 +195,7 @@ class _PermissionType:
 class _Filter:
     PermissionType = _PermissionType
     command = staticmethod(_command)
+    command_group = staticmethod(_command_group)
     llm_tool = staticmethod(_llm_tool)
     permission_type = staticmethod(_permission_type)
 
@@ -162,6 +221,26 @@ class _Context:
 class _Star:
     def __init__(self, context):
         self.context = context
+        self.kv = {}
+
+    async def get_kv_data(self, key, default=None):
+        return self.kv.get(key, default)
+
+    async def put_kv_data(self, key, value):
+        self.kv[key] = value
+
+    async def delete_kv_data(self, key):
+        self.kv.pop(key, None)
+
+
+class _StarTools:
+    @staticmethod
+    def get_data_dir(name):
+        from pathlib import Path
+
+        path = Path(_DATA_DIR["path"]) / "plugin_data" / name
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
 
 class _AstrBotConfig(dict):
@@ -186,17 +265,30 @@ def _get_astrbot_data_path():
 
 _install("astrbot")
 _install("astrbot.api", logger=logging.getLogger("astrbot"), AstrBotConfig=_AstrBotConfig)
-_install("astrbot.api.event", AstrMessageEvent=_AstrMessageEvent, filter=_Filter)
+_install(
+    "astrbot.api.event",
+    AstrMessageEvent=_AstrMessageEvent,
+    MessageChain=_MessageChain,
+    filter=_Filter,
+)
 _install(
     "astrbot.api.message_components",
     Image=_Image,
     Reply=_Reply,
     Plain=_Plain,
     At=_At,
+    AtAll=_AtAll,
     Video=_Video,
     File=_File,
+    Message=_Message,
 )
-_install("astrbot.api.star", Context=_Context, Star=_Star, register=_register)
+_install(
+    "astrbot.api.star",
+    Context=_Context,
+    Star=_Star,
+    StarTools=_StarTools,
+    register=_register,
+)
 _install("astrbot.core")
 _install("astrbot.core.utils")
 _install("astrbot.core.utils.astrbot_path", get_astrbot_data_path=_get_astrbot_data_path)
@@ -335,6 +427,17 @@ class MockImgBed:
     @property
     def random_queries(self):
         return self._state["random_queries"]
+
+
+@pytest.fixture
+def make_weibo_plugin(data_dir):
+    """构造真实拆包后的微博监控类；不调用 initialize，避免测试联网。"""
+    from astrbot_plugin_weibo_suite.weibo.plugin import WeiboMonitorPlugin
+
+    def factory(**overrides):
+        return WeiboMonitorPlugin(_Context(), FakeConfig(overrides))
+
+    return factory
 
 
 @pytest.fixture

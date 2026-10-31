@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from astrbot_plugin_weibo_suite.shared.napcat import (
     NapCatError,
-    _b64_payload,
     _classify,
     _transient,
+    b64_payload,
 )
 
 
@@ -28,7 +28,8 @@ def test_classifier_marks_missing_action_and_file_problem():
 
 
 def test_base64_payload_contract():
-    assert _b64_payload(b"YWJj") == "base64://YWJj"
+    assert b64_payload(b"abc") == "base64://YWJj"
+    assert b64_payload(b"abc", prefix=False) == "YWJj"
 
 
 def test_napcat_error_preserves_flags():
