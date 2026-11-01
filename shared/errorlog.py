@@ -36,6 +36,12 @@ _WRITE_FAIL_LOG_INTERVAL = 60.0
 # 落到 logging.lastResort（stderr），容器日志里仍看得见。
 _WRITER_LOG = logging.getLogger(f"{PLUGIN_THREAD_TAG}.errlog-writer")
 _WRITER_LOG.propagate = False
+# 必须自己钉住级别，不能留给"NOTSET 就继承根日志器"的默认行为：这条告警是
+# "磁盘满了、留存其实已经失效"的唯一信号，宿主把根日志器调到 ERROR（配置里
+# 把日志级别调高是常见操作）时，继承来的有效级别会把 warning 直接吞掉，面板
+# 仍显示"已留存 N 条"。CI 的 Python 3.10 job 就是这样红的（旧版 isEnabledFor
+# 的缓存还会让根级别变化在子日志器上滞后生效）。
+_WRITER_LOG.setLevel(logging.WARNING)
 
 
 def _redact_error_msg(value: Any, limit: int = ERRLOG_MSG_LIMIT) -> str:

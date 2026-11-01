@@ -2,7 +2,22 @@
 
 ## Unreleased
 
-暂无。
+### 修掉的真 bug
+
+- **宿主把日志级别调高后，写盘失败的唯一告警被静默吞掉**（`shared/errorlog.py`）：
+  `_WRITER_LOG` 从不设置自己的 level，"NOTSET 就继承根日志器" 意味着它的可见性
+  由全局日志级别决定。AstrBot 用户把日志级别调到 ERROR 之后，"磁盘满了、留存
+  其实已经失效" 这条告警不再出现，而面板仍显示"已留存 N 条"——正是这块代码
+  当初要修的那个误导。改为 `setLevel(WARNING)`，把上报级别变成模块自己的契约。
+  回归用例：`tests/test_errorlog_write_failure.py::test_write_failure_survives_strict_root_logger`。
+
+### CI
+
+- 首次真正跑通 GitHub Actions，暴露并修掉上面这条：`test (3.10)` job 的三条
+  errorlog 用例红、`test (3.12)` 与 `real-astrbot` 绿。表象是版本差异，实际是
+  `_WRITER_LOG` 依赖根日志器级别；旧版 `Logger.isEnabledFor` 的缓存在根级别
+  变化后仍滞后生效，于是同一份代码在不同版本上表现不同。本地用「把根日志器
+  收紧到 ERROR」的插件复现出与 CI 完全一致的三红，修完两处都转绿。
 
 ## v0.9.0 - 2026-11-01
 

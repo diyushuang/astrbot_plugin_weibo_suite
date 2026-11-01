@@ -83,6 +83,31 @@ def test_write_failure_is_reported_not_swallowed(broken_store, writer_records):
     assert writer_records.records[0].levelno == logging.WARNING
 
 
+def test_write_failure_survives_strict_root_logger(broken_store, writer_records):
+    """宿主把根日志器收紧到 ERROR 时，写盘失败仍要上报。
+
+    回归用例，对应 CI 首次运行在 Python 3.10 上红的三条：`_WRITER_LOG` 以前
+    不设自己的 level，"NOTSET 继承根日志器" 让它的可见性跟着全局日志级别走。
+    AstrBot 用户把日志级别调到 ERROR 之后，"磁盘满了、留存其实已经失效" 这条
+    唯一告警会被静默吞掉，面板依旧显示"已留存 N 条"——正是这块代码当初要修的
+    那个误导。写盘失败的上报级别是模块自己的契约，不该由宿主决定。
+    """
+    _plugin, store, logger, _path = broken_store
+    root = logging.getLogger()
+    original_level = root.level
+    root.setLevel(logging.ERROR)
+    try:
+        logger.warning("根日志器收紧后的告警")
+        assert store.flush_to_disk() is True, "写盘失败不应把 flush 变成阻塞/失败"
+    finally:
+        root.setLevel(original_level)
+
+    assert len(writer_records.records) == 1, (
+        f"根日志器级别不得影响写盘失败上报，实际 {[r.getMessage() for r in writer_records.records]}"
+    )
+    assert "写入 errors.log 失败" in writer_records.records[0].getMessage()
+
+
 def test_write_failure_does_not_feed_itself_back(broken_store, writer_records):
     """上报日志不得回流进自己的 handler（会形成“失败→记日志→再失败”的活锁）。"""
     _plugin, store, logger, _path = broken_store

@@ -68,3 +68,11 @@ state.json
 *.pem
 *.key
 id_rsa*
+
+# Windows 设备名文件：在 Git Bash 里写 `2>NUL` 会在仓库根凭空造出一个名叫 NUL
+# 的普通文件，而 Win32 又按设备名解析它——`git add -A` 会报
+# "short read while indexing NUL" 并让整次暂存失败，删也删不掉。
+NUL
+CON
+PRN
+AUX
