@@ -119,11 +119,6 @@ def post_params(sec_uid: str, *, count: int = C.FETCH_POST_LIMIT) -> dict[str, s
     }
 
 
-def post_url(sec_uid: str, *, count: int = C.FETCH_POST_LIMIT) -> str:
-    query = "&".join(f"{k}={v}" for k, v in post_params(sec_uid, count=count).items())
-    return f"https://www.douyin.com{POST_API_PATH}?{query}"
-
-
 def _first_url(node: Any) -> str:
     """抖音的媒体字段几乎都是 `{url_list: [...]}`，取最后一个（通常最清晰）。"""
     if isinstance(node, str):

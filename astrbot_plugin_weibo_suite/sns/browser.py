@@ -141,9 +141,9 @@ class BrowserSession:
             self._contexts[platform] = context
             self._channel = channel or "chromium"
             self._error = ""
+            # 只记平台名：profile 目录是本机绝对路径，日志会被打包发给别人排障。
             self.log.info(
-                f"[sns] 浏览器已就绪（{self._channel}，有头={self.headed}，"
-                f"profile={self._platform_dir(platform)}）"
+                f"[sns] 浏览器已就绪（{self._channel}，有头={self.headed}，平台={platform}）"
             )
             return
         self._error = "；".join(errors)
@@ -277,7 +277,8 @@ class BrowserSession:
             "running": self.running,
             "channel": self.channel,
             "headed": self.headed,
-            "profile_root": str(self.profile_root),
+            # 不回 profile_root：`snapshot()` 会把它原样塞进 /sns/overview 的
+            # JSON，等于把本机目录结构告诉浏览器。
             "error": self._error,
             "pages": sorted(self._pages.keys()),
         }

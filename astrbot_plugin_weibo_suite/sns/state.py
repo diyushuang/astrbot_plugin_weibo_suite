@@ -25,7 +25,9 @@ logger = logging.getLogger("astrbot_plugin_weibo_suite.sns")
 
 # 已知的标量统计键。load() 只保留这些键：面板/服务层只读它们，
 # 手工编辑混进来的未知字段一律丢掉，免得 bump() 每轮都炸。
-_STAT_KEYS = ("check", "push_ok", "push_fail", "risk", "baseline")
+# push_unknown 单列：unknown 是"可能已送达"，既不能算失败重试（会重复推送），
+# 也不能记成成功（面板上的推送量会虚高）。
+_STAT_KEYS = ("check", "push_ok", "push_fail", "push_unknown", "risk", "baseline")
 
 
 class SnsState:
@@ -55,6 +57,17 @@ class SnsState:
         self.platform_paused_until: dict[str, float] = {p: 0.0 for p in C.PLATFORMS}
         # 首次启动时间：保号模式从这里开始计时
         self.created_ts = time.time()
+        # 投递补发队列（随状态文件落盘）：每条是 {key, platform, account_id,
+        # post_id, session, payload, attempts, ts}，只装"明确失败"的会话。
+        self.retry_queue: list[dict[str, Any]] = []
+        # 是否成功读过盘。没读过就写，等于用一个空状态盖掉用户的订阅名单——
+        # 这是本文件最不可接受的失败，所以 save() 会拒绝。
+        self._loaded = False
+        # 构造即加载：状态对象在任何使用点都应该是"磁盘上的那个状态"，而不是
+        # 一个空壳。以前只有 `SnsService.start()` 会 load，于是
+        # `sns.enabled=false` 时面板/指令拿到的是空状态，一次 save 就把用户的
+        # 订阅名单清空了（P1-1）。把加载放进构造函数后，这个坑从结构上消失。
+        self.load()
 
     # ------------------------------------------------------------ 路径
 
@@ -64,23 +77,39 @@ class SnsState:
 
     # ------------------------------------------------------------ 读写
 
-    def load(self) -> None:
+    def load(self, *, force: bool = False) -> None:
+        """从磁盘读回状态。幂等；读失败时**禁止**后续 save 覆盖原文件。
+
+        `force=True` 给"别的实例刚写过盘"的场景用（正常路径不需要）。
+        """
+        if self._loaded and not force:
+            return
+        # 先假设"没读到、也不能写"，下面每个成功分支再置 True。
+        self._loaded = False
         try:
             raw = self.path.read_text(encoding="utf-8")
             data = json.loads(raw)
         except FileNotFoundError:
+            # 没有文件 = 本来就没什么可丢的，允许之后写盘
+            self._loaded = True
             return
         except Exception as exc:
             # 坏文件绝不能静默吞掉：下一次 save 会用空状态盖掉用户的订阅名单。
-            # 先把坏文件原样留档，重建空状态，并在日志里点名路径。
+            # 先原样留档，再决定能不能重建（备份失败时连写盘都禁止）。
             backup = self.path.with_name(f"{self.path.name}.corrupt-{int(time.time())}")
+            moved = False
             with contextlib.suppress(OSError):
                 os.replace(self.path, backup)
+                moved = True
             logger.warning(
-                f"[sns] 状态文件解析失败（{self.path}）：{exc}；已备份到 {backup}，本次按空状态重建"
+                f"[sns] 状态文件解析失败（{exc.__class__.__name__}）："
+                f"{'已备份为 ' + backup.name if moved else '备份失败，已禁止写盘'}，"
+                "本次按空状态运行"
             )
+            self._loaded = moved
             return
         if not isinstance(data, dict):
+            self._loaded = True
             return
         accounts: dict[str, SnsAccount] = {}
         for row in data.get("accounts") or []:
@@ -109,8 +138,21 @@ class SnsState:
                     self.platform_paused_until[platform] = float(paused.get(platform) or 0)
         with contextlib.suppress(TypeError, ValueError):
             self.created_ts = float(data.get("created_ts") or self.created_ts)
+        retry = data.get("retry_queue")
+        if isinstance(retry, list):
+            self.retry_queue = [row for row in retry if _valid_retry(row)][-C.RETRY_QUEUE_LIMIT :]
+        self._loaded = True
 
-    def save(self) -> None:
+    def save(self) -> bool:
+        """原子落盘，返回是否真的写下去了。
+
+        护栏：从没成功 load() 过（例如状态文件读坏且备份失败）时拒绝写——
+        用空状态盖掉用户的订阅名单，比"这次没保存"严重得多。写失败也不再
+        静默：日志里必须留痕，否则用户以为订阅存下了。
+        """
+        if not self._loaded:
+            logger.error("[sns] 状态尚未成功加载，拒绝写盘（否则会覆盖用户已有订阅）")
+            return False
         state = {
             "version": self.VERSION,
             "created_ts": self.created_ts,
@@ -119,16 +161,26 @@ class SnsState:
             "stats": self.stats,
             "platform_risk": self.platform_risk,
             "platform_paused_until": self.platform_paused_until,
+            "retry_queue": self.retry_queue[-C.RETRY_QUEUE_LIMIT :],
         }
+        tmp = self.path.with_suffix(".json.tmp")
         try:
             self.data_dir.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+            payload = json.dumps(state, ensure_ascii=False, indent=2)
+            # fsync 之后再 replace：断电时宁可留下旧的完整文件，也不要"rename 成功
+            # 但内容还在页缓存里"的半截状态。
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
             tmp.replace(self.path)
             _restrict(self.path)
-        except Exception:
+            return True
+        except Exception as exc:
             with contextlib.suppress(OSError):
-                self.path.with_suffix(".json.tmp").unlink(missing_ok=True)
+                tmp.unlink(missing_ok=True)
+            logger.warning(f"[sns] 状态写入失败（{exc.__class__.__name__}: {exc}），本次改动未落盘")
+            return False
 
     # ------------------------------------------------------------ 便捷访问
 
@@ -188,6 +240,15 @@ class SnsState:
             bucket = {}
             buckets[platform or "-"] = bucket
         bucket[key] = _stat_int(bucket.get(key)) + delta
+
+
+def _valid_retry(row: Any) -> bool:
+    """补发队列的行校验：缺字段/类型不对的行直接丢，别让坏数据卡住整轮补发。"""
+    if not isinstance(row, dict):
+        return False
+    if not isinstance(row.get("payload"), dict):
+        return False
+    return all(str(row.get(key) or "") for key in ("platform", "account_id", "post_id", "session"))
 
 
 def _stat_int(value: Any, default: int = 0) -> int:

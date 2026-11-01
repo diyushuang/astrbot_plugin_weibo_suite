@@ -37,7 +37,7 @@ except ImportError:
         def json_response(payload: dict):
             return jsonify(payload)
 
-        def error_response(message: str, status_code: int = 400):
+        def error_response(message: str, *, status_code: int = 400):
             resp = jsonify({"status": "error", "message": message})
             resp.status_code = status_code
             return resp
@@ -49,7 +49,7 @@ except ImportError:
         def json_response(payload: dict):
             raise RuntimeError("AstrBot WebUI 不可用（缺少 quart），控制面板未启用")
 
-        def error_response(message: str, status_code: int = 400):
+        def error_response(message: str, *, status_code: int = 400):
             raise RuntimeError("AstrBot WebUI 不可用（缺少 quart），控制面板未启用")
 
         class web_request:
@@ -61,6 +61,26 @@ except ImportError:
 def _safe(value: Any, limit: int = 240) -> str:
     text = str(value or "").replace("\n", " ")
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _as_str_list(raw: Any) -> list[str]:
+    """面板送来的名单字段 -> `list[str]`。接受数组或逗号/空白分隔的字符串。
+
+    只做类型归一，不做业务过滤：`push_sessions` 是会话 UMO，`at_all_keywords`
+    是正文关键词，`at_all_uids` 是博主白名单，三者都允许含空格/冒号。
+    """
+    if isinstance(raw, str):
+        items: list[Any] = [part for part in raw.replace("，", ",").split(",")]
+    elif isinstance(raw, (list, tuple)):
+        items = list(raw)
+    else:
+        raise ValueError("需要数组")
+    out: list[str] = []
+    for item in items:
+        text = str(item).strip()
+        if text and text not in out:
+            out.append(text)
+    return out
 
 
 class SnsAPI:
@@ -90,7 +110,7 @@ class SnsAPI:
         """返回 (service, None) 或 (None, 非 2xx 响应)。"""
         service = self.service()
         if service is None:
-            return None, error_response("SNS 服务未就绪", 503)
+            return None, error_response("SNS 服务未就绪", status_code=503)
         return service, None
 
     async def _body(self) -> dict[str, Any]:
@@ -127,7 +147,7 @@ class SnsAPI:
         try:
             snap = service.snapshot()
         except Exception as exc:
-            return error_response(_safe(exc), 500)
+            return error_response(_safe(exc), status_code=500)
         return json_response({"status": "ok", **snap})
 
     async def credentials(self):
@@ -154,7 +174,7 @@ class SnsAPI:
                     "cookie_preview": summary.get("cookie_preview") or "",
                     "missing_keys": list(summary.get("missing_keys") or []),
                     # 浏览器 profile 目录是否已建：只回布尔，不回本机绝对路径
-                    "profile_ready": bool(summary.get("profile_dir")),
+                    "profile_ready": bool(summary.get("has_profile")),
                 }
             )
         return json_response(
@@ -193,7 +213,7 @@ class SnsAPI:
         action = str(body.get("action") or "open").strip().lower()
         platform = self._platform(body.get("platform"))
         if not platform:
-            return error_response("未知平台", 400)
+            return error_response("未知平台", status_code=400)
         service, err = self._require_service()
         if err is not None:
             return err
@@ -207,7 +227,7 @@ class SnsAPI:
         # 窗口打开 ≠ 已登录：这里绝不能替用户宣布登录成功，否则面板会先显示
         # 已登录，下一轮检查才发现 cookie 根本用不了。真伪以下一轮检查为准。
         if not ok:
-            return error_response(message, 409)
+            return error_response(message, status_code=409)
         return json_response(
             {
                 "status": "ok",
@@ -231,13 +251,13 @@ class SnsAPI:
         if action == "add":
             platform = self._platform(body.get("platform"))
             if not platform:
-                return error_response("未知平台", 400)
+                return error_response("未知平台", status_code=400)
             target = str(body.get("target") or "").strip()
             if not target:
-                return error_response("缺少账号链接或 id", 400)
+                return error_response("缺少账号链接或 id", status_code=400)
             ok, message, _account = service.add_account(platform, target)
             if not ok:
-                return error_response(message, 409)
+                return error_response(message, status_code=409)
             return json_response({"status": "ok", "message": message})
         if action == "remove":
             platform = self._platform(body.get("platform"))
@@ -245,21 +265,21 @@ class SnsAPI:
                 body.get("key") or body.get("target") or body.get("account_id") or ""
             ).strip()
             if not platform or not target:
-                return error_response("缺少平台或账号", 400)
+                return error_response("缺少平台或账号", status_code=400)
             ok, message = service.remove_account(platform, target)
             if not ok:
-                return error_response(message, 409)
+                return error_response(message, status_code=409)
             return json_response({"status": "ok", "message": message})
         if action == "toggle":
             account = self._locate_account(service, body)
             if account is None:
-                return error_response("没有这个订阅", 404)
+                return error_response("没有这个订阅", status_code=404)
             account.enabled = not account.enabled
             if account.enabled:
                 account.next_check_ts = time.time()
             service.state.save()
             return json_response({"status": "ok", "key": account.key, "enabled": account.enabled})
-        return error_response(f"不支持的操作：{action or '（空）'}", 400)
+        return error_response(f"不支持的操作：{action or '（空）'}", status_code=400)
 
     @staticmethod
     def _locate_account(service, body: dict):
@@ -319,6 +339,13 @@ class SnsAPI:
             "max_images": int,
             "text_max_length": int,
             "at_all": bool,
+            # 下列键 `_conf_schema.json` 的 sns 组里都真实存在（也有代码在读），
+            # 早先漏在 allowed 之外 —— 面板改了保存不上，又没有报错。
+            "jitter_ratio": float,
+            "platform_concurrency": int,
+            "push_sessions": list,
+            "at_all_keywords": list,
+            "at_all_uids": list,
         }
         changed: list[str] = []
         for key, caster in allowed.items():
@@ -338,16 +365,18 @@ class SnsAPI:
                             "on",
                         )
                     )
+                elif caster is list:
+                    value = _as_str_list(raw)
                 else:
                     value = caster(raw)
             except (TypeError, ValueError):
-                return error_response(f"{key} 的值不合法：{raw!r}", 400)
+                return error_response(f"{key} 的值不合法：{raw!r}", status_code=400)
             if key == "fetch_mode" and value not in ("browser", "http", "rss"):
-                return error_response("fetch_mode 只能是 browser / http / rss", 400)
+                return error_response("fetch_mode 只能是 browser / http / rss", status_code=400)
             self._set_cfg(key, value)
             changed.append(key)
         if not changed:
-            return error_response("没有可更新的字段", 400)
+            return error_response("没有可更新的字段", status_code=400)
         return json_response({"status": "ok", "changed": changed})
 
     async def check_now(self):
@@ -360,7 +389,7 @@ class SnsAPI:
         try:
             result = await service.check_all(platform)
         except Exception as exc:
-            return error_response(_safe(exc), 500)
+            return error_response(_safe(exc), status_code=500)
         return json_response({"status": "ok", **result})
 
     async def preview(self):

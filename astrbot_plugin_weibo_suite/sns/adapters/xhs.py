@@ -15,11 +15,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+import time
 from typing import Any
 
 from .. import constants as C
 from ..types import SnsPost
+
+logger = logging.getLogger("astrbot_plugin_weibo_suite.sns")
 
 INITIAL_STATE_RE = re.compile(r"window\.__INITIAL_STATE__\s*=\s*(.*?)</script>", re.S)
 _PROFILE_RE = re.compile(r"xiaohongshu\.com/user/profile/([0-9a-fA-F]{24})", re.I)
@@ -108,6 +112,24 @@ def _image_url(card: Any) -> str:
     return str(cover.get("url") or cover.get("urlDefault") or "")
 
 
+def _card_ts(card: dict[str, Any]) -> float:
+    """卡片上的发布时间（秒）；取不到就返回 0.0。
+
+    小红书这字段在不同页面上叫 `time` / `createTime` / `create_time`，值可能是
+    **毫秒**时间戳（>1e12）。原来 `_note_from_card` 直接写死 `ts=0.0`，导致
+    `SnsService._check_account` 的 `fresh.sort(key=(ts, post_id))` 退化成按
+    post_id 字典序排 —— "取最新 N 条"实际取的是"id 最大的 N 条"。
+    """
+    raw = _pick(card, "time", "createTime", "create_time", "publishTime", "publish_time")
+    try:
+        ts = float(raw or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if ts <= 0:
+        return 0.0
+    return ts / 1000.0 if ts > 1e12 else ts
+
+
 def _note_from_card(card: Any, *, account_id: str = "") -> SnsPost | None:
     """主页笔记卡片 -> `SnsPost`（只有标题/封面，图集要再看详情）。"""
     if not isinstance(card, dict):
@@ -125,7 +147,7 @@ def _note_from_card(card: Any, *, account_id: str = "") -> SnsPost | None:
         title=title[:80],
         text=title,
         link=NOTE_URL.format(note_id=note_id),
-        ts=0.0,
+        ts=_card_ts(card),
         author=str(user.get("nickname") or user.get("nickName") or ""),
         images=[cover] if cover else [],
         kind=str(_pick(card, "type") or ""),
@@ -169,6 +191,22 @@ def parse_user_notes(state: dict[str, Any]) -> tuple[str, str, list[SnsPost]]:
         item = _note_from_card(card)
         if item is not None:
             posts.append(item)
+    # 没有时间戳的卡片必须补一个"合理"的值，否则上层按 ts 排序会退化成按
+    # post_id 字典序（那正是 P2-8 的症状）。补法分两种，重点是**不能**让它们
+    # 盖过真正最新的条目：
+    #   - 同一条时间线里有别的卡片带 ts：排在那些时间**之前**，且互相之间保持
+    #     feed 顺序（feed 基本是新→旧）；
+    #   - 一条都没有（老页面/隐私设置）：用「抓取时刻 - 下标」保持 feed 顺序。
+    known = [post.ts for post in posts if post.ts > 0]
+    fallback = min(known) if known else time.time()
+    missing_ts = 0
+    for index, post in enumerate(posts):
+        if post.ts > 0:
+            continue
+        post.ts = fallback - 1 - index if known else fallback - index
+        missing_ts += 1
+    if missing_ts:
+        logger.info(f"[sns] 小红书主页有 {missing_ts} 条笔记卡片没有时间戳，已用抓取时刻兜底")
     return nickname, avatar, posts
 
 

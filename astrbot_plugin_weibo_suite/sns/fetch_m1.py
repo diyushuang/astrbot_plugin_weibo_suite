@@ -53,7 +53,10 @@ async def fetch(
             return await _fetch_instagram(browser, account_id, post_limit)
     except BrowserUnavailable as exc:
         return FetchResult.failure("env.unavailable", str(exc))
-    except asyncio.TimeoutError:
+    # Py3.11+ 的 asyncio.TimeoutError 就是内置 TimeoutError 的别名，但 3.10
+    # 及更早是两个不同的类；只 catch 前者会漏掉内置超时（表现为 env.unknown，
+    # 于是被当成"未知异常"计入失败而不是按超时退避）。
+    except (asyncio.TimeoutError, TimeoutError):
         return FetchResult.failure("net.timeout", "页面加载超时")
     except Exception as exc:  # 任何未预期异常都不该让整轮调度崩掉
         return FetchResult.failure("env.unknown", f"{exc.__class__.__name__}: {exc}")

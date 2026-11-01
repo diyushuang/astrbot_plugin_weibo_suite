@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
 import time
 from pathlib import Path
@@ -57,6 +58,10 @@ class SnsService:
         data_dir = getattr(plugin, "_data_dir", "") or ""
         self.data_dir = Path(data_dir) if data_dir else Path(".")
         self.state = SnsState(self.data_dir)
+        # 构造即读盘，而不是等 start()：`sns.enabled=false` 时 sns_start() 早退，
+        # 但面板/指令仍会拿到这个实例并立刻 save()——那会用空状态盖掉磁盘上的
+        # 全部订阅（P1-1）。load() 幂等，start() 里再调一次也无害。
+        self.state.load()
         self.identity = IdentityStore(self.data_dir)
         self._browser: BrowserSession | None = None
         self._browser_error = ""
@@ -118,6 +123,12 @@ class SnsService:
         return max(floor, self._int(key, floor))
 
     def concurrency(self, platform: str) -> int:
+        """每轮**最多挑几个**该平台的账号去检查（不是并发度）。
+
+        名字沿用配置键 `platform_concurrency`，行为是"每轮选取上限"：
+        `check_all` 是串行 for 循环（每次之间还 sleep 0.8s），同一时刻只有
+        一个请求在飞。改名会动 schema 和面板，所以这里写实注释而不是改行为。
+        """
         explicit = self._int("platform_concurrency", 0)
         if explicit > 0:
             return max(1, explicit)
@@ -225,6 +236,12 @@ class SnsService:
         raw = str(url or "").strip()
         if not raw.lower().startswith(("http://", "https://")):
             return False, "RSS 订阅需要一个 http(s) 地址", None
+        # 这个地址是群成员给的，必须当不可信输入：否则它就是一条通往内网的 SSRF
+        # （http://127.0.0.1:8080/、http://169.254.169.254/… 都能被订成"RSS 源"，
+        # 再由后台轮询替攻击者把响应读回来）。
+        blocked = await self._feed_url_error(raw)
+        if blocked:
+            return False, blocked, None
         key = account_key("rss", raw)
         if self.state.get(key) is not None:
             return False, "这个 RSS 源已经在订阅里了", None
@@ -241,6 +258,25 @@ class SnsService:
         self.state.accounts[key] = account
         self.state.save()
         return True, f"已订阅 RSS：{account.label}", account
+
+    @staticmethod
+    async def _feed_url_error(url: str) -> str:
+        """RSS 地址预检：只放行公网 http(s)。返回错误文案，空串表示通过。"""
+        from ..shared.http import UrlBlockedError, resolve_public_addrs
+
+        try:
+            # 显式传空集合 = deny-by-default（不沿用全局白名单）；DNS 是阻塞调用，
+            # 丢到线程里做，别卡住整轮事件循环。
+            await asyncio.wait_for(
+                asyncio.to_thread(resolve_public_addrs, url, set()), timeout=10.0
+            )
+        except UrlBlockedError as exc:
+            return f"这个地址不能订阅：{exc}"
+        except asyncio.TimeoutError:
+            return "地址解析超时（10s），请稍后再试"
+        except Exception as exc:
+            return f"地址解析失败：{exc.__class__.__name__}"
+        return ""
 
     def _staggered_check_ts(self, platform: str, now: float) -> float:
         """新订阅的首检时刻：在窗口内错开，而不是全部等于 `now`。
@@ -337,11 +373,14 @@ class SnsService:
         if not candidates:
             return 30.0
         delta = min(candidates) - now
-        # 30s 下限防止空转；300s 上限保证"改完配置/风控恢复"能较快被感知
+        # 5s 下限防止空转（真的是 5s，不是 30s：sleep 只在有账号到点时才会这么短）；
+        # 300s 上限保证"改完配置/风控恢复"能较快被感知
         return max(5.0, min(300.0, delta if delta > 0 else 5.0))
 
     async def check_all(self, platform: str = "", *, force: bool = False) -> dict[str, Any]:
-        """跑一轮：按调度挑出到点的账号，逐个（受并发上限约束）检查。
+        """跑一轮：按调度挑出到点的账号，**串行**逐个检查（之间有 0.8s 间隔）。
+
+        所谓 `platform_concurrency` 是"每轮每平台最多挑几个"，不是并发 worker 数。
 
         `force=True` 供"立即检查"用：不看 `next_check_ts`，但冷却/暂停的账号
         照旧不动（手动操作也不该把风控中的账号提前叫醒）。
@@ -364,6 +403,8 @@ class SnsService:
                 if float(until or 0.0) <= now
             ]:
                 self.state.platform_paused_until.pop(p, None)
+            # 删掉的订阅/移除的群不该在补发队列里阴魂不散
+            self._prune_retries()
             accounts = (
                 self.state.by_platform(platform) if platform else list(self.state.accounts.values())
             )
@@ -388,25 +429,64 @@ class SnsService:
                 }
             results = []
             for account in planned:
-                results.append(await self._check_account(account))
+                try:
+                    results.append(await self._check_account(account))
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # 单个账号炸掉不能让整轮中断：`plan_round` 每轮都从头排，
+                    # 排在他后面的订阅会因此**永久**轮不到（永远卡在同一个位置）。
+                    # 记成一条失败结果（未被 SIGNALS 登记 -> 按网络错误处理，
+                    # 不触发冷却），让这一轮继续往下走。
+                    self.log.exception("[sns] 检查 %s 时抛出未预期异常", account.key)
+                    results.append(
+                        {
+                            "key": account.key,
+                            "ok": False,
+                            "signal": "env.unknown",
+                            "label": f"检查异常：{exc.__class__.__name__}: {exc}",
+                            "paused": False,
+                            "cooldown": 0,
+                        }
+                    )
+                    self.state.record(
+                        "error",
+                        platform=account.platform,
+                        name=account.label,
+                        text=f"检查异常：{exc.__class__.__name__}",
+                        detail=str(exc)[:200],
+                    )
                 await asyncio.sleep(0.8)  # 同一轮里也别把请求拍成一串（人类会停顿）
-            self.state.save()
             self._last_round_ts = now
             self._last_round = {
                 "checked": len(results),
                 "pushed": sum(1 for r in results if r.get("pushed")),
+                # 「本轮跑完之后有几条是失败的」：ok=True 只表示轮次执行了，
+                # 失败细项在 detail 里，聚合值给面板/指令一句话用。
+                "failed": sum(1 for r in results if not r.get("ok")),
                 "detail": results,
             }
             return {"ok": True, **self._last_round}
         finally:
             self._running_round = False
             self._lock.release()
+            # 每轮结束（含异常退出）都要落盘：mark_seen/补发队列只改了内存，
+            # 丢了就会重复推送（而且 N 次异常退出后就是 N 次重复）。
+            with contextlib.suppress(Exception):
+                self.state.save()
 
     async def _check_account(self, account: SnsAccount) -> dict[str, Any]:
         """检查单个订阅：取数 → 比对 → 更新状态 → 决定是否推送。"""
         now = time.time()
         account.last_check_ts = now
         self.state.bump(account.platform, "check")
+        # 上一轮没送出去的先补发。冷却/暂停中的账号不补：补发也是对外发消息，
+        # 不能绕过风控守卫。
+        retried = {"sent": 0, "failed": 0, "dropped": 0}
+        if not account.paused and not account.cooling(now):
+            retried = await self._drain_retries(account)
+            if retried["sent"]:
+                account.push_ok += int(retried["sent"])
         result = await self._fetch_with_deadline(account)
         base = self.base_interval(account.platform)
         warmup = scheduler.warmup_active(
@@ -472,7 +552,13 @@ class SnsService:
         if not fresh:
             interval = self._interval_for(account, base, warmup=warmup, night=night)
             account.next_check_ts = scheduler.next_check_time(account, interval, now=now)
-            return {"key": account.key, "ok": True, "new": 0, "pushed": False}
+            return {
+                "key": account.key,
+                "ok": True,
+                "new": 0,
+                "pushed": False,
+                "retried": retried["sent"],
+            }
 
         limit = max(1, C.MAX_PUSH_PER_ROUND)
         # `fresh` 是按时间升序的：取尾部才是最新的几条。取头部会把最新的悄悄
@@ -490,7 +576,8 @@ class SnsService:
                 text=f"本轮 {len(fresh)} 条更新，只推最新 {limit} 条",
             )
         delivered = await self._deliver(account, batch, warmup=warmup)
-        # 只把"真的送出去了"的标记成已读：投递失败（没绑群、通道异常）时留着下一轮重试
+        # 记已读 = "不再进 fresh 全量推送"。失败会话已在 _deliver 里排进补发队列，
+        # 由 retry_queue 逐会话补，所以这里按 post 粒度整条记，不做会话级区分。
         delivered_ids = {str(pid) for pid in (delivered.get("delivered") or ())}
         for post in batch:
             if post.post_id in delivered_ids:
@@ -505,6 +592,8 @@ class SnsService:
             "pushed": bool(delivered.get("sent")),
             "sent": delivered.get("sent", 0),
             "failed": delivered.get("failed", 0),
+            "unknown": delivered.get("unknown", 0),
+            "retried": retried["sent"],
         }
 
     def _trim_history(self, account: SnsAccount) -> None:
@@ -675,6 +764,21 @@ class SnsService:
     async def _deliver(
         self, account: SnsAccount, posts: list[SnsPost], *, warmup: bool
     ) -> dict[str, Any]:
+        """逐条推送，并把"哪个会话没送出去"记准确。
+
+        三种结果各走各的路（混在一起就是静默丢消息）：
+
+        - `sent`：确定送到 → 记成功；
+        - `unknown`：超时/结果未知，消息可能已经出群 → 也记成"已读"（重试会重复），
+          但单独记 `push_unknown`，**不写进成功**，面板不会虚高；
+        - `failed`：明确失败 → 把失败的那几个会话排进补发队列，**这条仍然记已读**。
+
+        "已读"只表示"不再走 fresh 全量推送"，**不等于**"所有会话都收到了"：
+        哪个会话还没收到，只由 `retry_queue` 负责。这两件事混在一起就会出现
+        "一个群长期发不出去 → 每个周期把这条内容重推给**所有**正常群"的刷屏事故，
+        而且 fresh 一遍 + 补发一遍，同一条还会发两次。
+        """
+        empty = {"sent": 0, "failed": len(posts), "unknown": 0, "retry": 0, "delivered": []}
         sessions = self.sessions()
         if not sessions:
             self.state.record(
@@ -683,7 +787,7 @@ class SnsService:
                 name=account.label,
                 text="没有推送目标，本轮不标记已读",
             )
-            return {"sent": 0, "failed": len(posts), "delivered": []}
+            return dict(empty)
         deliver = getattr(self.p, "deliver_sns_payload", None)
         if not callable(deliver):
             self.state.record(
@@ -692,50 +796,243 @@ class SnsService:
                 name=account.label,
                 text="投递通道未绑定（deliver_sns_payload 缺失）",
             )
-            return {"sent": 0, "failed": len(posts), "delivered": []}
+            return dict(empty)
 
-        sent = failed = 0
+        timeout_kwargs = self._timeout_kwarg(deliver)
+        sent = failed = unknown = retry = 0
         delivered: list[str] = []
         for post in posts:
             await self._enrich(account, post)
             payload = self._payload(account, post)
-            # `sent` 以"帖子"为粒度计数：下面按会话循环，多群时不能按会话数累加，
-            # 否则面板上的推送量与指令回显都会翻倍。
-            post_ok = False
+            # 先按会话收集结果，再决定这条帖子算不算送达：
+            # `sent` 以"帖子"为粒度计数，多群时不能按会话数累加。
+            outcomes: dict[str, str] = {}
             for session in sessions:
+                label = str(session)
                 try:
-                    state = await deliver(payload, session)
+                    outcome = await deliver(payload, session, **timeout_kwargs)
                 except Exception as exc:
                     self.log.warning(f"[sns] 投递失败：{exc.__class__.__name__}: {exc}")
-                    state = "failed"
-                if state in ("sent", "unknown"):
-                    post_ok = True
-                    self.state.bump(account.platform, "push_ok")
-                    self.state.record(
-                        "push",
-                        platform=account.platform,
-                        name=account.label,
-                        text=post.title or post.post_id,
-                        detail=session,
-                    )
-                else:
-                    self.state.bump(account.platform, "push_fail")
-                    self.state.record(
-                        "push_fail",
-                        platform=account.platform,
-                        name=account.label,
-                        text=post.title or post.post_id,
-                        detail=session,
-                    )
-            if post_ok:
-                sent += 1
-                delivered.append(str(post.post_id))
-            else:
+                    outcome = "failed"
+                if outcome not in ("sent", "unknown"):
+                    outcome = "failed"
+                outcomes[label] = outcome
+            # 会话级的成功记账先做：一条帖子可能"部分会话成功"，那部分确实发出去了，
+            # 不能因为同一条在别的会话失败就把成功计数吞掉。
+            for session, state in outcomes.items():
+                if state != "sent":
+                    continue
+                self.state.bump(account.platform, "push_ok")
+                self.state.record(
+                    "push",
+                    platform=account.platform,
+                    name=account.label,
+                    text=post.title or post.post_id,
+                    detail=session,
+                )
+            failures = [session for session, state in outcomes.items() if state == "failed"]
+            if failures:
                 failed += 1
+                for session in failures:
+                    self.state.bump(account.platform, "push_fail")
+                    self._enqueue_retry(account, post, payload, session)
+                retry += len(failures)
+                self.state.record(
+                    "push_fail",
+                    platform=account.platform,
+                    name=account.label,
+                    text=post.title or post.post_id,
+                    detail=f"{len(failures)}/{len(sessions)} 个会话失败，已排入补发",
+                )
+            else:
+                if any(state == "unknown" for state in outcomes.values()):
+                    unknown += 1
+                    self.state.bump(account.platform, "push_unknown")
+                    self.state.record(
+                        "push_unknown",
+                        platform=account.platform,
+                        name=account.label,
+                        text=post.title or post.post_id,
+                        detail="结果未知（可能已送达，不重试）",
+                    )
+                if any(state == "sent" for state in outcomes.values()):
+                    sent += 1
+            # 无论成功/未知/失败，这条都记已读 —— 失败会话已全部入队（上面的
+            # _enqueue_retry），它不再进 fresh，否则下一轮会对**全部**会话重推
+            # 一遍：只要有一个群长期发不出去，每个周期都会刷屏，还会与补发叠加
+            # 成双份。还没收到的会话只由 retry_queue 逐会话负责。
+            # 「已读」≠「所有会话都收到了」，这是两个粒度。
+            delivered.append(str(post.post_id))
             if warmup:
                 # 热身期每条之间留出间隔，避免"刚上线就一串消息"
                 await asyncio.sleep(1.5)
-        return {"sent": sent, "failed": failed, "delivered": delivered}
+        return {
+            "sent": sent,
+            "failed": failed,
+            "unknown": unknown,
+            "retry": retry,
+            "delivered": delivered,
+        }
+
+    def _send_timeout(self) -> float | None:
+        """单条消息的发送超时（秒）；`None` = 不传，交给微博域自己的配置。
+
+        `message_send_timeout` 是**顶层**配置组的键（`_conf_schema.json` 里有），
+        `sns` 组目前没有同名键。所以：用户没在 sns 组单独设过就返回 None —— 让
+        pusher 用 `config["message_send_timeout"]`（默认 60s），而不是在这里硬编码
+        一个数值把它覆盖掉。哪天 sns 组补了这个键，这里自动生效（含 0=不限时）。
+        """
+        group = self.p.config.get(C.CFG_GROUP) if isinstance(self.p.config, dict) else None
+        if not (isinstance(group, dict) and "message_send_timeout" in group):
+            return None
+        raw = group.get("message_send_timeout")
+        if raw is None:
+            return None
+        try:
+            return max(0.0, float(raw))
+        except (TypeError, ValueError):
+            return None
+
+    def _timeout_kwarg(self, deliver: Any) -> dict[str, Any]:
+        """按跨域契约传 `timeout_seconds`；旧版 pusher 没有该形参时退回不传。
+
+        用签名探测而不是 try/except TypeError：发送链内部抛出的 TypeError 会被
+        误判成"签名不支持"，那就成了重发一次（对 @全体/图片尤其危险）。
+        """
+        timeout = self._send_timeout()
+        if timeout is None:
+            return {}
+        try:
+            params = inspect.signature(deliver).parameters
+        except (TypeError, ValueError):
+            return {}
+        if "timeout_seconds" in params:
+            return {"timeout_seconds": timeout}
+        for param in params.values():
+            if param.kind is inspect.Parameter.VAR_KEYWORD:
+                return {"timeout_seconds": timeout}
+        return {}
+
+    def _enqueue_retry(
+        self, account: SnsAccount, post: SnsPost, payload: dict[str, Any], session: str
+    ) -> None:
+        """把一个"明确失败"的（帖子, 会话）记进补发队列（同一组合只留一条）。"""
+        key = f"{account.key}|{post.post_id}|{session}"
+        for row in self.state.retry_queue:
+            if row.get("key") == key:
+                row["payload"] = payload
+                row["ts"] = time.time()
+                return
+        self.state.retry_queue.append(
+            {
+                "key": key,
+                "platform": account.platform,
+                "account_id": account.account_id,
+                "post_id": str(post.post_id),
+                "session": str(session),
+                "payload": payload,
+                "attempts": 0,
+                "ts": time.time(),
+            }
+        )
+        overflow = len(self.state.retry_queue) - C.RETRY_QUEUE_LIMIT
+        if overflow > 0:
+            # 丢的是最旧的补发项。因为"入队即记已读"，这一丢就是**永久丢消息**
+            # （不会再被 fresh 捡回来），所以至少要留痕，别静默丢弃。
+            del self.state.retry_queue[:overflow]
+            self.state.record(
+                "error",
+                platform=account.platform,
+                name=account.label,
+                text=f"补发队列已满（上限 {C.RETRY_QUEUE_LIMIT}），丢弃最旧的 {overflow} 条",
+            )
+
+    def _prune_retries(self) -> int:
+        """丢掉"账号已删除"或"推送目标已移除"的补发项（否则永远发不出去）。"""
+        live = set(self.sessions())
+        kept: list[dict[str, Any]] = []
+        for row in self.state.retry_queue:
+            key = account_key(str(row.get("platform") or ""), str(row.get("account_id") or ""))
+            if key not in self.state.accounts:
+                continue
+            # sessions() 为空时先保留：用户可能只是临时清空了推送目标
+            if live and str(row.get("session") or "") not in live:
+                continue
+            kept.append(row)
+        dropped = len(self.state.retry_queue) - len(kept)
+        if dropped:
+            self.state.retry_queue = kept
+        return dropped
+
+    async def _drain_retries(self, account: SnsAccount) -> dict[str, int]:
+        """补发该账号上几轮"明确失败"的（帖子, 会话）。
+
+        - 只补 failed：unknown 可能已经送达，重发就是重复推送；
+        - 每轮最多补 `MAX_RETRY_PER_ROUND` 条，剩下的留到下一轮，避免补发本身
+          变成一次突发流量；
+        - 同一组合累计失败 `MAX_PUSH_RETRIES` 次就放弃并记 push_fail，不会永远卡住。
+        """
+        rows = [
+            row
+            for row in self.state.retry_queue
+            if row.get("platform") == account.platform
+            and str(row.get("account_id") or "") == account.account_id
+        ]
+        if not rows:
+            return {"sent": 0, "failed": 0, "dropped": 0}
+        deliver = getattr(self.p, "deliver_sns_payload", None)
+        if not callable(deliver):
+            return {"sent": 0, "failed": 0, "dropped": 0}
+        timeout_kwargs = self._timeout_kwarg(deliver)
+        live = set(self.sessions())
+        sent = failed = dropped = 0
+        for row in rows[: max(1, C.MAX_RETRY_PER_ROUND)]:
+            with contextlib.suppress(ValueError):
+                self.state.retry_queue.remove(row)
+            session = str(row.get("session") or "")
+            payload = row.get("payload")
+            if not isinstance(payload, dict) or (live and session not in live):
+                # 推送目标已经不在了：丢掉，别让它永远占着队列
+                dropped += 1
+                continue
+            try:
+                outcome = await deliver(payload, session, **timeout_kwargs)
+            except Exception as exc:
+                self.log.warning(f"[sns] 补发失败：{exc.__class__.__name__}: {exc}")
+                outcome = "failed"
+            if outcome in ("sent", "unknown"):
+                sent += 1
+                self.state.bump(
+                    account.platform, "push_ok" if outcome == "sent" else "push_unknown"
+                )
+                self.state.record(
+                    "push" if outcome == "sent" else "push_unknown",
+                    platform=account.platform,
+                    name=account.label,
+                    text=f"补发：{row.get('post_id')}",
+                    detail=session,
+                )
+                continue
+            try:
+                attempts = int(row.get("attempts") or 0) + 1
+            except (TypeError, ValueError):
+                attempts = 1
+            if attempts >= max(1, C.MAX_PUSH_RETRIES):
+                failed += 1
+                self.state.bump(account.platform, "push_fail")
+                self.state.record(
+                    "push_fail",
+                    platform=account.platform,
+                    name=account.label,
+                    text=f"补发 {attempts} 次仍失败，放弃：{row.get('post_id')}",
+                    detail=session,
+                )
+                continue
+            row["attempts"] = attempts
+            row["ts"] = time.time()
+            self.state.retry_queue.append(row)
+            failed += 1
+        return {"sent": sent, "failed": failed, "dropped": dropped}
 
     def _payload(self, account: SnsAccount, post: SnsPost) -> dict[str, Any]:
         max_images = max(1, self._int("max_images", C.DELIVER_MAX_IMAGES))

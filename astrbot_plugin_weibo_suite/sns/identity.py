@@ -198,7 +198,9 @@ class IdentityStore:
             "cookie_keys": info["keys"],
             "cookie_preview": info["preview"],
             "missing_keys": missing,
-            "profile_dir": str(self.profile_dir(platform)),
+            # 只回"目录建了没"的布尔：本机绝对路径一旦进 JSON 就会经
+            # `/sns/overview` 回传到浏览器（91c4913 只修了 credentials 一处）。
+            "has_profile": self.profile_dir(platform).is_dir(),
         }
 
 

@@ -7,6 +7,11 @@ RSSHub、也可以是别的镜像），然后用 M2 的 HTTP 层去取——风�
 那套服务上，插件的登录态完全不参与。
 
 只依赖标准库 `xml.etree`：为了一条兜底路径多装一个 feedparser 不划算。
+
+**XXE / 实体膨胀**：stdlib 的 `xml.etree` 不解析外部实体（`SYSTEM`/`PUBLIC`），
+所以没有经典 XXE；但它**会**展开内部实体，`<!ENTITY a "..." >` 的嵌套定义可以
+做成 billion laughs 把内存吃光（feed 地址是用户填的，属于不可信输入）。这里在
+解析前直接拒收任何 `<!ENTITY`，代价是极少数奇葩 feed 不可用——可以接受。
 """
 
 from __future__ import annotations
@@ -80,6 +85,10 @@ def parse_feed(xml_text: str, *, account_id: str = "", platform: str = "") -> li
     """RSS/Atom 文本 -> `[SnsPost]`；解析不出来返回空列表（由调用方判信号）。"""
     text = str(xml_text or "").strip()
     if not text or not text.startswith("<"):
+        return []
+    # 内部实体展开是 stdlib 唯一会放大的地方（billion laughs）；正常 feed 不会
+    # 用 DOCTYPE 实体，见到就整份拒收，比"先解析再限制"安全。
+    if "<!ENTITY" in text.upper():
         return []
     try:
         root = ET.fromstring(text)

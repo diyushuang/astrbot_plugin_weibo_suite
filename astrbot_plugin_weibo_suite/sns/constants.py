@@ -121,6 +121,12 @@ NIGHT_FACTOR = 2.0
 # 一轮最多推几条（防一次性补推把群刷屏）
 MAX_PUSH_PER_ROUND = 3
 
+# 投递补发：只补"明确失败"的（帖子, 会话）组合；unknown 视为可能已送达，重试会重复。
+# 队列随状态文件落盘，重启不丢；超过 RETRY_QUEUE_LIMIT 时丢最旧的。
+MAX_PUSH_RETRIES = 3
+MAX_RETRY_PER_ROUND = 5
+RETRY_QUEUE_LIMIT = 200
+
 # 抓取超时：浏览器导航慢，给足；HTTP 模式短一些
 BROWSER_TIMEOUT_MS = 45000
 HTTP_TIMEOUT_SECONDS = 20
@@ -238,6 +244,9 @@ CFG_KEYS: dict[str, object] = {
     "max_images": DELIVER_MAX_IMAGES,
     "at_all": False,
     "at_all_keywords": [],
+    # @全体生效的账号白名单（sec_uid / 昵称 / 平台名任一命中）；空 = 不限博主。
+    # 注意：这是 sns 组自己的键，与顶层 push 组的 at_all_uids 不是同一份。
+    "at_all_uids": [],
     "text_max_length": 300,
     # 凭据（M2 才用；M1 只记"已登录"状态，不落 Cookie）
     "douyin_cookie": "",
