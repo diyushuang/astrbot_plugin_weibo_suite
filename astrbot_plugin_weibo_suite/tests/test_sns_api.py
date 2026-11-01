@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 
 import pytest
 
@@ -112,6 +113,10 @@ def test_credentials_reports_missing_fields_without_values(api):
 
     assert row["missing_keys"] == ["web_session"]
     assert "only-this" not in json.dumps(out)
+    # 面板只需要知道「浏览器目录建了没」，不需要知道本机绝对路径
+    assert isinstance(row["profile_ready"], bool)
+    assert "profile_dir" not in row
+    assert "sns" + os.sep + "browser" not in json.dumps(out)
 
 
 def test_guard_get_returns_current_thresholds(api):

@@ -65,10 +65,10 @@
 ### 多平台订阅
 
 - **登录态与取数方式**：每个平台的订阅数、基础间隔、登录态；「打开登录」会在本机弹出持久化浏览器窗口，是否真的登录成功以下一轮检查为准；「标记已登录」只记录一次登录时间，不保存 Cookie。取数方式可选 `browser` / `http` / `rss`。
-- **订阅名单**：按平台 + 主页链接或账号 ID 添加；逐行「停用 / 启用」「移除」（这两个按钮提交的字段与接口不一致，见「常见问题」）；「预览推送文案」按当前模板渲染样例。
+- **订阅名单**：按平台 + 主页链接或账号 ID 添加；逐行「停用 / 启用」「移除」，两个按钮提交 `{action, platform, account_id}`，接口同时接受 `key`、`account_id` 与 `target` 三种写法；「预览推送文案」按当前模板渲染样例。
 - **风控守卫**：冷却基数与上限、健康暂停 / 降速阈值、保号期、夜间（0–8 点）翻倍、激进档位，保存后即写入配置。
 - **延迟估算**：各平台实际间隔与 P50 / P95 延迟估算。
-- **Cookie 与凭据**：只显示脱敏摘要（是否已配置、字段数量、前缀与总长度），不显示 Cookie 原文；当前面板读取的字段名与接口返回不一致，列表可能为空，见「常见问题」。
+- **Cookie 与凭据**：只显示脱敏摘要（是否已配置、字段数量、前缀与总长度），不显示 Cookie 原文；缺字段时提示「缺少 web_session」这类键名，浏览器 profile 目录只显示「已建」而回传布尔值。
 - **订阅事件**：订阅域的事件流水。
 - **危险操作**（均有二次确认）：取消订阅（移除）。「立即检查一轮」会同步等检查跑完再返回，页面在等待期间置忙。
 - **后台任务**：本页签没有后台任务；「立即检查一轮」是同步调用，最长会等一整轮取数。
@@ -116,9 +116,9 @@
 | `/trace/rescan` | POST | `{force}` | `{started, force}` | 图库重扫在后台跑；已在进行中返回 409，进度看 `/trace/status` |
 | `/trace/repair-history` | POST | 无 | `{cleaned}` | 清理会话历史里带装饰前缀的原图键，只改本地键 |
 | `/sns/overview` | GET | 无 | `status: "ok"`，另有 `enabled`、`fetch_mode`、`aggressive`、`accounts`、`platforms`、`sessions`、`stats`、`last_round`、`browser`、`guard`、`latency`、`events`、`browser_error` | 订阅域总览；SNS 服务未就绪返回 503 |
-| `/sns/credentials` | GET | 无 | `status`；`fetch_mode`；`rows[]`（`platform`、`label`、`logged_in`、`last_login_ts`、`note`、`cookie_configured`、`cookie_keys`、`cookie_preview`、`missing_keys`、`profile_dir`）；`modes[]` | 只返回脱敏摘要，Cookie 原文不会出现在任何响应里 |
+| `/sns/credentials` | GET | 无 | `status`；`fetch_mode`；`rows[]`（`platform`、`label`、`logged_in`、`last_login_ts`、`note`、`cookie_configured`、`cookie_keys`、`cookie_preview`、`missing_keys`、`profile_ready`）；`modes[]` | 只返回脱敏摘要，Cookie 原文不会出现在任何响应里 |
 | `/sns/session` | POST | `{action, platform, logged_in, note}` | open 返回 `{status, message}`；mark 返回 `{status, platform, logged_in}` | `open` 只打开登录窗口，登录结果以下一轮检查为准；打开失败返回 409 |
-| `/sns/accounts` | POST | `{action, platform, target, key}` | add / remove 返回 `{status, message}`；toggle 返回 `{status, key, enabled}` | add 用 `target`；remove 用 `key`（缺失时回落 `target`）；toggle 只认 `key`（`平台:账号`） |
+| `/sns/accounts` | POST | `{action, platform, target, key, account_id}` | add / remove 返回 `{status, message}`；toggle 返回 `{status, key, enabled}` | add 用 `target`；remove 与 toggle 接受 `key`（`平台:账号`）、`account_id` 或 `target`，面板提交的是 `{platform, account_id}` |
 | `/sns/guard` | GET / POST | GET 空 body；POST 白名单键 | GET 返回 `{status, guard, latency}`；POST 返回 `{status, changed[]}` | 可写键：`enabled`、`fetch_mode`、`aggressive`、`night_slowdown`、`browser_headed`、`cooldown_*`、`health_*`、`base_interval_*`、`message_*`、`max_images`、`text_max_length`、`at_all` 等；无有效字段返回 400，`fetch_mode` 只允许 `browser` / `http` / `rss` |
 | `/sns/check-now` | POST | `{platform}`（留空表示全部到点） | `{status: "ok", ...result}` | 同步等一轮检查跑完，不是后台任务 |
 | `/sns/preview` | POST | `{platform}`（默认 `douyin`） | `{status, text, sessions, at_all}` | 按当前模板渲染样例；模板占位符非法时返回 2xx 且 `status: "error"` |
@@ -133,7 +133,7 @@
 其余边界：
 
 - 业务失败返回非 2xx。`error_response()` 默认 400，参数缺失/非法为 400，找不到对象为 404，状态冲突（已有任务、风控冷却、未初始化）为 409，读取异常为 500，SNS 服务未就绪为 503。唯一例外是 `/sns/preview` 的模板占位符错误：它返回 2xx 并在 JSON 里给 `status: "error"`。
-- 凭据类接口只返回脱敏值。`/sns/credentials` 的 `cookie_preview` 由 `redact_cookie()` 生成，形如 `abc123…（共 120 字符）`，只保留前 6 个字符和总长度；`cookie_keys` 只是字段数量，接口不返回字段名清单，Cookie 原文不会进入任何响应。
+- 凭据类接口只返回脱敏值。`/sns/credentials` 的 `cookie_preview` 由 `redact_cookie()` 生成，形如 `abc123…（共 120 字符）`，只保留前 6 个字符和总长度；`cookie_keys` 只是字段数量；`missing_keys` 只回缺失的键名（用于提示还差哪个字段），不回任何取值；浏览器 profile 目录只回 `profile_ready` 布尔值，不回本机绝对路径。Cookie 原文不会进入任何响应。
 - 日志类接口返回的是脱敏后的记录。`/errors` 的每条 `msg` 在 `shared/errorlog.py` 的 `snapshot()` 出口经过 `_redact_error_msg()`：URL 与裸 IP 变成 `<地址已隐藏>`，`?token=` / `?sign=` 这类查询串凭据与 `user:pass@host` 代理账号变成 `<凭据已隐藏>`，裸 `/file/...` 路径同样变成 `<地址已隐藏>`。图床直链相关的日志另由 `trace/image_bed.py` 的 `redact_url()` 处理：只保留 `scheme://host/path`，查询串（`?sign=`、`?token=` 等一次性凭据）一律收成 `?***`。
 - `/overview` 里的出网代理地址经 `redact_proxy()` 打码后才下发，不返回代理账号与密码。
 - 上传接口有后缀白名单（归档只收 `.json`，文案只收 `.csv` / `.md` / `.markdown`）、64 MB 大小上限，文件只写到插件数据目录下的 `webui_uploads/`，6 小时后由下一次上传顺带清理，最多保留最近 50 个；数据目录未就绪时直接拒绝，不落到 AstrBot 安装目录。
@@ -169,11 +169,13 @@
 - 这是设计如此：`/sns/credentials` 只返回 `cookie_preview`（前 6 个字符 + 总长度）与字段数量，用来判断「配没配、配了多长」，不提供还原。
 - 掩码为空且 `cookie_configured` 为 `false`，说明该平台还没有配置 Cookie。
 - 要更新凭据，请在插件配置面板重新填写，或用 `browser` 取数方式在本机浏览器登录一次；面板不会回显，也不会回写 Cookie。
-- 列表整块为空：前端读的是 `data.credentials`，而接口返回的字段名是 `rows`，两边不一致导致渲染不出条目（已知问题）。需要核对时直接请求 `/sns/credentials` 看 `rows`。
+- 列表整块为空：先确认插件已初始化（`/sns/credentials` 返回 503 表示 SNS 服务未就绪）。前端读 `rows`，接口返回的就是 `rows`；v0.8.1 之前前端读的是 `credentials`，那个字段名不一致的问题已修复。
 
-### 多平台订阅里点「停用」或「移除」提示失败
+### 多平台订阅里点「停用」或「移除」提示 404 / 400
 
-- 当前面板按钮提交的是 `account_id`，而 `/sns/accounts` 的 `toggle` 只认 `key`、`remove` 需要 `key` 或 `target`，两边字段不一致，会分别得到 404「没有这个订阅」和 400「缺少平台或账号」。这是已知问题，可暂时用带 `platform` 与 `key`（`平台:账号`）的直接调用绕过。
+- 这两个按钮提交 `{action, platform, account_id}`；接口现在同时接受 `key`（`平台:账号` 全量键）、`account_id` 与 `target`，正常情况下不会再失败。
+- 若仍返回 404「没有这个订阅」：说明列表是旧的，点右上角「刷新」后重试（订阅可能已在别处被移除）。
+- 若返回 400「缺少平台或账号」：请求里既没有 `key` 也没有 `platform`，属于直接调用接口时漏填。
 
 ## 相关文档
 

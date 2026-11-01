@@ -16,6 +16,9 @@
   回归用例：`tests/test_sns_api.py::test_accounts_panel_payload_shape_uses_platform_and_account_id`。
 - **面板「Cookie 与凭据」列表恒为空**（`app.js::loadSnsCredentials`）：前端读
   `data.credentials`，接口返回的字段是 `rows`。改为读 `rows` 并保留旧字段兼容。
+- **凭据接口把本机绝对路径回传给浏览器**：`/sns/credentials` 的
+  `profile_dir` 字段返回浏览器 profile 的完整路径，而面板只拿它当「目录建了没」
+  的布尔用。改为 `profile_ready: bool`，返回值不再包含任何本机路径。
 
 ### 文档
 

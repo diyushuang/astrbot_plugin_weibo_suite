@@ -1509,7 +1509,7 @@ function renderSnsCredentials(rows) {
     bits.push(row.cookie_configured ? `Cookie ${row.cookie_preview || "已配置"}` : "Cookie 未配置");
     if (row.missing_keys && row.missing_keys.length) bits.push(`缺少 ${row.missing_keys.join(" / ")}`);
     li.append(snsRowMain(row.label || SNS_PLATFORM_LABEL[row.platform] || row.platform, bits.join(" · "), ""));
-    if (row.profile_dir) li.append(el("span", "badge", "浏览器目录已建"));
+    if (row.profile_ready) li.append(el("span", "badge", "浏览器目录已建"));
     list.append(li);
   }
 }

@@ -148,11 +148,13 @@ class SnsAPI:
                     "last_login_ts": summary.get("last_login_ts") or 0,
                     "note": _safe(summary.get("note")),
                     "cookie_configured": bool(summary.get("cookie_configured")),
-                    # 计数而非字段名列表：面板不需要（也不该）知道用户存了哪些键
+                    # 只回计数与缺失键名：面板要提示「还差哪个字段」，但不需要
+                    # 用户存了哪些键的具体清单与取值
                     "cookie_keys": int(summary.get("cookie_keys") or 0),
                     "cookie_preview": summary.get("cookie_preview") or "",
                     "missing_keys": list(summary.get("missing_keys") or []),
-                    "profile_dir": summary.get("profile_dir") or "",
+                    # 浏览器 profile 目录是否已建：只回布尔，不回本机绝对路径
+                    "profile_ready": bool(summary.get("profile_dir")),
                 }
             )
         return json_response(
