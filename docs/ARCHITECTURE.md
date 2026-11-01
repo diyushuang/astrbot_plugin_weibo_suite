@@ -1,8 +1,8 @@
 # 架构说明
 
 本文描述 `astrbot_plugin_weibo_suite` 的分层、数据流、生命周期与存储布局。
-面向要改代码的人；只想用插件请看 [插件 README](astrbot_plugin_weibo_suite/README.md)，
-只想查指令或配置请看 [指令手册](docs/COMMANDS.md) 与 [配置手册](docs/CONFIGURATION.md)。
+面向要改代码的人；只想用插件请看 [插件 README](../astrbot_plugin_weibo_suite/README.md)，
+只想查指令或配置请看 [指令手册](COMMANDS.md) 与 [配置手册](CONFIGURATION.md)。
 
 ## 一、为什么是现在这个形状
 
@@ -202,7 +202,7 @@ API 是两条风控线，套用 API 间隔会把一批 18 张图拖成几分钟�
 ## 八、面板
 
 `views_backend/` 只做「解析请求 → 调业务 → 返回 JSON」三件事，前端是没有构建
-步骤的原生 JS。接口清单、鉴权边界与常见问题见 [docs/WEBUI.md](docs/WEBUI.md)。
+步骤的原生 JS。接口清单、鉴权边界与常见问题见 [docs/WEBUI.md](WEBUI.md)。
 面板本身不引入额外鉴权，复用 AstrBot 的会话体系，因此**不要**把面板端点直接
 暴露到公网。
 
@@ -224,4 +224,4 @@ API 是两条风控线，套用 API 间隔会把一批 18 张图拖成几分钟�
 | 订阅域延迟偏高（抖音 P50 约 150s） | 保号优先。激进档可在面板打开，文档里如实标注代价 |
 | 面板无插件级鉴权 | 复用 AstrBot 会话；加 token 会与 WebUI 的单点登录冲突 |
 | 归档下载串行 | 并发会显著提高被限流概率，默认 1，可在配置里调 |
-| 配置里保留了 59 条旧布局兼容键 | 老版本把配置平铺在顶层，迁移需要它们；详见 [配置手册](docs/CONFIGURATION.md) |
+| 配置里保留了 59 条旧布局兼容键 | 老版本把配置平铺在顶层，迁移需要它们；详见 [配置手册](CONFIGURATION.md) |

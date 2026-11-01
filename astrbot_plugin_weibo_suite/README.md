@@ -40,7 +40,7 @@ pip install -r requirements.txt
 
 免 Cookie 的游客身份轮询、推送队列（含取消与重试）、@全体闸门、视频直发、
 群相册（含实况图转 GIF 与 pid 级去重）。指令入口是 `微博` 分组，共 30 条，
-全部列在[指令手册](../docs/COMMANDS.md#微博监控微博-分组)。
+全部列在[指令手册](../docs/COMMANDS.md#微博监控微博-分组30-条)。
 
 ### 整条微博归档
 
