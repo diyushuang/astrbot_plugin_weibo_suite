@@ -120,6 +120,27 @@ def _bits_to_hex(bits: np.ndarray) -> str:
     return np.packbits(bits.astype(np.uint8)).tobytes().hex()
 
 
+def is_degenerate_phash(phash: str | None) -> bool:
+    """判断 pHash 是否为"退化码"（全零）。全项目唯一的退化判定口径。
+
+    纯色、纯渐变、大面积平坦图算不出有意义的 pHash，_phash 会为它们回退
+    到全零约定码（见下方 _DEGENERATE_MEDIAN_RATIO）。全零码的问题不在于
+    "算得对不对"，而在于**它与另一张纯色图的汉明距离恒为 0**：只要库里有
+    一条全零行，任意纯色图都会被判成那张图的"重复"或"100% 相似"。
+
+    因此口径统一为：**退化码不入库、不入索引、也不作为查询**。判定必须走
+    这里——main（登记去重、向量 point id）与 library（入库、重建缓存、检索）
+    各自比较字符串早晚会漏掉一处。
+
+    - 空值（None / ""）一并视为退化：空哈希没有任何检索意义；
+    - 只承认"全部为 0"：近白页、低对比度但仍有纹理的图会得到少量非零位，
+      属于正常哈希，必须照常入库与检索（不要按"接近全零"放宽）。
+    """
+    if not phash:
+        return True
+    return not str(phash).strip().lower().strip("0")
+
+
 # 退化判定阈值：中位数绝对值 / 低频块绝对值均值 低于此值即认为落在浮点噪声里。
 #
 # 纯色、纯渐变、大面积平坦图会让中位数落到浮点噪声量级（1e-15~1e-29），而
@@ -127,8 +148,9 @@ def _bits_to_hex(bits: np.ndarray) -> str:
 # 由求和顺序决定，同一份算法在不同 BLAS/求和序下都会分叉——数学上不可消除。
 # 更关键的是：img-indexer（Node 侧，见其 src/lib/phash.mjs）会为同一张图算 pHash
 # 入库，两侧必须给出**同一个**码，否则哈希检索会静默全量落空。
-# 处理方式：检出后退化为全零约定码。全零码与任何真实图的相似度都在 0.5 上下，
-# 不会造成误报；这类图本就不适合做感知哈希检索。
+# 处理方式：检出后退化为全零约定码（is_degenerate_phash 判据）。
+# 全零码必须**不入库也不参与检索**：它与另一张纯色图的距离恒为 0，一旦入库，
+# 任意纯色图都会被判成它的"重复"或"100% 相似"（filter 见 library.py）。
 _DEGENERATE_MEDIAN_RATIO = 1e-12
 
 
@@ -143,6 +165,7 @@ def _phash(gray: Image.Image, hash_size: int) -> str:
     scale = float(np.abs(flat).mean())
     if not scale > 0 or abs(med) <= scale * _DEGENERATE_MEDIAN_RATIO:
         # 退化输入：中位数落在浮点噪声里，二值化无意义 → 全零约定码
+        # 该码由 is_degenerate_phash 统一识别，下游据此拒绝入库/检索
         return "0" * phash_hex_len(hash_size)
     return _bits_to_hex((low > med).flatten())
 

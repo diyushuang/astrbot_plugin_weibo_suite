@@ -49,6 +49,12 @@ except ImportError:  # 兼容插件以独立模块方式加载
 # 服务端为「中位数落在浮点噪声里」的退化图（纯色/纯渐变/大面积平坦图）写的哨兵
 # 值。必须与 img-indexer 的 tools/gen_phash.mjs::DEGENERATE_SENTINEL 一致。
 #
+# 「退化图」的语义在全项目只有一个：**全零 pHash**，判据是
+# features.is_degenerate_phash()。本常量只是它在图床上传输时的序列化占位
+# （连字符 '-'），不是另一种退化定义——全零码本身不会出现在 payload 里，
+# 远端写入前就换成了它。同理插件侧 library / main 也一律走
+# is_degenerate_phash，不要在这里另写一遍字符串比较。
+#
 # 为什么是 '-' 而不是空串：Qdrant 的 is_empty 把「键缺失」「空串」「null」视为
 # 同一类，用空串做哨兵会让这些点继续命中服务端的工作清单、回填永不收敛。
 DEGENERATE_SENTINEL = "-"
@@ -107,6 +113,9 @@ class HashIndex:
         self._cache: tuple = ([], np.zeros((0, 0), dtype=np.uint8), 0, 0)
         self.built_at: float = 0.0
         self.remote_count: int = 0
+        # 上一代构建的跳过原因分布（原因 -> 条数）。只报总数的 skipped 无法
+        # 区分「线上脏数据」和「payload 少带 image_url」，排查等于没有信息
+        self._skip_reasons: dict[str, int] = {}
         # 仅用于保护缓存的读-改-写（滚动刷新）；查询侧不加锁（取引用即快照）
         self._lock = threading.Lock()
         self._hex_re = re.compile(rf"^[0-9a-f]{{{self.expected_hex_len}}}$")
@@ -164,33 +173,41 @@ class HashIndex:
 
         逐点校验，任何一条不合规都只跳过它、不影响其余点：线上的 hash 由另一个
         进程写入，格式错误（长度不对、非十六进制、哨兵值）只能跳过，不能整批放弃。
+
+        跳过按原因分类计数（见 stats()["skipped_reasons"]）：只有一个总数时，
+        「跳过 2000 条」既可能是线上脏数据，也可能是这边没带 image_url 字段，
+        排查时完全无从下手。
         """
         items: list = []
-        skipped = 0
+        reasons: dict[str, int] = {}
+
+        def _skip(reason: str) -> None:
+            reasons[reason] = reasons.get(reason, 0) + 1
+
         for point in points:
             if not isinstance(point, dict):
-                skipped += 1
+                _skip("点位非对象")
                 continue
             payload = point.get("payload")
             if not isinstance(payload, dict):
-                skipped += 1
+                _skip("缺少 payload")
                 continue
             phash = payload.get("phash")
             if not isinstance(phash, str):
-                skipped += 1
+                _skip("phash 缺失或非字符串")
                 continue
             phash = phash.strip().lower()
             # 退化哨兵：这类图本就不适合做感知哈希检索，留在索引里只会制造噪声
             if phash == DEGENERATE_SENTINEL:
-                skipped += 1
+                _skip("退化图（哨兵占位）")
                 continue
             if not self._hex_re.match(phash):
-                skipped += 1
+                _skip("哈希格式非法（长度或字符）")
                 continue
             image_url = _first_text(payload, "image_url", "src")
             if not image_url:
                 # 没有直链就没法回传，索引里留着也只会命中后失败
-                skipped += 1
+                _skip("缺少可回传直链")
                 continue
             items.append(
                 {
@@ -203,27 +220,49 @@ class HashIndex:
                     "i": str(point.get("id") or ""),
                 }
             )
+        skipped = sum(reasons.values())
         if skipped:
-            logger.info(f"图床哈希索引：跳过 {skipped} 条不合规记录（格式错误/退化/无直链）")
+            detail = "，".join(f"{key} {value}" for key, value in reasons.items())
+            logger.info(f"图床哈希索引：跳过 {skipped} 条不合规记录（{detail}）")
         # 把 skipped 传进 _build：那一步还要再剔一次「hex 解不开」的漏网条目，
         # 两处计数必须相加，否则 stats() 会恒为 0（看起来一切正常，实际瞒报）
-        self._build(items, remote_count=int(remote_count or len(points)), skipped=skipped)
+        self._build(
+            items,
+            remote_count=int(remote_count or len(points)),
+            skipped=skipped,
+            skip_reasons=reasons,
+        )
         if save:
             self._save()
         return len(items)
 
     def _build(
-        self, items: list, *, remote_count: int, built_at: float = 0.0, skipped: int = 0
+        self,
+        items: list,
+        *,
+        remote_count: int,
+        built_at: float = 0.0,
+        skipped: int = 0,
+        skip_reasons: dict | None = None,
     ) -> None:
-        """把条目列表编译成位矩阵并整体换代。"""
+        """把条目列表编译成位矩阵并整体换代。
+
+        skip_reasons 是调用方（build）已经分好类的跳过计数；这里再补上「hex
+        解不开」「位数与当前 hash_size 不符」两类，保证 stats() 的分布之和恒等
+        于 skipped 总数——两者不一致就说明有人在中间又丢了一批条目。
+        """
+        reasons = dict(skip_reasons or {})
         ids: list = []
         raws: list = []
         for pos, item in enumerate(items):
             try:
                 raw = bytes.fromhex(str(item.get("p") or ""))
             except (TypeError, ValueError):
+                reasons["hex 解码失败"] = reasons.get("hex 解码失败", 0) + 1
                 continue
             if len(raw) * 2 != self.expected_hex_len:
+                key = "位数与当前 hash_size 不符"
+                reasons[key] = reasons.get(key, 0) + 1
                 continue
             raws.append(raw)
             ids.append(pos)
@@ -235,6 +274,7 @@ class HashIndex:
         kept = [items[i] for i in ids]
         # 单个 tuple 一次赋值：读侧拿到的总是完整一致的一代
         self._cache = (kept, matrix, bits, int(skipped) + (len(items) - len(kept)))
+        self._skip_reasons = reasons
         self.remote_count = int(remote_count)
         self.built_at = float(built_at or time.time())
 
@@ -286,6 +326,8 @@ class HashIndex:
             "count": len(items),
             "bits": bits,
             "skipped": skipped,
+            # 跳过原因分布：排查「索引为什么少了 2000 条」时唯一有用的线索
+            "skipped_reasons": dict(self._skip_reasons),
             "remote_count": self.remote_count,
             "built_at": self.built_at,
         }

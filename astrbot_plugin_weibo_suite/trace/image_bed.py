@@ -28,6 +28,7 @@ import asyncio
 import json
 import mimetypes
 import os
+import re
 import secrets
 import shutil
 import time
@@ -69,6 +70,16 @@ MODE_R2 = "cloudflare_r2"
 MODE_OCI = "oracle_oci"
 MODE_CFB = "cloudflare_imgbed"
 
+# 上传重试：图床/对象存储的失败大多是瞬时的（网关 502、连接重置、限流），
+# 一次失败就永久降级到本地副本，会让"图床其实还能用"的用户长期只拿到本地
+# 路径（且只在第一次告警，后面再也看不出来）。
+UPLOAD_RETRY_ATTEMPTS = 3
+UPLOAD_RETRY_BASE_DELAY = 0.25  # 秒；指数退避 0.25 / 0.5
+# 这些状态码重试没有意义：鉴权、权限、请求体本身有问题，重试只是把同一个
+# 错误再犯三遍，还让 403 的告警变成三倍噪音
+UPLOAD_TERMINAL_STATUS = frozenset({400, 401, 403, 404, 413, 415, 422})
+_UPLOAD_HTTP_STATUS_RE = re.compile(r"HTTP (\d{3})")
+
 
 @dataclass
 class StoreResult:
@@ -97,6 +108,28 @@ def extract_json_path(data: Any, path: str) -> Any:
         else:
             return None
     return current
+
+
+def upload_error_status(exc: BaseException) -> int:
+    """从上传异常里抠出 HTTP 状态码；没有就返回 0。
+
+    上传器统一抛 RuntimeError(f"... HTTP {status}: ...")，这里按同一口径解析。
+    """
+    match = _UPLOAD_HTTP_STATUS_RE.search(str(exc))
+    return int(match.group(1)) if match else 0
+
+
+def is_retryable_upload_error(exc: BaseException) -> bool:
+    """这个上传异常是否值得重试。
+
+    - 有 HTTP 状态码：只有非 4xx-终态（鉴权/权限/请求体）才重试，5xx 与 429 重试；
+    - 无状态码：ValueError 属于配置/路径错误（如未配置 api_url、目录非法），
+      重试必然同样失败；其余（连接重置、超时、响应解析）按瞬时故障重试。
+    """
+    status = upload_error_status(exc)
+    if status:
+        return status not in UPLOAD_TERMINAL_STATUS
+    return not isinstance(exc, (ValueError, NotImplementedError))
 
 
 def _public_url(base: str, key: str) -> str:
@@ -167,6 +200,11 @@ class ImageBedClient:
         # 上传失败只告警一次：重试/批处理里每条都打 warning 会刷屏，
         # 还会把真正的原因（第一条）埋掉
         self._upload_warned = False
+        # 降级状态：上传持续失败、当前所有登记都在存本地副本。为空表示图床可用。
+        # /trace 状态接口会读它——只打一条 warning 的话，用户过几天根本不会
+        # 记得图床挂了，只会疑惑"为什么直链都是本地路径"。
+        self._degraded_reason = ""
+        self._degraded_since = 0.0
 
     # ---------- 对外接口 ----------
 
@@ -194,11 +232,8 @@ class ImageBedClient:
                 # 通用 HTTP 图床的目录由服务端 API 决定，客户端不传
                 logger.debug(f"generic_http 图床不支持目录参数，已忽略 folder={raw_folder!r}")
             try:
-                if raw_folder:
-                    url = await upload(src_path, _clean_folder(raw_folder))
-                else:
-                    # 保持单参调用，兼容既有单参上传实现与测试替身
-                    url = await upload(src_path)
+                url = await self._upload_with_retry(upload, src_path, raw_folder)
+                self.mark_recovered()
                 return StoreResult(ok=True, url=url, message=ok_message)
             except Exception as e:
                 # 第三方响应体可能很长、还可能回显内部地址：只留前 200 字符；
@@ -210,6 +245,7 @@ class ImageBedClient:
                 else:
                     self._upload_warned = True
                     logger.warning(f"{failure}: {detail}", exc_info=False)
+                self._mark_degraded(detail)
                 try:
                     local = await self._copy_local(src_path, raw_folder)
                 except ValueError:
@@ -235,6 +271,52 @@ class ImageBedClient:
                 message=f"图床模式 {self.mode!r} 无法识别，已保存本地副本",
             )
         return StoreResult(ok=True, file_path=local, message="已保存到本地图床")
+
+    async def _upload_with_retry(self, upload, src_path: str, raw_folder: str) -> str:
+        """带指数退避的上传：只对瞬时故障重试，鉴权/配置类错误立即放弃。
+
+        每次重试都重新调用 upload（内部会重开文件句柄），因此不会复用已被
+        上一次失败读空/关闭的流。CancelledError 属于 BaseException，不会被
+        这里的 except Exception 吞掉，取消语义不变。
+        """
+        attempts = max(1, int(UPLOAD_RETRY_ATTEMPTS))
+        for attempt in range(attempts):
+            try:
+                if raw_folder:
+                    return await upload(src_path, _clean_folder(raw_folder))
+                # 保持单参调用，兼容既有单参上传实现与测试替身
+                return await upload(src_path)
+            except Exception as exc:
+                last = attempt + 1 >= attempts
+                if last or not is_retryable_upload_error(exc):
+                    raise
+                delay = UPLOAD_RETRY_BASE_DELAY * (2**attempt)
+                logger.debug(
+                    f"图床上传失败（第 {attempt + 1}/{attempts} 次），"
+                    f"{delay:.2f}s 后重试: {str(exc)[:200]}"
+                )
+                await asyncio.sleep(delay)
+        raise RuntimeError("上传重试耗尽")  # pragma: no cover - 循环内必然 return/raise
+
+    def _mark_degraded(self, detail: str) -> None:
+        """标记图床不可用（自本次降级开始的第一次失败计时）。"""
+        if not self._degraded_reason:
+            self._degraded_since = time.time()
+        self._degraded_reason = detail
+
+    def mark_recovered(self) -> None:
+        """上传成功后清除降级标记（图床恢复不需要重启插件）。"""
+        self._degraded_reason = ""
+        self._degraded_since = 0.0
+
+    def status(self) -> dict:
+        """图床可用性快照，供 /trace 状态接口展示。"""
+        return {
+            "mode": self.mode,
+            "degraded": bool(self._degraded_reason),
+            "degraded_reason": self._degraded_reason,
+            "degraded_since": self._degraded_since,
+        }
 
     def _public_base(self, key: str, name: str) -> str:
         """取公开直链 base；缺少 http(s):// 前缀时按未配置处理。

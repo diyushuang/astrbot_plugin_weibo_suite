@@ -7,6 +7,10 @@ SQLite 保存元数据；哈希十六进制串解码为 numpy 位矩阵常驻内
 并发约定：写路径持锁，内存缓存以单个 tuple 整体替换（Python 属性赋值
 原子），读路径先取快照再计算——读写方在任意线程交错都不会读到
 "新 ids + 旧矩阵"的错代组合。main 侧的重操作应经 asyncio.to_thread 调用。
+
+退化 pHash（全零，见 features.is_degenerate_phash）不入库、不进内存索引、
+也不接受为查询码：这类码彼此汉明距离恒为 0，留着只会让任意纯色图被判成
+"已登记过"或"相似度 100%"。
 """
 
 from __future__ import annotations
@@ -18,6 +22,18 @@ import time
 from dataclasses import dataclass
 
 import numpy as np
+
+try:
+    from astrbot.api import logger
+except Exception:  # 兼容独立模块加载/本地自测环境
+    import logging
+
+    logger = logging.getLogger("library")
+
+try:
+    from .features import is_degenerate_phash
+except ImportError:  # 兼容插件以独立模块方式加载
+    from features import is_degenerate_phash  # type: ignore[no-redef]
 
 _POPCOUNT = np.array([bin(i).count("1") for i in range(256)], dtype=np.int64)
 
@@ -55,6 +71,27 @@ _INSERT_SQL = (
     " sender_name, created_at)"
     " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 )
+
+
+class _DegenerateSkip:
+    """add_if_absent 对退化 pHash 的返回标记：不是条目 id，也不是重复行。
+
+    单独造一个标记而不是复用 None：None 已经是"这次没插入"的既有语义
+    （命中去重时返回 (None, dup)），调用方无法区分"跳过"与"查重命中"，
+    前者应当回一句"这张图无法做感知哈希"，后者要展示重复的编号。
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - 仅调试/日志用
+        return "<skipped: degenerate phash>"
+
+    def __bool__(self) -> bool:
+        # 误用 truthiness 判断时不会被当成"拿到 id"
+        return False
+
+
+DEGENERATE_SKIP = _DegenerateSkip()
 
 
 @dataclass
@@ -108,6 +145,8 @@ class ImageLibrary:
         # 缓存"代"号：每次重建自增。并发重建时只有最后一代能落到 _cache，
         # 防止一次慢重建把更新的快照盖回旧数据（见 _reload_cache）
         self._cache_gen = 0
+        # 退化查询码只提示一次：/溯源 纯色图会反复走到这里，逐次打日志会刷屏
+        self._degenerate_warned = False
         self._reload_cache()
 
     # ---------- 内部工具 ----------
@@ -154,6 +193,11 @@ class ImageLibrary:
         for row in rows:
             hex_str = row["phash"]
             if self.expected_phash_hex_len and len(hex_str) != self.expected_phash_hex_len:
+                skipped += 1
+                continue
+            if is_degenerate_phash(hex_str):
+                # 历史库里可能已有全零行（旧版本不拦）：查询侧直接排除，
+                # 不改历史数据——留着它，任意纯色图都会被判成与它 100% 相似
                 skipped += 1
                 continue
             try:
@@ -221,11 +265,19 @@ class ImageLibrary:
         供登记原图使用：检查与插入在同一个锁区间内完成，调用方即便在
         两次调用之间有网络 await，也不会与并发同图登记产生重复行；
         配合 phash 唯一索引，跨线程/跨进程的重复写入也会被静默忽略。
+
+        退化 pHash（全零）直接拒绝入库并返回 (DEGENERATE_SKIP, None)：
+        它与另一张纯色图的距离恒为 0，进了库就会让后续任意纯色图被判成
+        "已登记过"。调用方据此给出明确提示，而不是把跳过写成"登记成功"。
         """
+        phash = row.get("phash", "")
+        if is_degenerate_phash(phash):
+            logger.info("拒绝登记退化 pHash（纯色/大面积平坦图）：该图无法做感知哈希检索")
+            return DEGENERATE_SKIP, None
         params = self._row_params(row, self._now())
         with self._lock:
             dup = self._conn.execute(
-                "SELECT * FROM images WHERE phash = ? LIMIT 1", (row.get("phash", ""),)
+                "SELECT * FROM images WHERE phash = ? LIMIT 1", (phash,)
             ).fetchone()
             if dup is not None:
                 return None, dup
@@ -234,14 +286,44 @@ class ImageLibrary:
             if cursor.rowcount == 0:
                 dup = self._conn.execute(
                     "SELECT * FROM images WHERE phash = ? LIMIT 1",
-                    (row.get("phash", ""),),
+                    (phash,),
                 ).fetchone()
                 if dup is not None:
                     return None, dup
                 raise RuntimeError("插入图库记录失败：唯一索引冲突但未找到重复记录")
             entry_id = int(cursor.lastrowid)
-        self._reload_cache()
+            # 增量并入内存索引（只追加这一行），不再为一张图重建整张矩阵
+            appended = self._append_cache_locked(entry_id, phash)
+        if not appended:
+            self._reload_cache()
         return entry_id, None
+
+    def _append_cache_locked(self, entry_id: int, phash: str) -> bool:
+        """把刚插入的一行增量并入内存索引（须在持锁状态下调用）。
+
+        单张登记若走 _reload_cache，会把整张表重读一遍、整个位矩阵重建一次：
+        一万条图库就是一次全表 SELECT 加一次 MB 级 numpy 重建，而本次登记
+        只多了一行。这里只把这一行拼到矩阵末尾。
+
+        返回 False 表示无法增量（十六进制解不开、位数与现有矩阵不一致），
+        调用方应退回全量重建兜底。
+        """
+        if self.expected_phash_hex_len and len(phash) != self.expected_phash_hex_len:
+            return False
+        try:
+            raw = bytes.fromhex(phash)
+        except ValueError:
+            return False
+        ids, matrix, _bits, skipped = self._cache
+        if matrix.size and matrix.shape[1] != len(raw):
+            return False
+        row_bits = np.frombuffer(raw, dtype=np.uint8).reshape(1, -1)
+        new_matrix = np.vstack([matrix, row_bits]) if matrix.size else row_bits.copy()
+        # 关键：先自增代号，让任何在途的全量重建被它自己的世代校验丢弃——
+        # 那份快照的行集里还没有这一条，落回 _cache 会把刚加的行覆盖掉
+        self._cache_gen += 1
+        self._cache = ([*ids, entry_id], new_matrix, new_matrix.shape[1] * 8, skipped)
+        return True
 
     def add_many(
         self,
@@ -259,6 +341,14 @@ class ImageLibrary:
         """
         if not rows:
             return 0
+        kept = [r for r in rows if not is_degenerate_phash(r.get("phash", ""))]
+        if len(kept) != len(rows):
+            # 批量扫描（/溯源重扫）会遇到大量纯色/纯渐变图：它们不入库，
+            # 但要留一条可追溯的日志，否则"扫了 1000 张只入库 300 张"无从解释
+            logger.info(f"批量入库跳过 {len(rows) - len(kept)} 条退化 pHash（纯色/平坦图）")
+        if not kept:
+            return 0
+        rows = kept
         created_at = self._now()
         params = [self._row_params(r, created_at) for r in rows]
         inserted = 0
@@ -269,6 +359,33 @@ class ImageLibrary:
                 inserted += max(0, cursor.rowcount)
         if reload_cache:
             self._reload_cache()
+        return inserted
+
+    def replace_source(self, source: str, rows: list, *, batch_size: int = 500) -> int:
+        """原子地用 rows 整体替换某个来源的记录，返回写入条数。
+
+        强制重建（/溯源重扫 force）不能先 DELETE 再逐批插入：中途异常、
+        进程被杀、磁盘写满都会让图库停在"旧数据已删、新数据只写了一半"
+        的状态，而哈希检索对此毫无察觉（少了条目只会表现为查不到）。
+        这里把删除与插入放进同一个事务：任何一步失败都整体回滚，旧数据
+        原样保留，最坏情况是这次重建没生效。
+        """
+        kept = [r for r in rows if not is_degenerate_phash(r.get("phash", ""))]
+        created_at = self._now()
+        params = [self._row_params(r, created_at) for r in kept]
+        inserted = 0
+        with self._lock:
+            try:
+                self._conn.execute("DELETE FROM images WHERE source = ?", (source,))
+                for start in range(0, len(params), max(1, batch_size)):
+                    cursor = self._conn.executemany(_INSERT_SQL, params[start : start + batch_size])
+                    inserted += max(0, cursor.rowcount)
+                self._conn.commit()
+            except BaseException:
+                # 事务里已包含 DELETE：回滚即恢复删除前的全部旧行
+                self._conn.rollback()
+                raise
+        self._reload_cache()
         return inserted
 
     def reload_cache(self) -> None:
@@ -356,7 +473,14 @@ class ImageLibrary:
             ).fetchall()
 
     def find_by_phash(self, phash: str) -> sqlite3.Row | None:
-        """按 pHash 精确查找（用于登记去重的快速预检）。"""
+        """按 pHash 精确查找（用于登记去重的快速预检）。
+
+        退化码（全零）恒返回 None：库里若还留着旧版本写入的全零行，直接按
+        字符串查会把它当成"这张纯色图已登记过"，而实际上任何纯色图都能
+        匹配上它。
+        """
+        if is_degenerate_phash(phash):
+            return None
         with self._lock:
             return self._conn.execute(
                 "SELECT * FROM images WHERE phash = ? LIMIT 1", (phash,)
@@ -381,6 +505,13 @@ class ImageLibrary:
         limit <= 0 时同样返回最多 1 条（与历史行为一致，调用方目前
         传入的 limit 恒为正数）。
         """
+        if is_degenerate_phash(phash):
+            # 退化查询码与另一张纯色图的距离恒为 0，任何返回都是误报；
+            # 只提示一次，避免 /溯源 纯色图时逐次刷屏
+            if not self._degenerate_warned:
+                self._degenerate_warned = True
+                logger.info("查询图为纯色/大面积平坦图（退化 pHash），按未命中处理")
+            return []
         cache = self._cache  # 快照：重建期间读到的也是完整一致的一代
         ids, _matrix, bits, _skipped = cache
         if not ids:
