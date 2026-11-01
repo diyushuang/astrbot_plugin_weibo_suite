@@ -22,7 +22,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r astrbot_plugin_weibo_suite/requirements.txt -r requirements-dev.txt
+          pip install -r requirements.txt -r requirements-dev.txt
       - name: Ruff
         run: |
           ruff check .
@@ -30,7 +30,7 @@ jobs:
       - name: Pytest
         run: pytest -q
       - name: Release manifest
-        run: python -m astrbot_plugin_weibo_suite.scripts.build_release --check
+        run: python scripts/build_release.py --check
 
   # 真实宿主门禁（装真 AstrBot 后跑两步）。
   #
@@ -57,7 +57,7 @@ jobs:
       - name: Install plugin + dev dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r astrbot_plugin_weibo_suite/requirements.txt -r requirements-dev.txt
+          pip install -r requirements.txt -r requirements-dev.txt
       # 与 metadata.yaml 的 astrbot_version 保持同一区间：<4.30 是"验证过的上界"，
       # 4.30+ 未验证，放宽前请先在本地把两步都跑绿。
       - name: Install real AstrBot
@@ -78,7 +78,7 @@ jobs:
           REAL_ASTRBOT_REQUIRED: "1"
           WEIBO_SUITE_REAL_ASTRBOT: "1"
         run: |
-          pytest astrbot_plugin_weibo_suite/tests/test_real_astrbot.py -q
+          pytest tests/test_real_astrbot.py -q
 
       # 第二步：全量套件跑在真 AstrBot 上。WEIBO_SUITE_REAL_ASTRBOT=1 让 conftest
       # 不再覆盖 sys.modules["astrbot"]，用例拿到的是真 Star / 真消息组件 / 真
@@ -90,4 +90,4 @@ jobs:
           WEIBO_SUITE_REAL_ASTRBOT: "1"
           PYTHONIOENCODING: utf-8
         run: |
-          pytest astrbot_plugin_weibo_suite/tests -q
+          pytest tests -q

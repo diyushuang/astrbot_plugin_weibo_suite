@@ -8,7 +8,7 @@
 ```bash
 python -m venv .venv
 .venv/Scripts/activate          # Windows，Linux/macOS 用 source .venv/bin/activate
-pip install -r astrbot_plugin_weibo_suite/requirements.txt -r requirements-dev.txt
+pip install -r requirements.txt -r requirements-dev.txt
 ```
 
 AstrBot 本体不需要装进这个 venv：域模块是普通类，测试直接构造实例即可。
@@ -19,14 +19,14 @@ AstrBot 本体不需要装进这个 venv：域模块是普通类，测试直接�
 ruff check .                                                     # 静态检查（CI 门禁）
 ruff format --check .                                            # 格式（CI 门禁）
 pytest -q                                                        # 全量测试
-python -m astrbot_plugin_weibo_suite.scripts.build_release --check   # 发布清单
+python scripts/build_release.py --check   # 发布清单
 ```
 
 四条全绿再提交。CI（`.github/workflows/ci.yml`）在 Python 3.10 与 3.12 上跑同样的门禁。
 
 ## 代码组织
 
-- **`@filter` 装饰器只能出现在 `astrbot_plugin_weibo_suite/main.py`。** AstrBot 按
+- **`@filter` 装饰器只能出现在仓库根的 `main.py`。** AstrBot 按
   `handler.__module__ == 插件模块路径` 绑定处理器，写在域模块里不会被绑定；
   在域模块里定义 `Star` 子类还会被误注册成独立插件。
 - 依赖方向固定为 `main -> weibo | trace | sns -> shared`；`weibo` 与 `trace`
@@ -78,9 +78,9 @@ docs: 补齐指令、配置与面板三份参考文档
 
 ## 分支与发布
 
-1. 按 `开发计划.md` 的阶段推进，不跨阶段做大规模合并。
+1. 按 [docs/ROADMAP.md](docs/ROADMAP.md) 的阶段推进，不跨阶段做大规模合并。
 2. 每个阶段更新 `CHANGELOG.md`（写在 `## [Unreleased]` 下，发布时再挪到版本号下）。
-3. 发布前 `python -m astrbot_plugin_weibo_suite.scripts.build_release` 生成产物，
+3. 发布前 `python scripts/build_release.py` 生成产物，
    并确认版本号在 `metadata.yaml`、`constants.py`、`weibo/constants.py`、
    `scripts/build_release.py` 四处一致。
 4. 真实部署验证前不得删除旧插件数据；迁移必须先备份、再复制、最后计数核对。

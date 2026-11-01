@@ -1,0 +1,21 @@
+name: astrbot_plugin_weibo_suite
+display_name: 微博全链路助手
+desc: 整合微博监控转发、整条微博归档、图床与向量管线、签到文案库和图片溯源，并提供统一管理面板。
+short_desc: 微博监控转发、归档、图床向量、签到文案与图片溯源的一体化插件
+version: v0.9.0
+author: diyushuang
+repo: https://github.com/diyushuang/astrbot_plugin_weibo_suite
+# 区间 = "验证过的范围"，不是"AstrBot 的版本范围"。
+#
+# 下限 4.28.0：本插件用到的 register_web_api(route, handler, methods, desc)、
+# astrbot.api.web 的 request/json_response/error_response（status_code 均为
+# keyword-only）、StarTools.get_data_dir、star_map/star_registry、LogManager 在
+# 4.28.0 源码里已全部存在且签名一致（逐项核对过），没有理由把 4.28.x 用户挡在门外。
+#
+# 上界 4.30：4.29.x 是用例实际跑绿的最后一个系列；4.30+ 未验证过，而且插件用到
+# 若干宿主非公开属性（如适配器 .bot / metadata.id），大版本内也可能漂移。放宽到
+# <4.30 之前请先在装了该版本的环境里跑 ci.yml 的 real-astrbot 两步并全绿。
+# CI（.github/workflows/ci.yml）的 pip 区间必须与这里同步，改一处就要改另一处。
+astrbot_version: ">=4.28.0,<4.30"
+support_platforms:
+  - aiocqhttp

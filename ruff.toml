@@ -10,6 +10,11 @@ ignore = ["BLE001", "RUF001", "RUF002", "RUF003"]
 quote-style = "double"
 indent-style = "space"
 
+[lint.isort]
+# 仓库根就是插件根，astrbot_plugin_weibo_suite 目录已不存在；不显式声明的话
+# ruff 会把它当第三方包，把 try/except 里的兜底导入重新排序（纯噪音 diff）。
+known-first-party = ["astrbot_plugin_weibo_suite"]
+
 [lint.per-file-ignores]
-"astrbot_plugin_weibo_suite/weibo/*.py" = ["F403", "F405"]
-"astrbot_plugin_weibo_suite/weibo/runtime.py" = ["F401", "RUF100"]
+"weibo/*.py" = ["F403", "F405"]
+"weibo/runtime.py" = ["F401", "RUF100"]

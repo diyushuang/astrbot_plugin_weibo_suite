@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全问题
+    url: https://github.com/diyushuang/astrbot_plugin_weibo_suite/security/advisories/new
+    about: 请勿用公开 issue 报告漏洞、凭据泄露或越权问题，走 Security Advisories
+  - name: 使用与配置问题
+    url: https://github.com/diyushuang/astrbot_plugin_weibo_suite/blob/main/docs/WEBUI.md
+    about: 面板打不开、改了配置没生效、后台任务卡住等，先看面板说明的常见问题一节
+  - name: 指令与配置速查
+    url: https://github.com/diyushuang/astrbot_plugin_weibo_suite/tree/main/docs
+    about: 53 条指令、179 个配置键、35 条面板路由都在 docs 目录里

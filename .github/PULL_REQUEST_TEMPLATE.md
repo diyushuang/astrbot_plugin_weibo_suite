@@ -13,7 +13,7 @@
 - [ ] `ruff check .` 通过
 - [ ] `ruff format --check .` 通过
 - [ ] `pytest -q` 全绿
-- [ ] `python -m astrbot_plugin_weibo_suite.scripts.build_release --check` 通过
+- [ ] `python scripts/build_release.py --check` 通过
 
 ## 影响面
 
@@ -21,7 +21,7 @@
 - [ ] 改了配置项 → 已同步 `docs/CONFIGURATION.md`
 - [ ] 改了面板路由或界面 → 已同步 `docs/WEBUI.md`
 - [ ] 新增运行期文件 → 已登记到 `scripts/build_release.py` 的 `PLUGIN_FILES`
-- [ ] 改了 `@filter` 处理器 → 确认装饰器只出现在 `astrbot_plugin_weibo_suite/main.py`
+- [ ] 改了 `@filter` 处理器 → 确认装饰器只出现在仓库根的 `main.py`
 - [ ] 涉及跨域调用 → 确认 `weibo` 与 `trace` 仍未互相导入，装配点在 `main.py`
 - [ ] 已在 `CHANGELOG.md` 的 `## [Unreleased]` 下记一条
 

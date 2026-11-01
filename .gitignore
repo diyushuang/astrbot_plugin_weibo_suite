@@ -27,15 +27,28 @@ _tools/
 .pytest-tmp/
 _tmp_pytest_run/
 .tmp-sns-pytest/
+.vscode/
+.idea/
 
 # 运行时数据（绝不入库：含用户 cookie、会话、归档与文案原文）
 data/plugin_data/
 # AstrBot core 初始化会在工作目录建 data/（cmd_config.json、t2i_templates/ 等）。
 # 装了真 astrbot 后跑 pytest 就会重建，属于纯副作用，不入库。
-/data/
+# 必须写成 /data/* 而非 /data/：Git 不会进入被整体排除的目录，
+# 目录一旦被排除，后面的 !/data/xxx 否定规则永远无效（check-ignore --no-index 可复现）。
+/data/*
+# 但以下两个文件必须随发布包分发（emoji-props.json 缺失会导致清洗功能崩溃），
+# 否定规则必须写在 /data/* 之后才生效。
+!/data/.gitkeep
+!/data/emoji-props.json
 *.db
 *.db-wal
 *.db-shm
+*.sqlite
+*.sqlite3
+*.db-journal
+# 运行日志目录（含抓取明细与报错堆栈）
+logs/
 # 微博文案导出目录：内容是真实文案原文，属于用户隐私
 copylib/
 
@@ -51,3 +64,7 @@ sessions*.json
 sns_state.json
 state.json
 **/sns_data/
+# 私钥类凭据（RSA / PEM / 各类 .key 文件）
+*.pem
+*.key
+id_rsa*

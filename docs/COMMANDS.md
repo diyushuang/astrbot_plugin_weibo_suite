@@ -9,7 +9,7 @@
 - 装饰器 `@filter.permission_type(filter.PermissionType.ADMIN)`：由 AstrBot 在分发前判定，非管理员通常收不到任何回复。本仓库绝大多数写操作属于此类。
 - 处理器内 `event.is_admin()`：进入指令后才判定，可以按配置开关。目前只有 `登记原图`（受 `basic.register_admin_only` 控制，默认开）与 `签到文案导入` 属于此类。
 
-指令注册集中在 `astrbot_plugin_weibo_suite/main.py`，业务实现在 `weibo/commands.py`、`sns/commands.py` 与 `trace/` 下；模块拆分的原因是 AstrBot 按 `handler.__module__` 绑定处理器，装饰器写进子模块会让处理器失效。
+指令注册集中在仓库根的 `main.py`，业务实现在 `weibo/commands.py`、`sns/commands.py` 与 `trace/` 下；模块拆分的原因是 AstrBot 按 `handler.__module__` 绑定处理器，装饰器写进子模块会让处理器失效。
 
 另有 1 个不对应聊天指令的注册项：`@filter.llm_tool(name="sendRandomMedia")`，它是给 LLM 调用的工具（参数 `directory`、`content_type`），由模型在对话里自行决定是否调用，不受本文的权限规则约束，因此不列入下方指令清单。
 

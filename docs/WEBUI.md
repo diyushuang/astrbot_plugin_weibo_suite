@@ -4,8 +4,8 @@
 
 面板由两部分组成：
 
-- 前端是纯静态资源，位于 `astrbot_plugin_weibo_suite/views/dashboard/`：`index.html`、`app.js`、`style.css`。没有打包步骤、没有 npm 依赖，原生 JavaScript 直接运行在 AstrBot 插件视图的 iframe 里。
-- 后端是 `astrbot_plugin_weibo_suite/views_backend/` 里用 `register_web_api()` 注册的路由：`dashboard.py` 28 条（微博域）、`sns_api.py` 7 条（订阅域），合计 35 条。
+- 前端是纯静态资源，位于 `views/dashboard/`：`index.html`、`app.js`、`style.css`。没有打包步骤、没有 npm 依赖，原生 JavaScript 直接运行在 AstrBot 插件视图的 iframe 里。
+- 后端是 `views_backend/` 里用 `register_web_api()` 注册的路由：`dashboard.py` 28 条（微博域）、`sns_api.py` 7 条（订阅域），合计 35 条。
 
 页面不直接请求这些路由，而是通过 AstrBot 的插件页面桥接对象（新版 `window.AstrBotPluginView`、旧版 `window.AstrBotPluginPage`）的 `apiGet()` / `apiPost()`，由宿主转发到 `/api/v1/plugins/extensions/<插件名>/<endpoint>`。所以页面文件不能在浏览器地址栏里直接打开，必须经 AstrBot WebUI 进入。
 
@@ -81,7 +81,7 @@
 
 ## 接口
 
-所有路由在注册时以插件名 `astrbot_plugin_weibo_suite`（`astrbot_plugin_weibo_suite/constants.py` 的 `PLUGIN_NAME`）作为前缀，下表省略该前缀，例如 `/overview` 的完整路径是 `/api/v1/plugins/extensions/astrbot_plugin_weibo_suite/overview`。在面板内调用时 endpoint 只写相对名（`overview`）。
+所有路由在注册时以插件名 `astrbot_plugin_weibo_suite`（`constants.py` 的 `PLUGIN_NAME`）作为前缀，下表省略该前缀，例如 `/overview` 的完整路径是 `/api/v1/plugins/extensions/astrbot_plugin_weibo_suite/overview`。在面板内调用时 endpoint 只写相对名（`overview`）。
 
 入参一列均指 JSON 请求体字段，由各 handler 通过 `request.json()` 读取；GET 路由即使没有请求体也走同一套读取逻辑，因此表里标注了「无」的才是真正不接受参数。业务失败统一返回非 2xx（`error_response`，默认 400，另有 404 / 409 / 500 / 503）。
 

@@ -1,7 +1,7 @@
 # 架构说明
 
 本文描述 `astrbot_plugin_weibo_suite` 的分层、数据流、生命周期与存储布局。
-面向要改代码的人；只想用插件请看 [插件 README](../astrbot_plugin_weibo_suite/README.md)，
+面向要改代码的人；只想用插件请看 [README](../README.md)，
 只想查指令或配置请看 [指令手册](COMMANDS.md) 与 [配置手册](CONFIGURATION.md)。
 
 ## 一、为什么是现在这个形状

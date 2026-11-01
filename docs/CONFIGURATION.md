@@ -1,6 +1,6 @@
 # 配置手册
 
-本手册逐项说明插件的配置键，内容以 `astrbot_plugin_weibo_suite/_conf_schema.json` 为唯一事实来源：面板里的分组、字段顺序、类型与默认值都由这份 schema 渲染，因此本手册的表格顺序与面板顺序一致。
+本手册逐项说明插件的配置键，内容以仓库根的 `_conf_schema.json` 为唯一事实来源：面板里的分组、字段顺序、类型与默认值都由这份 schema 渲染，因此本手册的表格顺序与面板顺序一致。
 
 配置在 AstrBot 管理面板中打开：**插件 → 本插件 → 配置**，保存后写入 AstrBot 的插件配置文件。也可以直接编辑该 JSON 文件，但不推荐：AstrBot 加载时会按 schema 做一次完整性检查，schema 里没有声明的键会被丢弃，类型不符的值会被纠正，手改很容易被静默覆盖。
 
@@ -468,7 +468,7 @@ Qdrant 向量检索与多模态 embedding。
 
 ### 迁移怎么发生
 
-主迁移在 `astrbot_plugin_weibo_suite/trace/main.py:619` 的 `_migrate_config_layout`：
+主迁移在 `trace/main.py` 的 `_migrate_config_layout`：
 
 1. 先看 `config_layout` 是否等于当前布局版本 `_LAYOUT_VERSION`，相等就直接返回，所以迁移只跑一次。
 2. 遍历 `_SCALAR_PATHS`，把旧平铺键里**非空**的值搬进 `basic` / `delivery` / `limits`；`image_delivery` 与 `qq_upload` 两个 dict 分别按 `_NAPCAT_KEY_MAP`、`_QQ_KEY_MAP` 映射搬进 `delivery`。
