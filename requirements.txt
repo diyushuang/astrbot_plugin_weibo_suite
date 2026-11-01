@@ -1,5 +1,5 @@
-aiohttp>=3.10
-pillow>=10.0.0
-numpy>=1.24.0
-pillow-heif>=0.16
+aiohttp>=3.14.5
+pillow>=13.0.0
+numpy>=2.5.4
+pillow-heif>=1.8.1
 playwright>=1.44
