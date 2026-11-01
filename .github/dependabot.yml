@@ -1,8 +1,9 @@
 version: 2
 
 updates:
-  # 运行期依赖（requirements.txt）——只在直接依赖有安全修复时才值得跟进，
-  # 这里统一按周聚合成一个 PR，避免逐个包开 PR 刷屏。
+  # 依赖升级统一聚合成一个 PR：这个插件的依赖只有四个运行期包 + 两个开发期包，
+  # 逐个开 PR 会变成每天一条通知、每个 PR 都跑一遍四 job 的 CI。
+  # 上限 1 意味着新的升级会在旧 PR 合并/关闭之后才开。
   - package-ecosystem: pip
     directory: "/"
     schedule:
@@ -10,28 +11,28 @@ updates:
       day: monday
       time: "09:00"
       timezone: Asia/Shanghai
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 1
     commit-message:
       prefix: "build"
-      include: scope
     labels:
       - dependencies
     groups:
-      runtime:
+      python-deps:
         patterns:
-          - "aiohttp"
-          - "Pillow"
-          - "numpy"
-          - "pillow-heif"
+          - "*"
 
   # 门禁用的 GitHub Actions：升级在 PR 里就能看到 CI 结果，风险最低。
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: monthly
-    open-pull-requests-limit: 2
+    open-pull-requests-limit: 1
     commit-message:
       prefix: "ci"
     labels:
       - dependencies
       - ci
+    groups:
+      actions:
+        patterns:
+          - "*"
