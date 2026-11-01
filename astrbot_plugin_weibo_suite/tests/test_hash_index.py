@@ -148,8 +148,8 @@ def test_search_matches_library_similarity_formula(index, tmp_path):
     library.add_if_absent(row)
     index.build([point("0011", pid="remote")])
 
-    local = library.search("0000", limit=1)[0]
-    remote = index.search("0000", limit=1)[0]
+    local = library.search("0010", limit=1)[0]
+    remote = index.search("0010", limit=1)[0]
     assert remote.similarity == pytest.approx(local.similarity)
     library.close()
 
@@ -315,3 +315,34 @@ def test_build_is_idempotent_and_replaces_previous_generation(index):
     index.build([point("0000", pid="a")])
     assert index.count == 1
     assert [h.id for h in index.search("0000", limit=5)] == ["a"]
+
+
+def test_skip_reasons_are_classified_and_add_up(index):
+    """跳过的每一条都要能归因：只有一个总数时，「少了 2000 条」无从排查。"""
+    index.build(
+        [
+            point("0000", pid="ok"),
+            "not-a-point",
+            {"id": "nopayload"},
+            {"id": "nophash", "payload": {"image_url": "http://x/1"}},
+            {"id": "degen", "payload": {"phash": DEGENERATE_SENTINEL, "image_url": "http://x/1"}},
+            {"id": "badhex", "payload": {"phash": "zzzz", "image_url": "http://x/1"}},
+            {"id": "nourl", "payload": {"phash": "1111"}},
+        ],
+        remote_count=7,
+    )
+
+    stats = index.stats()
+
+    assert stats["count"] == 1
+    assert stats["skipped"] == 6
+    assert stats["skipped_reasons"] == {
+        "点位非对象": 1,
+        "缺少 payload": 1,
+        "phash 缺失或非字符串": 1,
+        "退化图（哨兵占位）": 1,
+        "哈希格式非法（长度或字符）": 1,
+        "缺少可回传直链": 1,
+    }
+    # 分布之和必须恒等于总数，否则就是有人在中间又丢了一批条目
+    assert sum(stats["skipped_reasons"].values()) == stats["skipped"]

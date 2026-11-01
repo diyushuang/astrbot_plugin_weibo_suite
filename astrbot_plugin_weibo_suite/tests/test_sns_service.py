@@ -13,7 +13,7 @@ import pytest
 
 from astrbot_plugin_weibo_suite.sns import constants as C
 from astrbot_plugin_weibo_suite.sns import service as sns_service
-from astrbot_plugin_weibo_suite.sns.types import FetchResult, SnsPost
+from astrbot_plugin_weibo_suite.sns.types import FetchResult, SnsAccount, SnsPost
 
 
 class FakeConfig(dict):
@@ -224,12 +224,21 @@ def test_deliver_records_failure_when_channel_returns_failed(make_service):
     assert service.state.stats["by_platform"]["douyin"]["push_fail"] == 1
 
 
-def test_deliver_treats_unknown_as_sent(monkeypatch, make_service):
+def test_deliver_counts_unknown_separately_but_never_retries(monkeypatch, make_service):
+    """超时（unknown）既不能当成功，也不能重试——重试就是重复推送。
+
+    P2-5/P2-6 之后的口径：unknown **计入 delivered**（因此会被 mark_seen，
+    不会下一轮重复推），但记账走独立的 push_unknown，sent 不 +1。
+    以前这里断言 unknown 算 sent，面板上的"成功推送"数字因此虚高。
+    """
     service = make_service()
     _ok, _message, account = service.add_account("douyin", "MS4wLjABAAAAtest")
     service.p.deliver_result = "unknown"
     counts = _run(service._deliver(account, [post("1", 1)], warmup=False))
-    assert (counts["sent"], counts["failed"]) == (1, 0)
+    assert (counts["sent"], counts["unknown"], counts["failed"]) == (0, 1, 0)
+    assert counts["delivered"] == ["1"]  # 记已读，下一轮不重复推
+    assert service.state.retry_queue == []  # 但也不排补发
+    assert service.state.stats["by_platform"]["douyin"]["push_unknown"] == 1
 
 
 def test_payload_shape_is_the_delivery_contract(make_service):
@@ -338,3 +347,278 @@ def _run(coro):
     import asyncio
 
     return asyncio.run(coro)
+
+
+# ---------------------------------------------------------------- 回归：状态与重试
+
+
+def test_state_is_loaded_at_construction_so_save_never_wipes(tmp_path):
+    """P1-1 回归：`sns.enabled=false` 时服务不会 start，但面板/指令仍会构造它。
+
+    修复前 load 只在 `start()` 里调，而 `add_account` 立刻 `save()`（整文件
+    覆盖），于是"关掉轮询再加一个订阅"会把磁盘上所有订阅清空。
+    """
+    from astrbot_plugin_weibo_suite.sns.state import SnsState
+
+    # 预置两条订阅
+    seed = SnsState(tmp_path)
+    seed.add(SnsAccount(platform="douyin", account_id="a", name="甲"))
+    seed.add(SnsAccount(platform="douyin", account_id="b", name="乙"))
+    assert seed.save() is True
+
+    # 新实例（等价于 enabled=false 时的惰性构造），不调 start() 直接写
+    fresh = SnsState(tmp_path)
+    assert set(fresh.accounts) == {"douyin:a", "douyin:b"}
+    fresh.add(SnsAccount(platform="xhs", account_id="c", name="丙"))
+    assert fresh.save() is True
+
+    reloaded = SnsState(tmp_path)
+    assert set(reloaded.accounts) == {"douyin:a", "douyin:b", "xhs:c"}
+
+
+def test_service_adds_subscription_without_start_and_keeps_existing(tmp_path):
+    """P1-1 的端到端版本：走真实 `SnsService`（`sns.enabled=false` 时不 start）。"""
+    from astrbot_plugin_weibo_suite.sns.state import SnsState
+
+    seed = SnsState(tmp_path)
+    seed.add(SnsAccount(platform="douyin", account_id="MS4wLjABAAAAold1"))
+    seed.add(SnsAccount(platform="douyin", account_id="MS4wLjABAAAAold2"))
+    assert seed.save() is True
+
+    plugin = FakePlugin({"sns": {"enabled": False, "push_sessions": ["g:1"]}})
+    plugin._data_dir = str(tmp_path)
+    service = sns_service.SnsService(plugin)  # 关键：不调 start()
+
+    ok, _message, account = service.add_account("douyin", "MS4wLjABAAAAtest")
+    assert ok is True and account is not None
+
+    reloaded = SnsState(tmp_path)
+    assert set(reloaded.accounts) == {
+        "douyin:MS4wLjABAAAAold1",
+        "douyin:MS4wLjABAAAAold2",
+        "douyin:MS4wLjABAAAAtest",
+    }, "关掉轮询后加订阅，把已有订阅清空了"
+
+
+def test_partial_session_failure_marks_post_seen_and_retries_only_failed_session(
+    make_service, monkeypatch
+):
+    """P2-5/P2-6 回归："已读"与"每个会话收没收到"是两个粒度。
+
+    已读 = 这条 post 不再进 fresh 全量推送；还没收到的会话只由 retry_queue 补。
+    修复前"有会话失败就不记已读"，于是下一轮 fresh 会对**所有**会话重推一遍，
+    只要有一个群长期发不出去，每个周期都刷屏。
+    """
+    service = make_service()
+    _ok, _message, account = service.add_account("douyin", "MS4wLjABAAAAtest")
+    account.baseline_done = True
+    # 两个推送目标：一个能发、一个发不出去
+    monkeypatch.setattr(service, "sessions", lambda: ["g:1", "g:2"])
+
+    calls: list[str] = []
+
+    async def deliver(payload, session, **_kwargs):
+        calls.append(session)
+        return "sent" if session == "g:1" else "failed"
+
+    monkeypatch.setattr(service.p, "deliver_sns_payload", deliver, raising=False)
+    counts = _run(service._deliver(account, [post("1", 1)], warmup=False))
+
+    # 失败会话已全部入队 → 整条记已读，不再走 fresh 全量推送
+    assert counts["delivered"] == ["1"]
+    assert (counts["sent"], counts["failed"], counts["retry"]) == (0, 1, 1)
+    # 只有失败的会话进了补发队列
+    assert [row["session"] for row in service.state.retry_queue] == ["g:2"]
+    # 成功的那群照样记账（不能因为同一条在别处失败就吞掉）
+    assert service.state.stats["by_platform"]["douyin"]["push_ok"] == 1
+
+    # 下一轮只对该群补发，成功群不会收到重复消息
+    calls.clear()
+    _run(service._drain_retries(account))
+    assert calls == ["g:2"]
+
+
+def test_save_refuses_when_state_never_loaded(tmp_path, monkeypatch):
+    """读盘失败（且备份也失败）时，save 必须拒绝，绝不能用空状态盖掉用户数据。"""
+    from astrbot_plugin_weibo_suite.sns.state import SnsState
+
+    seed = SnsState(tmp_path)
+    seed.add(SnsAccount(platform="douyin", account_id="a"))
+    assert seed.save() is True
+
+    broken = SnsState(tmp_path)
+    broken._loaded = False  # 模拟"没读到、也不能写"
+    broken.add(SnsAccount(platform="douyin", account_id="z"))
+    assert broken.save() is False
+
+    again = SnsState(tmp_path)
+    assert set(again.accounts) == {"douyin:a"}, "用户在磁盘上的订阅被静默覆盖了"
+
+
+def test_add_feed_rejects_private_and_loopback_addresses(make_service, monkeypatch):
+    """P1-2 回归：RSS 地址是群成员输入，必须过 SSRF 校验。
+
+    `add_feed` 以前只判了 scheme，`http://127.0.0.1:8080/x` 与云元数据地址
+    都能被订成"RSS 源"，然后由后台轮询替攻击者把响应读回群里。
+    """
+    from astrbot_plugin_weibo_suite.shared import http as shared_http
+
+    service = make_service()
+    for url in (
+        "http://127.0.0.1:8080/feed.xml",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://10.0.0.5/internal.xml",
+        "file:///etc/passwd",
+    ):
+        ok, _message, account = _run(service.add_feed(url))
+        assert ok is False, f"{url} 不该被接受"
+        assert account is None
+    assert service.state.accounts == {}
+
+    # 公网地址放行（DNS 用桩，避免依赖外网）
+    monkeypatch.setattr(shared_http, "resolve_public_addrs", lambda url, allowed=None: (url, []))
+    ok, _message, account = _run(service.add_feed("https://example.com/feed.xml", "我的源"))
+    assert ok is True
+    assert account.platform == "rss"
+    assert account.name == "我的源"
+
+
+def test_delivery_failure_is_queued_and_retried_next_round(make_service):
+    """P2-5/P2-6 回归：失败会话进持久化补发队列，下一轮**只**补那个会话。
+
+    已读与"送没送到"解耦：这条照样记已读（不再进 fresh 全量推送，否则每轮
+    把内容重推给所有正常会话），投递由 retry_queue 逐会话补齐。
+    """
+    service = make_service()
+    _ok, _message, account = service.add_account("douyin", "MS4wLjABAAAAtest")
+    account.baseline_done = True
+    service.p.deliver_result = "failed"
+    counts = _run(service._deliver(account, [post("1", 1)], warmup=False))
+    assert (counts["sent"], counts["failed"]) == (0, 1)
+    assert counts["delivered"] == ["1"], "失败会话已入队，这条就该记已读"
+    assert len(service.state.retry_queue) == 1
+    assert service.state.retry_queue[0]["post_id"] == "1"
+
+    # 第二轮流恢复正常：补发成功、出队、记账 push_ok
+    service.p.deliver_result = "sent"
+    drained = _run(service._drain_retries(account))
+    assert drained["sent"] == 1
+    assert service.state.retry_queue == []
+
+
+def test_retry_gives_up_after_max_attempts(make_service):
+    """补发不能无限重试：达到上限后放弃并留痕，否则一条坏会话会卡住整个队列。"""
+    service = make_service()
+    _ok, _message, account = service.add_account("douyin", "MS4wLjABAAAAtest")
+    service.p.deliver_result = "failed"
+    _run(service._deliver(account, [post("1", 1)], warmup=False))
+    assert len(service.state.retry_queue) == 1
+
+    for _ in range(C.MAX_PUSH_RETRIES):
+        _run(service._drain_retries(account))
+    assert service.state.retry_queue == []
+    assert any(row["kind"] == "push_fail" for row in service.state.events)
+
+
+def test_partial_session_failure_never_rebroadcasts_to_successful_session(
+    make_service, monkeypatch
+):
+    """P1 回归（刷屏级）+ 走**真实** `_check_account`，不是只调 _deliver。
+
+    g:1 能发、g:2 每轮必失败。修复前第 1 轮不记已读，第 2 轮 fresh 对**两个**
+    会话又推一遍，同时 drain 再补 g:2，调用序列是 [g:2, g:1, g:2] —— 正常的
+    群每轮都被重推同一条内容。修复后第 2 轮 g:1 零调用、g:2 恰好一次。
+    """
+    service = make_service()
+    _ok, _message, account = service.add_account("douyin", "MS4wLjABAAAAtest")
+    account.baseline_done = True
+    monkeypatch.setattr(service, "sessions", lambda: ["g:1", "g:2"])
+    calls: list[tuple[str, str]] = []
+
+    async def deliver(payload, session, **_kwargs):
+        calls.append((payload["dedupe_key"].rsplit(":", 1)[-1], session))
+        return "sent" if session == "g:1" else "failed"
+
+    monkeypatch.setattr(service.p, "deliver_sns_payload", deliver, raising=False)
+    service._fetch = _async_return(FetchResult.success([post("1", 100)]))
+
+    _run(service._check_account(account))
+    assert calls == [("1", "g:1"), ("1", "g:2")], "第 1 轮：两个会话各一次"
+
+    calls.clear()
+    _run(service._check_account(account))
+    assert calls == [("1", "g:2")], f"第 2 轮只该补发失败的 g:2，实际 {calls}"
+    assert account.seen("1"), "失败会话已入队，这条就该记已读（不再进 fresh）"
+
+
+def test_all_session_failure_marks_seen_and_never_double_sends(make_service, monkeypatch):
+    """P1 回归：全部会话失败也要记已读，否则每轮 fresh 全量重推 + 补发 = 双份。
+
+    每轮每个会话最多被调用一次；重试次数耗尽后不再有任何调用。
+    """
+    service = make_service()
+    _ok, _message, account = service.add_account("douyin", "MS4wLjABAAAAtest")
+    account.baseline_done = True
+    monkeypatch.setattr(service, "sessions", lambda: ["g:1", "g:2"])
+    calls: list[str] = []
+
+    async def deliver(_payload, session, **_kwargs):
+        calls.append(session)
+        return "failed"
+
+    monkeypatch.setattr(service.p, "deliver_sns_payload", deliver, raising=False)
+    service._fetch = _async_return(FetchResult.success([post("1", 100)]))
+
+    _run(service._check_account(account))
+    assert calls == ["g:1", "g:2"], "第 1 轮：两个会话各一次"
+    assert account.seen("1"), "全失败也要记已读，否则下一轮重推全部会话"
+
+    for _ in range(C.MAX_PUSH_RETRIES + 1):
+        calls.clear()
+        _run(service._check_account(account))
+        # 每轮只能是"补发每会话一次"或"没有可补的"，绝不能是 fresh 的 2 次 + 补发 2 次
+        assert sorted(calls) in ([], ["g:1", "g:2"]), f"同一轮重复推送了：{calls}"
+    assert service.state.retry_queue == [], "重试次数耗尽后队列必须清空"
+    calls.clear()
+    _run(service._check_account(account))
+    assert calls == [], "队列空了就不该再发（更不该回头走 fresh 重推）"
+
+
+def test_retry_queue_overflow_is_recorded_not_silently_dropped(make_service, monkeypatch):
+    """队列满了会丢最旧的补发项 —— 因为"入队即记已读"，这就是永久丢消息。
+
+    不能静默：必须留一条 error 事件，否则用户永远不知道为什么少收一条。
+    """
+    service = make_service()
+    _ok, _message, account = service.add_account("douyin", "MS4wLjABAAAAtest")
+    monkeypatch.setattr(service, "sessions", lambda: ["g:1"])
+    monkeypatch.setattr(C, "RETRY_QUEUE_LIMIT", 2)
+    for index in range(3):
+        service._enqueue_retry(account, post(str(index), 100 + index), {"k": index}, "g:1")
+
+    assert len(service.state.retry_queue) == 2
+    overflow = [row for row in service.state.events if "补发队列已满" in str(row.get("text"))]
+    assert len(overflow) == 1, "队列溢出必须留痕"
+
+
+def test_check_all_persists_mark_seen_even_when_a_check_raises(make_service, monkeypatch):
+    """P3-13 回归：状态落盘以前在 try 主体末尾，异常一抛就全丢。
+
+    表现为面板一直显示同一条"新内容"（mark_seen 只在内存里）。
+    """
+    service = make_service()
+    _ok, _message, account = service.add_account("douyin", "MS4wLjABAAAAtest")
+    account.baseline_done = True
+
+    async def boom(_account):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(service, "_check_account", boom)
+    result = _run(service.check_all(force=True))
+    # 轮次本身跑完了（ok 表示"执行了"，不是"每条都成功"），但失败被单独计数
+    assert result["ok"] is True
+    assert result["failed"] == 1
+    assert [row["key"] for row in result["detail"]] == ["douyin:MS4wLjABAAAAtest"]
+    assert "检查异常" in result["detail"][0]["label"]
+    # 异常之后仍然写出了状态文件
+    assert service.state.path.exists()

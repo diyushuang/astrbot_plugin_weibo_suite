@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import json
 import logging
@@ -17,7 +18,7 @@ import numpy as np
 import pytest
 from PIL import Image, UnidentifiedImageError
 
-from astrbot_plugin_weibo_suite.trace import features, image_bed
+from astrbot_plugin_weibo_suite.trace import features, image_bed, vector_search
 from astrbot_plugin_weibo_suite.trace.features import (
     compute_features_with_mime,
     compute_features_with_thumbnail,
@@ -32,6 +33,33 @@ from astrbot_plugin_weibo_suite.trace.vector_search import (
 # ----------------------------------------------------------------------
 # 公共替身
 # ----------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _capture_debug(caplog, *loggers):
+    """把目标 logger 的 DEBUG 记录送进 caplog。
+
+    真宿主模式下 `from astrbot.api import logger` 拿到的是 AstrBot 自己的
+    logger：`LogManager.GetLogger` 把它设成 `propagate = False` 且级别 INFO
+    （astrbot/core/log.py 的 GetLogger 末尾两行），于是 pytest 挂在 root 上的
+    捕获 handler 一条 DEBUG 都收不到——桩模式下它只是个 propagate=True 的普通
+    logger，所以这些断言以前一直是绿的。
+
+    这里只对"不往上传播"的 logger 补一条直挂的捕获 handler 并临时放开级别；
+    断言文本一条没改，改的只是记录到达 caplog 的路径。
+    """
+    targets = [lg for lg in loggers if lg is not None and not lg.propagate]
+    for lg in targets:
+        lg.addHandler(caplog.handler)
+        lg.setLevel(logging.DEBUG)
+    try:
+        with caplog.at_level(logging.DEBUG):
+            yield
+    finally:
+        for lg in targets:
+            lg.setLevel(logging.NOTSET)
+            if caplog.handler in lg.handlers:
+                lg.removeHandler(caplog.handler)
 
 
 class _FakeResponse:
@@ -226,7 +254,7 @@ async def test_store_generic_http_ignores_folder(tmp_path, monkeypatch, caplog):
     )
     monkeypatch.setattr(image_bed, "read_limited_text", _fake_read_text)
 
-    with caplog.at_level(logging.DEBUG):
+    with _capture_debug(caplog, image_bed.logger):
         stored = await client.store(str(source), folder="thumbnails")
 
     assert stored.ok is True
@@ -478,7 +506,7 @@ async def test_upsert_file_batch_disabled_engine_returns_zero(monkeypatch, caplo
     monkeypatch.setattr(engine, "_request_json", request_json)
 
     entries = [VectorPointInput("/tmp/a.jpg", "phash:aa", "https://img.example.com/a.jpg")]
-    with caplog.at_level(logging.DEBUG):
+    with _capture_debug(caplog, vector_search.logger):
         assert await engine.upsert_file_batch(entries) == 0
     assert called == []
     assert "批量登记" in caplog.text

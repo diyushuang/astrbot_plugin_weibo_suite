@@ -117,14 +117,20 @@ def test_heic_container_is_recognized_even_without_decoder(tmp_path):
 
 @pytest.mark.skipif(not heif_available(), reason="未安装 pillow-heif")
 def test_heic_is_decodable_when_pillow_heif_is_installed(tmp_path):
-    """装了 pillow-heif 后，HEIC 要能正常识别、完整解码并参与特征计算。"""
+    """装了 pillow-heif 后，HEIC 要能正常识别、完整解码并参与特征计算。
+
+    用噪声图而非纯色图：纯色图的感知哈希退化为全零码（is_degenerate_phash
+    判真、不入库），那样只能验证「解出宽高」，验证不了真的算出了可检索的哈希。
+    """
     path = tmp_path / "photo.heic"
-    Image.new("RGB", (32, 24), color=(10, 20, 30)).save(path, format="HEIF")
+    Image.effect_noise((32, 24), 48).convert("RGB").save(path, format="HEIF")
 
     assert image_file_ok(path)
     assert image_mime(path) == "image/heic"
     feats = compute_features(path, hash_size=8)
     assert (feats.width, feats.height) == (32, 24)
+    assert not features.is_degenerate_phash(feats.phash)
+    assert len(feats.phash) == phash_hex_len(8)
 
 
 def test_image_bytes_ok_matches_image_file_ok(tmp_path):
@@ -185,3 +191,59 @@ def test_compute_features_with_mime_opens_image_once(tmp_path, monkeypatch):
     assert mime == "image/png"
     assert (feats.width, feats.height) == (32, 24)
     assert len(feats.phash) == phash_hex_len(8)
+
+
+# ----------------------------------------------------------------------
+# 退化 pHash（纯色/大面积平坦图）
+# ----------------------------------------------------------------------
+
+
+def test_is_degenerate_phash_recognizes_all_zero_codes():
+    """退化判据只有一处实现：全零码（任意长度/空白）即退化，非零一律不算。"""
+    assert features.is_degenerate_phash(None) is True
+    assert features.is_degenerate_phash("") is True
+    assert features.is_degenerate_phash("   ") is True
+    assert features.is_degenerate_phash("0" * 16) is True
+    assert features.is_degenerate_phash("0" * 64) is True
+    assert features.is_degenerate_phash("0f") is False
+    assert features.is_degenerate_phash("1000") is False
+
+
+def test_solid_color_images_all_hash_to_the_same_degenerate_code(tmp_path):
+    """纯色图必须被判成退化：六种颜色 pHash 全同，两两汉明距离为 0。
+
+    这类码一旦入库，任意纯色图都会以相似度 1.0 命中库里第一条纯色记录。
+    """
+    codes = set()
+    colors = [
+        (255, 0, 0),
+        (0, 255, 0),
+        (0, 0, 255),
+        (128, 128, 128),
+        (0, 0, 0),
+        (255, 255, 255),
+    ]
+    for color in colors:
+        path = tmp_path / f"{'-'.join(str(value) for value in color)}.png"
+        Image.new("RGB", (64, 64), color=color).save(path)
+        feats = compute_features(path, hash_size=8)
+        assert features.is_degenerate_phash(feats.phash) is True
+        codes.add(feats.phash)
+    assert codes == {"0" * 16}
+
+
+def test_flat_page_with_content_is_not_degenerate(tmp_path):
+    """白底带内容的截图不能误判成退化图——聊天里绝大多数截图就是这种形态。"""
+    from PIL import ImageDraw
+
+    path = tmp_path / "page.png"
+    image = Image.new("RGB", (240, 160), color=(255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((12, 12, 90, 40), fill=(0, 0, 0))
+    draw.rectangle((12, 60, 180, 74), fill=(20, 20, 20))
+    draw.rectangle((150, 100, 220, 148), fill=(60, 60, 60))
+    image.save(path)
+
+    feats = compute_features(path, hash_size=8)
+
+    assert features.is_degenerate_phash(feats.phash) is False

@@ -16,6 +16,8 @@ import asyncio
 
 import pytest
 
+from astrbot_plugin_weibo_suite.tests.host_compat import chain_segments, image_ref
+
 GROUP = "aiocqhttp:GroupMessage:12345"
 PRIVATE = "aiocqhttp:FriendMessage:12345"
 
@@ -50,7 +52,7 @@ class _Recorder:
 
     async def __call__(self, session, chain):
         self.sessions.append(session)
-        self.chains.append(list(chain))
+        self.chains.append(chain_segments(chain))
         if self.delay:
             await asyncio.sleep(self.delay)
         if self.error is not None:
@@ -59,15 +61,15 @@ class _Recorder:
 
 
 def _texts(chain):
-    return [getattr(part, "text", "") for part in chain if hasattr(part, "text")]
+    return [getattr(part, "text", "") for part in chain_segments(chain) if hasattr(part, "text")]
 
 
 def _images(chain):
-    return [part for part in chain if getattr(part, "url", None)]
+    return [ref for ref in (image_ref(seg) for seg in chain_segments(chain)) if ref]
 
 
 def _has_at_all(chain):
-    return any(getattr(part, "qq", "") == "all" for part in chain)
+    return any(getattr(part, "qq", "") == "all" for part in chain_segments(chain))
 
 
 def _run(make_weibo_plugin, config=None, *, recorder=None):

@@ -352,9 +352,187 @@ async def test_upload_base64_precheck_rejects_before_decode(api, monkeypatch):
     """超大 base64 按长度预检直接拒绝，不先解进内存。"""
     monkeypatch.setattr(dashboard, "_UPLOAD_MAX_BYTES", 10)
     payload = base64.b64encode(b"x" * 20).decode()
-    path, error = await api._read_upload({"filename": "big.csv", "content_base64": payload})
+    path, error, status = await api._read_upload({"filename": "big.csv", "content_base64": payload})
     assert path is None
+    assert status == 413
     assert "64MB" in error
+
+
+async def test_upload_rejects_unsupported_suffix(api):
+    path, error, status = await api._read_upload(
+        {"filename": "evil.exe", "content_base64": base64.b64encode(b"x").decode()}
+    )
+    assert (path, status) == (None, 400)
+    assert "只接受" in error
+
+
+class FakeUpload:
+    """模拟 StarletteUploadFile：size 有值、read(n) 按块返回，并记录每次 read 的实参。
+
+    记录 read 实参是本组用例的关键：旧实现的过错正是 `read(-1)` 一次性读全量，
+    只断言「最终结果正确」是抓不到的（内存里读 32 字节和分 8 次读 32 字节
+    返回值完全一样），必须断言**读取粒度**。
+    """
+
+    def __init__(self, data: bytes, filename: str = "big.csv", *, declared_size=None):
+        self._data = data
+        self._offset = 0
+        self.filename = filename
+        # declared_size 可以撒谎：真实场景里 Content-Length/size 不可信，
+        # 预先声明的大小只是优化，落盘时仍必须自己累计校验。
+        self.size = len(data) if declared_size is None else declared_size
+        self.read_calls: list[int] = []
+
+    async def read(self, size: int = -1):
+        self.read_calls.append(size)
+        if size is None or size < 0:
+            chunk, self._offset = self._data[self._offset :], len(self._data)
+            return chunk
+        chunk = self._data[self._offset : self._offset + size]
+        self._offset += len(chunk)
+        return chunk
+
+
+class FakeUploadRequest:
+    def __init__(self, upload):
+        self._upload = upload
+
+    async def files(self):
+        return {"file": self._upload}
+
+    async def form(self):
+        return {}
+
+
+@pytest.fixture
+def replace_spy(monkeypatch):
+    """记录 os.replace 调用（转发给真实实现，不影响其他代码）。"""
+    calls: list[tuple[str, str]] = []
+    real_replace = dashboard.os.replace
+
+    def spy(src, dst):
+        calls.append((str(src), str(dst)))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(dashboard.os, "replace", spy)
+    return calls
+
+
+async def test_upload_streams_in_chunks_and_aborts_on_limit(api, monkeypatch, replace_spy):
+    """multipart 分支按 _UPLOAD_CHUNK_BYTES 分块读，累计超限立刻停并清理半成品。
+
+    关键点：size 预检必须**不生效**（这里让 upload.size 撒谎成 4，小于上限 10），
+    否则会像旧用例那样在 `storage.size` 预检处直接 413、`_store_stream` 压根没被
+    调用——那时无论实现改成 `read(-1)` 还是删掉 .part 清理，用例都照样绿。
+    """
+    monkeypatch.setattr(dashboard, "_UPLOAD_MAX_BYTES", 10)
+    monkeypatch.setattr(dashboard, "_UPLOAD_CHUNK_BYTES", 4)
+    upload = FakeUpload(b"y" * 32, declared_size=4)
+    monkeypatch.setattr(dashboard, "web_request", FakeUploadRequest(upload))
+
+    path, error, status = await api._read_upload({"filename": "big.csv"})
+
+    assert (path, status) == (None, 413)
+    assert "64MB" in error
+    # 读取粒度必须是分块上限，而不是 -1/None 一次性读
+    assert upload.read_calls, "必须真的进入流式读取分支"
+    assert set(upload.read_calls) == {4}, f"应按 4 字节分块读取，实际 {upload.read_calls}"
+    assert len(upload.read_calls) > 1, "一次性把内容读完说明没有分块"
+    # 累计到 12 字节就该中止，不该把 32 字节全读完（4 块 × 4 = 16 已超）
+    assert upload._offset <= 16, f"超过上限后仍在继续读，已读 {upload._offset} 字节"
+    assert replace_spy == [], "超限时不得把半成品改名为成品"
+    leftovers = list((api.p._data_dir / "webui_uploads").glob(".upload-*.part"))
+    assert leftovers == [], "超限时必须删掉半成品"
+    assert list((api.p._data_dir / "webui_uploads").iterdir()) == [], "失败后不得留下任何文件"
+
+
+async def test_upload_aborts_on_observed_oversize_even_when_size_lies(api, monkeypatch):
+    """size 谎报成 1 字节也不能绕过上限：落盘时按实际累计字节数校验。"""
+    monkeypatch.setattr(dashboard, "_UPLOAD_MAX_BYTES", 8)
+    upload = FakeUpload(b"z" * 100, declared_size=1)
+    monkeypatch.setattr(dashboard, "web_request", FakeUploadRequest(upload))
+
+    path, error, status = await api._read_upload({"filename": "big.json"})
+
+    assert (path, status) == (None, 413)
+    assert "64MB" in error
+    assert list((api.p._data_dir / "webui_uploads").iterdir()) == []
+
+
+async def test_upload_streams_to_file_when_within_limit(api, monkeypatch, replace_spy):
+    """正常路径：分块读完后原子改名，内容与写入字节完全一致，不留 .part。"""
+    monkeypatch.setattr(dashboard, "_UPLOAD_CHUNK_BYTES", 4)
+    payload = b"a,b\n1,2\n"
+    upload = FakeUpload(payload, filename="small.csv")
+    monkeypatch.setattr(dashboard, "web_request", FakeUploadRequest(upload))
+
+    path, error, status = await api._read_upload({"filename": "small.csv"})
+
+    assert (error, status) == ("", 0)
+    assert path is not None
+    assert path.read_bytes() == payload
+    assert path.suffix == ".csv"
+    assert set(upload.read_calls) == {4}, "落盘也应按分块上限读取"
+    assert len(replace_spy) == 1, "成功时必须原子改名一次"
+    assert replace_spy[0][1].endswith(".csv")
+    assert not list((api.p._data_dir / "webui_uploads").glob("*.part"))
+    assert list((api.p._data_dir / "webui_uploads").iterdir()) == [path]
+
+
+class CheckPlugin:
+    """check_now 需要的最小插件面：账号、冷却、去重标志、一轮检查。"""
+
+    def __init__(self, tmp_path):
+        self._data_dir = tmp_path
+        self.config = {}
+        self.accounts = ["42"]
+        self._checking = False
+        self._blocked_until = 0.0
+        self._manual_check_task = None
+        self.events = []
+        self.started = 0
+        self.release = None
+
+    async def check_all(self):
+        self.started += 1
+        if self.release is not None:
+            await self.release.wait()
+        return 1
+
+    def _record_event(self, kind, **kwargs):
+        self.events.append(f"{kind}:{kwargs.get('detail', '')}")
+
+
+async def test_check_now_task_is_cancelled_by_shutdown(tmp_path, monkeypatch):
+    """手动检查必须进 _jobs：否则卸载时撤不掉，关库后还在写。"""
+    import asyncio
+
+    monkeypatch.setattr(dashboard, "_WEB_AVAILABLE", True)
+    monkeypatch.setattr(dashboard, "json_response", lambda payload: Resp(payload))
+    monkeypatch.setattr(
+        dashboard, "error_response", lambda message, *, status_code=400: Resp({}, status_code)
+    )
+    plugin = CheckPlugin(tmp_path)
+    plugin.release = asyncio.Event()
+    api = dashboard.DashboardAPI(
+        plugin, "astrbot_plugin_weibo_suite", "v0.7.0", lambda text: text, lambda text: text
+    )
+
+    first = await api.check_now()
+    assert first.payload == {"started": True}
+    task = plugin._manual_check_task
+    assert task in api._jobs, "任务必须登记到 _jobs，否则 shutdown 取消不到"
+    await asyncio.sleep(0)
+    assert plugin.started == 1
+
+    await api.shutdown()
+
+    assert task.done(), "shutdown 之后任务必须已经结束"
+    assert api._jobs == set()
+    # 已经在等待的检查被撤掉后，可以再次发起
+    again = await api.check_now()
+    assert again.payload == {"started": True}
+    await api.shutdown()
 
 
 def test_prune_upload_dir_drops_stale_files(tmp_path):
@@ -387,3 +565,15 @@ def test_safe_error_masks_url_and_ip(api):
     text = api._safe_error("failed http://127.0.0.1:8080/secret from 10.1.2.3")
     assert "127.0.0.1" not in text
     assert "10.1.2.3" not in text
+
+
+def test_safe_error_masks_local_absolute_paths(api):
+    # 异常串里的部署目录/用户名不该回传给浏览器
+    posix = api._safe_error("FileNotFoundError: [Errno 2] '/home/alice/.astrbot/data/x.json'")
+    assert "/home/alice" not in posix
+    assert "<路径已隐藏>" in posix
+    win = api._safe_error("PermissionError: [WinError 5] 'C:\\Users\\bob\\AstrBot\\data\\a.db'")
+    assert "bob" not in win
+    assert "<路径已隐藏>" in win
+    # 相对路径与普通文本不该被误伤
+    assert api._safe_error("archives/seed.json 解析失败") == "archives/seed.json 解析失败"

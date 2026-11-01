@@ -11,6 +11,11 @@ import pytest
 from astrbot.api.message_components import Image
 from PIL import Image as PILImage
 
+from astrbot_plugin_weibo_suite.tests.host_compat import (
+    command_alias_of,
+    command_name_of,
+    image_ref,
+)
 from astrbot_plugin_weibo_suite.trace.features import compute_features, heif_available
 
 
@@ -42,7 +47,7 @@ async def test_random_image_delivers_scaled_url_with_filename_caption(
     assert "x.jpg" in _chain_text(result)
     images = _chain_images(result)
     assert len(images) == 1
-    url = images[0].url
+    url = image_ref(images[0])
     assert "width=1920" in url
     assert "height=1920" in url
     assert "fallback=original" in url
@@ -127,7 +132,7 @@ async def test_original_image_returns_unprocessed_url_without_local_download(
     assert result.kind == "chain"
     images = _chain_images(result)
     assert len(images) == 1
-    url = images[0].url
+    url = image_ref(images[0])
     assert url == f"{imgbed.base_url}/file/x.jpg"
     for token in ("width=", "height=", "fit=", "fallback="):
         assert token not in url
@@ -141,7 +146,7 @@ async def test_original_image_strips_imgbed_processing_params(make_plugin, imgbe
 
     results = await _collect(plugin.original_image(make_event("/原图 x.jpg", origin=origin)))
 
-    url = _chain_images(results[0])[0].url
+    url = image_ref(_chain_images(results[0])[0])
     assert url == f"{imgbed.base_url}/file/x.jpg"
 
 
@@ -185,9 +190,9 @@ async def test_original_image_looks_up_bed_when_history_is_empty(make_plugin, im
 
     images = _chain_images(results[0])
     assert len(images) == 1
-    assert images[0].url == f"{imgbed.base_url}/file/sunset.jpg"
+    assert image_ref(images[0]) == f"{imgbed.base_url}/file/sunset.jpg"
     for token in ("width=", "height=", "fit=", "fallback="):
-        assert token not in images[0].url
+        assert token not in image_ref(images[0])
 
 
 async def test_original_image_falls_back_to_quoted_image_name(make_plugin, imgbed, make_event):
@@ -203,7 +208,7 @@ async def test_original_image_falls_back_to_quoted_image_name(make_plugin, imgbe
 
     images = _chain_images(results[0])
     assert len(images) == 1
-    assert images[0].url == f"{imgbed.base_url}/file/quoted.jpg"
+    assert image_ref(images[0]) == f"{imgbed.base_url}/file/quoted.jpg"
 
 
 def _stub_name_lookup(monkeypatch, plugin, mapping):
@@ -260,7 +265,7 @@ async def test_original_image_reverses_bare_name_to_authoritative_url(
 
     images = _chain_images(results[0])
     assert len(images) == 1, f"应发出反查到的原图，实际 {_chain_text(results[0])!r}"
-    assert images[0].url == authoritative, "必须是带完整目录的权威直链"
+    assert image_ref(images[0]) == authoritative, "必须是带完整目录的权威直链"
     assert seen == [name], "应按裸文件名去反查"
 
 
@@ -303,7 +308,7 @@ async def test_original_image_reverses_bare_thumbnail_name(
 
     images = _chain_images(results[0])
     assert len(images) == 1, f"应发出反查到的原图，实际 {_chain_text(results[0])!r}"
-    assert unquote(images[0].url) == original
+    assert unquote(image_ref(images[0])) == original
 
 
 async def test_original_image_never_sends_thumbnail_url(
@@ -412,7 +417,7 @@ async def test_original_image_name_lookup_hit_skips_probe(
 
     results = await _collect(plugin.original_image(make_event(f"/原图 {name}", origin="fresh")))
 
-    assert _chain_images(results[0])[0].url == target
+    assert image_ref(_chain_images(results[0])[0]) == target
 
 
 async def test_original_image_name_lookup_falls_back_to_bare_probe(
@@ -429,7 +434,7 @@ async def test_original_image_name_lookup_falls_back_to_bare_probe(
     results = await _collect(plugin.original_image(make_event("/原图 sunset.jpg", origin="fresh")))
 
     assert seen == ["sunset.jpg"], "应先尝试反查"
-    assert _chain_images(results[0])[0].url == f"{imgbed.base_url}/file/sunset.jpg"
+    assert image_ref(_chain_images(results[0])[0]) == f"{imgbed.base_url}/file/sunset.jpg"
 
 
 async def test_original_image_name_with_directory_skips_lookup(
@@ -464,7 +469,7 @@ async def test_original_image_name_with_directory_skips_lookup(
     results = await _collect(plugin.original_image(make_event(f"/原图 {relative}", origin="fresh")))
 
     assert seen == [], "带目录的名字不应触发反查"
-    url = _chain_images(results[0])[0].url
+    url = image_ref(_chain_images(results[0])[0])
     assert unquote(url) == f"{imgbed.base_url}/file/{relative}", "目录层级必须完整保留"
 
 
@@ -493,7 +498,7 @@ async def test_original_image_keeps_directory_when_decoration_prefixed(
         plugin.original_image(make_event(f"/原图 🖼️ {relative}", origin="fresh"))
     )
 
-    url = _chain_images(results[0])[0].url
+    url = image_ref(_chain_images(results[0])[0])
     assert "%F0%9F%96%BC" not in url, "装饰前缀不得进入直链"
     assert "🖼️" not in unquote(url)
     assert unquote(url) == f"{imgbed.base_url}/file/{relative}", "目录层级必须完整保留"
@@ -558,7 +563,7 @@ async def test_original_image_strips_caption_prefix_from_quoted_name(
 
     images = _chain_images(results[0])
     assert len(images) == 1
-    url = images[0].url
+    url = image_ref(images[0])
     assert "%F0%9F%96%BC" not in url, "配文前缀不应被拼进直链"
     assert "🖼️" not in url
     # 直链是百分号编码的（中文/`@` 都要编码，`@`→%40），故解码后再比对内容：
@@ -577,8 +582,8 @@ async def test_original_image_strips_decoration_prefix_in_explicit_query(
 
     images = _chain_images(results[0])
     assert len(images) == 1
-    assert unquote(images[0].url) == f"{imgbed.base_url}/file/图.jpg"
-    assert "%F0%9F%96%BC" not in images[0].url, "配文前缀不应被拼进直链"
+    assert unquote(image_ref(images[0])) == f"{imgbed.base_url}/file/图.jpg"
+    assert "%F0%9F%96%BC" not in image_ref(images[0]), "配文前缀不应被拼进直链"
 
 
 async def test_original_image_without_bed_base_reports_configuration(make_plugin, make_event):
@@ -613,9 +618,9 @@ def test_original_and_register_are_distinct_command_names():
     # 指令注册统一在入口 main.py（AstrBot 只按入口模块绑定 handler）
     from astrbot_plugin_weibo_suite.main import WeiboSuitePlugin
 
-    assert WeiboSuitePlugin.original_image.command_name == "原图"
-    assert WeiboSuitePlugin.original_repair.command_name == "原图修复"
-    assert WeiboSuitePlugin.register_image.command_name == "登记原图"
+    assert command_name_of(WeiboSuitePlugin.original_image) == "原图"
+    assert command_name_of(WeiboSuitePlugin.original_repair) == "原图修复"
+    assert command_name_of(WeiboSuitePlugin.register_image) == "登记原图"
 
 
 async def test_original_repair_renames_dirty_history_keys(make_plugin, imgbed, make_event):
@@ -673,9 +678,9 @@ async def test_random_image_caption_has_no_decoration_inside_filename(
     assert text[len("🖼️ ") :] == "x.jpg"
     from astrbot_plugin_weibo_suite.main import WeiboSuitePlugin
 
-    assert WeiboSuitePlugin.register_image.command_name == "登记原图"
-    assert (
-        WeiboSuitePlugin.original_image.command_name != WeiboSuitePlugin.register_image.command_name
+    assert command_name_of(WeiboSuitePlugin.register_image) == "登记原图"
+    assert command_name_of(WeiboSuitePlugin.original_image) != command_name_of(
+        WeiboSuitePlugin.register_image
     )
     # 注：AstrBot 按命令首个词精确匹配（/原图 与 /登记原图 首词不同）这一路由
     # 行为发生在 AstrBot 框架内，本桩不执行命令路由，无法在此运行时证明；
@@ -690,10 +695,10 @@ def test_random_image_alias_matches_documented_alias():
     """
     from astrbot_plugin_weibo_suite.main import WeiboSuitePlugin
 
-    assert WeiboSuitePlugin.random_image.command_name == "随机图"
-    assert "随机图片" in WeiboSuitePlugin.random_image.command_alias
-    assert WeiboSuitePlugin.random_video.command_name == "随机视频"
-    assert WeiboSuitePlugin.random_video.command_alias == set()
+    assert command_name_of(WeiboSuitePlugin.random_image) == "随机图"
+    assert "随机图片" in command_alias_of(WeiboSuitePlugin.random_image)
+    assert command_name_of(WeiboSuitePlugin.random_video) == "随机视频"
+    assert command_alias_of(WeiboSuitePlugin.random_video) == set()
 
 
 async def test_trace_hash_path_still_hits(make_plugin, imgbed, make_event, tmp_path):
@@ -728,13 +733,17 @@ async def test_trace_accepts_heic_query_image(make_plugin, imgbed, make_event, t
 
     修复前 HEIC 会先被判无效、再白跑一次必然失败的兜底下载，用户只得到
     「未能获取图片内容」。装了 pillow-heif 后这条链路应当完整走通。
+
+    注意：这里必须用**非纯色**图。纯色/大面积平坦图的感知哈希退化为全零码，
+    会被 is_degenerate_phash 判定为不可索引（既不入库也不接受为查询码），
+    那样测的就不是 HEIC 解码链路了（详见 test_features 的退化图用例）。
     """
     if not heif_available():
         pytest.skip("未安装 pillow-heif")
 
     plugin = make_plugin(random_media={"base_url": imgbed.base_url}, search_engine="hash")
     heic_path = tmp_path / "photo.heic"
-    PILImage.new("RGB", (64, 48), color=(200, 30, 40)).save(heic_path, format="HEIF")
+    PILImage.effect_noise((64, 48), 48).convert("RGB").save(heic_path, format="HEIF")
 
     feats = compute_features(str(heic_path), plugin.hash_size)
     plugin.library.add_if_absent(
@@ -854,7 +863,7 @@ async def test_random_image_sends_thumbnail_but_remembers_original(
     assert seen == ["x.jpg"], "应按图床返回的原图 id 去查替身"
     images = _chain_images(results[0])
     assert len(images) == 1
-    assert images[0].url == thumb, "发出去的应当是缩略图替身"
+    assert image_ref(images[0]) == thumb, "发出去的应当是缩略图替身"
     remembered = plugin.history.latest("g1")
     assert remembered is not None
     _name, remembered_url = remembered
@@ -877,7 +886,7 @@ async def test_original_image_after_random_returns_true_original(
     await _collect(plugin.random_image(make_event("/随机图", origin=origin)))
     results = await _collect(plugin.original_image(make_event("/原图", origin=origin)))
 
-    url = _chain_images(results[0])[0].url
+    url = image_ref(_chain_images(results[0])[0])
     assert url == f"{imgbed.base_url}/file/x.jpg"
     assert "thumbnails" not in url, "/原图 绝不能返回缩略图"
 
@@ -894,7 +903,7 @@ async def test_random_image_falls_back_to_original_without_thumbnail(
 
     results = await _collect(plugin.random_image(make_event("/随机图", origin="g1")))
 
-    url = _chain_images(results[0])[0].url
+    url = image_ref(_chain_images(results[0])[0])
     assert url == f"{imgbed.base_url}/file/x.jpg"
 
 
@@ -911,7 +920,7 @@ async def test_random_image_send_thumbnail_can_be_disabled(
     results = await _collect(plugin.random_image(make_event("/随机图", origin="g1")))
 
     assert seen == [], "关闭后不应再去查替身"
-    assert _chain_images(results[0])[0].url == f"{imgbed.base_url}/file/x.jpg"
+    assert image_ref(_chain_images(results[0])[0]) == f"{imgbed.base_url}/file/x.jpg"
 
 
 async def test_random_caption_uses_original_filename(make_plugin, imgbed, make_event, monkeypatch):
@@ -969,8 +978,8 @@ async def test_original_image_reverses_quoted_thumbnail_to_original(
 
     images = _chain_images(results[0])
     assert len(images) == 1
-    assert images[0].url == original_url
-    assert "thumbnails" not in images[0].url, "/原图 绝不能返回缩略图"
+    assert image_ref(images[0]) == original_url
+    assert "thumbnails" not in image_ref(images[0]), "/原图 绝不能返回缩略图"
     assert seen == [thumb_url], "应按引用图里的缩略图直链去反查"
     # 展示名取自 payload.file_name：`@`→`_` 不可逆，清洗缩略图名还原不出真名
     text = _chain_text(results[0])
@@ -1002,7 +1011,7 @@ async def test_original_image_strips_thumbnail_timestamp_in_quoted_name(
     event = make_event("/原图", origin="fresh", chain=[Image.fromURL(thumb_url)])
     results = await _collect(plugin.original_image(event))
 
-    assert _chain_images(results[0])[0].url == original_url
+    assert image_ref(_chain_images(results[0])[0]) == original_url
     assert seen and ts in seen[0], f"反查应使用图床原样的缩略图直链，实际 {seen}"
     # 回传文案里的名字不得带时间戳前缀
     assert ts not in _chain_text(results[0]), "给用户看的文案不应含时间戳前缀"
@@ -1041,8 +1050,8 @@ async def test_original_image_history_thumbnail_is_reversed(
 
     images = _chain_images(results[0])
     assert len(images) == 1
-    assert images[0].url == original_url
-    assert "thumbnails" not in images[0].url
+    assert image_ref(images[0]) == original_url
+    assert "thumbnails" not in image_ref(images[0])
 
 
 async def test_random_image_never_remembers_thumbnail_in_history(
@@ -1084,7 +1093,7 @@ async def test_random_image_lan_mode_requests_and_delivers_via_lan(make_plugin, 
 
     images = _chain_images(results[0])
     assert len(images) == 1
-    assert images[0].url.startswith(imgbed.base_url), "回传直链应保持内网源"
+    assert image_ref(images[0]).startswith(imgbed.base_url), "回传直链应保持内网源"
 
 
 async def test_random_video_lan_mode_keeps_public_url_for_qq_official(
@@ -1111,7 +1120,7 @@ async def test_random_video_lan_mode_keeps_public_url_for_qq_official(
 
     videos = [seg for seg in results[0].chain if isinstance(seg, Video)]
     assert len(videos) == 1
-    assert videos[0].url.startswith("https://img.example.com/"), (
+    assert image_ref(videos[0]).startswith("https://img.example.com/"), (
         "官方机器人的视频直链必须是公网地址（腾讯服务器要能访问）"
     )
 
@@ -1134,7 +1143,7 @@ async def test_random_video_lan_mode_uses_lan_url_for_aiocqhttp(make_plugin, img
 
     videos = [seg for seg in results[0].chain if isinstance(seg, Video)]
     assert len(videos) == 1
-    assert videos[0].url.startswith(imgbed.base_url)
+    assert image_ref(videos[0]).startswith(imgbed.base_url)
 
 
 async def test_random_image_mention_prefix_only_on_aiocqhttp(make_plugin, imgbed, make_event):
@@ -1162,11 +1171,6 @@ async def test_random_image_mention_prefix_only_on_aiocqhttp(make_plugin, imgbed
     assert not any(isinstance(seg, At) for seg in result.chain), (
         "qq_official 不得附带 At（会显示为标记原文）"
     )
-
-
-# ---------------------------------------------------------------------------
-# qq_official 富媒体格式体检（假 jpg 的 HEIF/AVIF/WEBP 会被腾讯打回）
-# ---------------------------------------------------------------------------
 
 
 class _SniffStream:
@@ -1326,7 +1330,7 @@ async def test_yield_delivery_offbox_rewrites_fake_format_to_path(make_plugin, i
     images = [seg for seg in results[0].chain if isinstance(seg, Image)]
     assert len(images) == 1
     assert getattr(images[0], "path", None), "假格式应改写为本地转码文件交付"
-    assert not images[0].url, "改写后不得再带外链 URL（腾讯拒收假格式）"
+    assert not image_ref(images[0]).startswith("http"), "改写后不得再带外链 URL（腾讯拒收假格式）"
     assert plugin.history.latest("g1")[1] == fake_url, "历史必须仍记原始直链"
 
     import os
@@ -1353,7 +1357,7 @@ async def test_yield_delivery_offbox_rewrites_fake_format_to_path(make_plugin, i
         )
     )
     images = [seg for seg in results[0].chain if isinstance(seg, Image)]
-    assert len(images) == 1 and images[0].url, "标准格式应按 URL 原样交付"
+    assert len(images) == 1 and image_ref(images[0]), "标准格式应按 URL 原样交付"
 
 
 async def test_yield_delivery_non_offbox_skips_rewrite(make_plugin, imgbed, make_event):
@@ -1370,4 +1374,4 @@ async def test_yield_delivery_non_offbox_skips_rewrite(make_plugin, imgbed, make
         )
     )
     images = [seg for seg in results[0].chain if isinstance(seg, Image)]
-    assert len(images) == 1 and images[0].url
+    assert len(images) == 1 and image_ref(images[0])

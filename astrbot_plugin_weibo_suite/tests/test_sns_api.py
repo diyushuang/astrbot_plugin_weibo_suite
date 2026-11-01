@@ -44,10 +44,18 @@ class FakePlugin:
 def api(tmp_path, monkeypatch):
     """返回 (SnsAPI, FakeRequest 构造器)。json_response 直接透传 dict 便于断言。"""
     monkeypatch.setattr(sns_api, "json_response", lambda payload: payload)
+    # 与真实 `astrbot.api.web.error_response(message, *, status_code=400, ...)` 同签名：
+    # 以前这里写成 `lambda message, code=400`（位置参数），于是后端把 status_code
+    # 按关键字传时单测照过、真机 TypeError —— `test_error_response_contract.py`
+    # 就是为堵这个洞加的。桩必须跟着真签名走，否则门禁形同虚设。
     monkeypatch.setattr(
         sns_api,
         "error_response",
-        lambda message, code=400: {"status": "error", "message": message, "code": code},
+        lambda message, *, status_code=400: {
+            "status": "error",
+            "message": message,
+            "code": status_code,
+        },
     )
 
     body: dict = {"payload": {}}
@@ -85,6 +93,39 @@ def test_overview_lists_all_three_platforms_even_with_no_accounts(api):
 
     assert {row["platform"] for row in out["platforms"]} == set(C.PLATFORMS)
     assert out["accounts"] == []
+
+
+def test_overview_and_credentials_leak_no_local_path(api):
+    """P2-7 回归：接口不能把本机目录结构回给浏览器。
+
+    91c4913 只修了其中一个出口：`identity.summary()` 的 `profile_dir` 与
+    `browser.status()` 的 `profile_root` 会经 `/sns/overview` 原样返回，
+    等于告诉任何能打开面板的人"这台机器的用户目录长什么样"。
+    """
+    instance, _body = api
+    instance.p.sns_service().add_account("douyin", "MS4wLjABAAAAtest")
+
+    for payload in (_run(instance.overview()), _run(instance.credentials())):
+        text = json.dumps(payload, ensure_ascii=False)
+        assert "profile_dir" not in text
+        assert "profile_root" not in text
+        assert "browser_profile_dir" not in text
+        # 盘符路径 / POSIX 绝对路径都不该出现
+        assert not any(isinstance(v, str) and os.path.isabs(v) for v in _walk(payload))
+        # JSON 里出现反斜杠基本只可能是 Windows 路径（URL/文案都不用反斜杠）
+        assert "\\\\" not in text, "响应里出现了反斜杠，几乎肯定是本机路径"
+
+
+def _walk(node):
+    """递归取出 payload 里所有字符串值（只用于断言"没有绝对路径"）。"""
+    if isinstance(node, dict):
+        for value in node.values():
+            yield from _walk(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _walk(value)
+    elif isinstance(node, str):
+        yield node
 
 
 def test_credentials_never_echo_a_cookie(api):

@@ -1,9 +1,17 @@
-"""测试期最小 astrbot 桩与共享 fixture。
+"""测试期 astrbot 宿主装配：默认用最小桩，装了真包时可切到真宿主。
 
-本仓库未安装 astrbot，既有测试也从不 import main.py，导致命令处理器层
-（用户真实可达入口）从未被运行时验证。这里在 collection 之前把最小 astrbot
-包注入 sys.modules，使 `import astrbot_plugin_weibo_suite.trace.main` 可行，从而让
-测试能真实驱动命令处理器（`async for ... in plugin.<命令方法>(event)`）。
+默认行为：在 collection 之前把最小 astrbot 包注入 sys.modules，使
+`import astrbot_plugin_weibo_suite.trace.main` 在**没装 astrbot 的机器**上也可行，
+从而让测试能真实驱动命令处理器层（`async for ... in plugin.<命令方法>(event)`）。
+
+真宿主模式：设 `WEIBO_SUITE_REAL_ASTRBOT=1`（CI 的 real-astrbot job 就是这么跑的）
+后不再整体替换 sys.modules["astrbot"]——真 AstrBot 提供什么就用什么，只把它确实
+缺少的名字补成桩（4.29 缺 `astrbot.api.message_components.Message`，补了什么记在
+`_FILLED_STUBS` 里）。这样 `views_backend/dashboard.py` 的 astrbot.api.web 导入、
+`main.py` 的 star_map 清理才会走真实分支，而不是永远走 ImportError 兜底。
+
+两种模式下取"消息链组件 / 图片地址 / 指令名"请用 tests/host_compat.py，不要直接
+依赖某一种宿主的字段布局。
 
 桩只覆盖 main.py 实际用到的符号；不修改任何生产代码。为避免 ruff E402
 （模块级 import 必须在文件顶部），main 的导入放在 make_plugin fixture 内部。
@@ -11,10 +19,13 @@
 
 from __future__ import annotations
 
+import atexit
 import io
 import logging
-import socket
+import os
+import shutil
 import sys
+import tempfile
 import types
 from urllib.parse import urlparse
 
@@ -28,8 +39,74 @@ from astrbot_plugin_weibo_suite.shared import http as url_guard
 # ----------------------------------------------------------------------
 
 
+# 真实宿主门：设 WEIBO_SUITE_REAL_ASTRBOT=1 时，凡是真 AstrBot 提供的模块一律
+# 不装桩，让插件内部拿到真实现。默认关闭，因为没装 astrbot 的机器也要能跑全部
+# 用例；但只要装了真 AstrBot（CI 的 real-astrbot job 就是），桩就会把真包整体
+# 遮住，代价是：
+#   * views_backend/dashboard.py 的 `from astrbot.api.web import ...` 永远走
+#     ImportError 兜底，跑的是另一份实现（真机 500 就是这么漏出去的）；
+#   * main.py 的 star_map 清理永远走 ImportError 分支，逻辑零覆盖；
+#   * 装饰器 / permission / 消息组件的真实语义一概看不见（真实 MessageChain
+#     根本不可迭代，桩却给了 __iter__）。
+# 门打开后 conftest 补齐真模块缺失的名字（如 4.29 的
+# astrbot.api.message_components 没有 Message），补齐记录在 _FILLED_STUBS 里，
+# 便于一眼看出"真宿主模式下还有哪些是替身"。
+_REAL_HOST = os.environ.get("WEIBO_SUITE_REAL_ASTRBOT") == "1"
+
+if _REAL_HOST:
+    # 真 astrbot 导入时会在 get_astrbot_root() 下建 data/；不指走就会在仓库根
+    # 留一个未跟踪的 data/（.gitignore 已兜底，但最好根本别建）。
+    #
+    # 用 `if not ...` 而不是 setdefault：setdefault 只在**键不存在**时生效，
+    # 而 astrbot/core/utils/astrbot_path.py 的 get_astrbot_root() 是
+    # `os.environ.get("ASTRBOT_ROOT") or os.getcwd()`——空串会回落 cwd。
+    # 用户/CI 把 ASTRBOT_ROOT 显式设成空串（很常见的"没配置"写法）时，
+    # setdefault 不会覆盖，data/ 就照旧建到仓库根。
+    if not os.environ.get("ASTRBOT_ROOT"):
+        os.environ["ASTRBOT_ROOT"] = tempfile.mkdtemp(prefix="weibo_suite_root_")
+    atexit.register(shutil.rmtree, os.environ["ASTRBOT_ROOT"], True)
+
+# 真宿主模式下被补成替身的 (模块名, 属性名)，便于排查
+_FILLED_STUBS: list[tuple[str, str]] = []
+
+
+def _import_real(name: str):
+    """真 AstrBot 提供该模块时返回它；否则 None（含未开门的情况）。"""
+    if not _REAL_HOST:
+        return None
+    import importlib
+
+    try:
+        return importlib.import_module(name)
+    except Exception:  # 真包缺失/依赖不全，退回桩
+        return None
+
+
 def _install(name: str, **attrs):
-    """注册一个模块到 sys.modules，并挂到父模块的同名属性上。"""
+    """注册一个模块到 sys.modules，并挂到父模块的同名属性上。
+
+    真实宿主模式下优先用真模块，只补它确实没有的名字。
+    """
+    real = _import_real(name)
+    if real is not None:
+        for key, value in attrs.items():
+            if hasattr(real, key):
+                continue
+            try:  # filter 这类以子模块形式存在的名字
+                sub = _import_real(f"{name}.{key}")
+                if sub is None:
+                    raise ModuleNotFoundError(f"{name}.{key}")
+                setattr(real, key, sub)
+                continue
+            except Exception:
+                pass
+            setattr(real, key, value)
+            _FILLED_STUBS.append((name, key))
+        sys.modules[name] = real
+        parent, _, child = name.rpartition(".")
+        if parent and parent in sys.modules:
+            setattr(sys.modules[parent], child, real)
+        return real
     module = types.ModuleType(name)
     for key, value in attrs.items():
         setattr(module, key, value)
@@ -40,13 +117,56 @@ def _install(name: str, **attrs):
     return module
 
 
+_IMAGE_TMP = {"dir": None, "seq": 0}
+
+
+def _image_tmp_dir() -> str:
+    """进程级临时目录：存放 Image 替身“已落盘”的图片（session 内复用）。"""
+    if _IMAGE_TMP["dir"] is None:
+        path = tempfile.mkdtemp(prefix="weibo_suite_img_")
+        _IMAGE_TMP["dir"] = path
+        atexit.register(shutil.rmtree, path, True)
+    return _IMAGE_TMP["dir"]
+
+
+def _png_bytes(seed: int) -> bytes:
+    """生成一张确定的、非纯色的 64x64 PNG（纯色图会被 is_degenerate_phash 判退化）。"""
+    import numpy as np
+    from PIL import Image as PILImage
+
+    noise = np.random.default_rng(seed).integers(0, 256, (64, 64), dtype=np.uint8)
+    buffer = io.BytesIO()
+    PILImage.fromarray(noise, mode="L").save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _write_image_file(data: bytes, suffix: str) -> str:
+    _IMAGE_TMP["seq"] += 1
+    path = os.path.join(_image_tmp_dir(), f"img_{_IMAGE_TMP['seq']}{suffix}")
+    with open(path, "wb") as handle:
+        handle.write(data)
+    return path
+
+
 class _Image:
-    """Image 组件替身：构造即把参数存到自身属性，便于断言回传内容。"""
+    """Image 组件替身：构造即把参数存到自身属性，便于断言回传内容。
+
+    ``convert_to_file_path`` 必须返回**真实存在的本地文件**：AstrBot 的真实实现
+    （astrbot/core/message/components.py 的 Image.convert_to_file_path →
+    MediaResolver.to_path）永远先把图片内容落成本地文件、再返回绝对路径，网络
+    URL 也是先下载。旧替身直接返回 url 字符串，于是
+    `trace/resolve_mixin.py:172` 的 `os.path.isfile(path)` 恒为 False——
+    “宿主已经把图片下载成本地文件”这条最常见的生产主路径，从来没被任何测试走过。
+
+    需要验证插件**自带**兜底下载分支（resolve_mixin.py:187 起）的用例，请在该用例
+    内部用 `force_url_passthrough(monkeypatch)` 显式退回旧语义，而不是把默认行为改回去。
+    """
 
     def __init__(self, *, url=None, file=None, path=None):
         self.url = url
         self.file = file
         self.path = path
+        self._converted_path = None
 
     @classmethod
     def fromURL(cls, url):
@@ -61,7 +181,42 @@ class _Image:
         return cls(path=path)
 
     async def convert_to_file_path(self):
-        return self.path or self.file or self.url
+        if self._converted_path is not None:
+            return self._converted_path
+
+        for candidate in (self.path, self.file):
+            if isinstance(candidate, str) and candidate and os.path.isfile(candidate):
+                self._converted_path = candidate
+                return candidate
+
+        # 有本地路径字段但文件不存在：原样返回，让插件照旧走自己的兜底/失败分支
+        for candidate in (self.path, self.file):
+            if isinstance(candidate, str) and candidate:
+                self._converted_path = candidate
+                return candidate
+
+        if isinstance(self.file, (bytes, bytearray)):
+            # 真实 fromBytes 也是把原始字节落盘；内容不合法时下游必须报解码失败
+            self._converted_path = _write_image_file(bytes(self.file), ".bin")
+            return self._converted_path
+
+        # 只有 url：宿主会把它下载成本地文件，这里用一张真实 PNG 代表该结果
+        _IMAGE_TMP["seq"] += 1
+        self._converted_path = _write_image_file(_png_bytes(_IMAGE_TMP["seq"]), ".png")
+        return self._converted_path
+
+
+def force_url_passthrough(monkeypatch):
+    """把 Image.convert_to_file_path 退回“返回 url 字符串”的旧语义。
+
+    只给需要验证插件兜底下载分支（resolve_mixin.py:187 起：宿主没给本地文件时
+    自己下载）的用例使用。真实 AstrBot 不会返回 url，所以这是**测试侧**的显式豁免。
+    """
+
+    async def _passthrough(seg):
+        return seg.path or seg.file or seg.url
+
+    monkeypatch.setattr(_Image, "convert_to_file_path", _passthrough)
 
 
 class _Reply:
@@ -382,9 +537,27 @@ def make_event():
 
 
 @pytest.fixture
-def data_dir(tmp_path):
-    """把插件数据目录指向 tmp_path，隔离每个用例的库/临时文件。"""
+def data_dir(tmp_path, monkeypatch):
+    """把插件数据目录指向 tmp_path，隔离每个用例的库/临时文件。
+
+    桩模式下 `astrbot.api.star.StarTools` 是 conftest 自己的 `_StarTools`，它读
+    `_DATA_DIR`，所以设字典就够了。真宿主模式下 StarTools 是真包实现：
+    `get_data_dir()` 读的是**进程级**的 `ASTRBOT_ROOT/data/plugin_data/<name>`，
+    只设 `_DATA_DIR` 等于没人读——所有 `make_plugin` 用例会共享同一份
+    plugin_data，库/哈希缓存/remote_phash.json 跨用例累积，症状是「单跑绿、
+    全量红」（例如 test_hash_refresh 里 count==0 的断言实得前面用例留下的 2）。
+    所以真宿主下必须把它也指到 tmp_path。monkeypatch 负责还原。
+    """
     _DATA_DIR["path"] = str(tmp_path)
+    if _REAL_HOST:
+        from astrbot.api.star import StarTools
+
+        def _tmp_data_dir(name):
+            path = tmp_path / "plugin_data" / name
+            path.mkdir(parents=True, exist_ok=True)
+            return path
+
+        monkeypatch.setattr(StarTools, "get_data_dir", staticmethod(_tmp_data_dir))
     return tmp_path
 
 
@@ -440,33 +613,42 @@ def make_weibo_plugin(data_dir):
     return factory
 
 
+_REAL_RESOLVE = url_guard.resolve_public_addrs
+
+
+def _loopback_allowlisted_resolve(url, allowed_private_hosts=None):
+    """只在“被测假图床所在的那台回环主机”上加白名单，其余一律走真实校验。
+
+    历史上这里把整个 resolve_public_addrs 换成“照常 getaddrinfo、跳过公网 IP
+    白名单”的替身，于是所有用到 imgbed fixture 的用例都在**绕过 SSRF 校验**，
+    「拒绝私网/环回」的规则在这 40+ 条用例里从未真正执行过。
+
+    现在改为直接调用真实函数，仅当目标主机是回环地址时把该主机并入调用方的
+    白名单（这正是生产里 random_media.lan_base_url 内网直连的合法豁免路径），
+    因此地址判定、端口校验、私网拒绝全部由真实实现执行。
+    """
+
+    host = (urlparse(url).hostname or "").lower()
+    if host in _LOOPBACK_HOSTS:
+        allow = set(allowed_private_hosts or ())
+        allow.add(host)
+        return _REAL_RESOLVE(url, allow)
+    return _REAL_RESOLVE(url, allowed_private_hosts)
+
+
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
 @pytest.fixture
 async def imgbed(monkeypatch):
     """在本地起一个假 ImgBed：/random 返回 JSON 直链，/file/ 返回真实 JPEG。
 
-    同时把 url_guard.resolve_public_addrs 打桩为“照常 getaddrinfo 但跳过公网
-    IP 白名单”，否则指向 127.0.0.1 的请求会被 GuardedHttpClient 拒绝。
+    为了让指向本机的请求能过 SSRF 校验，本 fixture 临时把 **回环主机** 并入
+    白名单（见 _loopback_allowlisted_resolve）；不是回环主机的地址仍然由真实
+    resolve_public_addrs 判定，私网/元数据地址照旧拒绝。
     """
 
-    def local_resolve(url, allowed_private_hosts=None):
-        parsed = urlparse(url)
-        host = parsed.hostname
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
-        addrs = [
-            url_guard.ResolveResult(
-                hostname=host,
-                host=str(sockaddr[0]),
-                port=int(sockaddr[1]) if len(sockaddr) > 1 else port,
-                family=family,
-                proto=proto,
-                flags=0,
-            )
-            for family, _type, proto, _canon, sockaddr in infos
-        ]
-        return host, addrs
-
-    monkeypatch.setattr(url_guard, "resolve_public_addrs", local_resolve)
+    monkeypatch.setattr(url_guard, "resolve_public_addrs", _loopback_allowlisted_resolve)
 
     state = {"random_queries": []}
     image_bytes = _jpeg_bytes()

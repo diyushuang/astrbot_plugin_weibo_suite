@@ -30,6 +30,9 @@ _tmp_pytest_run/
 
 # 运行时数据（绝不入库：含用户 cookie、会话、归档与文案原文）
 data/plugin_data/
+# AstrBot core 初始化会在工作目录建 data/（cmd_config.json、t2i_templates/ 等）。
+# 装了真 astrbot 后跑 pytest 就会重建，属于纯副作用，不入库。
+/data/
 *.db
 *.db-wal
 *.db-shm

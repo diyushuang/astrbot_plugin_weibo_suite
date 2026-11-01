@@ -213,7 +213,13 @@ def test_identity_store_persists_cookie_and_login_state(tmp_path):
     assert summary["cookie_configured"] is True
     assert summary["logged_in"] is True
     assert "web_session=2" not in json.dumps(summary)
-    assert summary["profile_dir"].endswith(os.path.join(C.SNS_BROWSER_DIR, "xhs"))
+    # P2-7 回归：摘要里**不能**再有本机绝对路径（它会经 /sns/overview 原样
+    # 回传到浏览器）；面板只需要"目录建了没"这一个比特。
+    assert "profile_dir" not in summary
+    assert "has_profile" in summary
+    assert isinstance(summary["has_profile"], bool)
+    assert os.sep + C.SNS_BROWSER_DIR not in json.dumps(summary)
+    assert not any(isinstance(v, str) and os.path.isabs(v) for v in summary.values())
     # Cookie 文件不该对所有用户可读
     cred = fresh.credentials_path
     assert cred.exists()

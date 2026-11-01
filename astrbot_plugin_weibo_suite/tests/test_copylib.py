@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from astrbot_plugin_weibo_suite.tests.host_compat import command_name_of
 from astrbot_plugin_weibo_suite.weibo.archive_db import ArchiveStore
 from astrbot_plugin_weibo_suite.weibo.constants import (
     COPYLIB_CSV_HEADER,
@@ -137,15 +138,48 @@ def test_copylib_constants_and_usage():
         assert line in USAGE, line
 
 
+def _registered_filters(func) -> list:
+    """取处理器注册在 star_handlers_registry 上的 event_filters。
+
+    桩模式只有装饰器写回的函数属性（这里返回空表）；真宿主下指令组与权限只
+    挂在过滤器实例上。取数逻辑与 tests/test_archive_commands.py 同一份，将来
+    可收编进 tests/host_compat.py。
+    """
+    try:
+        from astrbot.core.star.star_handler import star_handlers_registry
+    except Exception:  # 桩模式
+        return []
+    for handler_md in star_handlers_registry:
+        if getattr(handler_md, "handler", None) is func:
+            return list(getattr(handler_md, "event_filters", ()) or ())
+    return []
+
+
+def _command_group_of(func) -> str | None:
+    for event_filter in _registered_filters(func):
+        names = getattr(event_filter, "parent_command_names", None)
+        if names:
+            return names[0]
+    return getattr(func, "command_group_name", None)
+
+
+def _permission_of(func) -> str | None:
+    for event_filter in _registered_filters(func):
+        permission = getattr(event_filter, "permission_type", None)
+        if permission is not None and getattr(permission, "name", ""):
+            return permission.name.lower()
+    return getattr(func, "permission_required", None)
+
+
 def test_five_copylib_commands_registered():
     # 指令注册统一在入口 main.py（AstrBot 只按入口模块绑定 handler）
     from astrbot_plugin_weibo_suite.main import WeiboSuitePlugin
 
     for method, (name, admin) in NEW_COMMANDS.items():
         func = getattr(WeiboSuitePlugin, method)
-        assert func.command_name == name, method
-        assert func.command_group_name == "微博", method
-        assert getattr(func, "permission_required", None) == ("admin" if admin else None), method
+        assert command_name_of(func) == name, method
+        assert _command_group_of(func) == "微博", method
+        assert _permission_of(func) == ("admin" if admin else None), method
 
 
 def test_mixin_order_keeps_single_source():

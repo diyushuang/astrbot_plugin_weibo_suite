@@ -135,6 +135,33 @@ async def test_reconcile_detects_gaps_and_formats_report(fake):
     assert text.endswith("结论：存在 3 处缺口")
 
 
+async def test_reconcile_uses_one_bulk_media_query(fake):
+    """P2-3：对账不许逐帖查 media（5000 帖 = 5000 次抢锁查询）。"""
+    for mid in ("5201", "5202", "5203"):
+        await fake.archive_post(make_post(mid, pics=[make_pic(f"p{mid}")], pic_total=1))
+
+    store = fake.archive_store()
+    calls = {"bulk": 0, "single": 0}
+    real_bulk, real_single = store.list_media_bulk, store.list_media
+
+    def bulk(mids):
+        calls["bulk"] += 1
+        return real_bulk(mids)
+
+    def single(mid):
+        calls["single"] += 1
+        return real_single(mid)
+
+    store.list_media_bulk = bulk  # type: ignore[method-assign]
+    store.list_media = single  # type: ignore[method-assign]
+
+    report = await fake.archive_reconcile()
+
+    assert report["posts"] == 3
+    assert calls["single"] == 0, "对账路径不该再逐帖 list_media"
+    assert calls["bulk"] == 1
+
+
 async def test_reconcile_clean_store_reports_consistent(fake):
     await fake.archive_post(make_post("5101", pics=[make_pic("p1")], pic_total=1))
     store = fake.archive_store()

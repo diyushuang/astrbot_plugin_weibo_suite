@@ -11,12 +11,18 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
+import os
+import threading
 import types
+from pathlib import Path
 
 import pytest
 from PIL import Image as PILImage
 
+from astrbot_plugin_weibo_suite.tests.host_compat import chain_segments, image_ref
+from astrbot_plugin_weibo_suite.trace import delivery_mixin, resolve_mixin, trace_mixin
 from astrbot_plugin_weibo_suite.trace import main as main_module
 from astrbot_plugin_weibo_suite.trace.features import compute_features
 from astrbot_plugin_weibo_suite.trace.main import ImageTracePlugin
@@ -83,14 +89,29 @@ def _install_hits(monkeypatch, plugin, hits):
 def _chain_images(result):
     from astrbot.api.message_components import Image
 
-    return [seg for seg in result.chain if isinstance(seg, Image)]
+    return [seg for seg in chain_segments(result) if isinstance(seg, Image)]
 
 
 def _chain_text(result) -> str:
     """把一条消息里所有文本段拼起来，用于统计文案出现次数。"""
     from astrbot.api.message_components import Plain
 
-    return "\n".join(str(seg.text) for seg in result.chain if isinstance(seg, Plain))
+    return "\n".join(str(seg.text) for seg in chain_segments(result) if isinstance(seg, Plain))
+
+
+def _segment_bytes(seg) -> bytes | None:
+    """取图片组件里「内联字节」形态的图片内容。
+
+    生产代码用 `Comp.Image.fromBytes(data)` 直发压缩字节：真 AstrBot 把它编码成
+    `base64://<b64>` 放进 `.file`（components.py 的 fromBytes → fromBase64），
+    桩则直接存原始 bytes。两种形态都要能还原出字节，才能断言「发的是字节而非 URL」。
+    """
+    value = getattr(seg, "file", None)
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value)
+    if isinstance(value, str) and value.startswith("base64://"):
+        return base64.b64decode(value[len("base64://") :])
+    return None
 
 
 def _image_segment():
@@ -308,7 +329,7 @@ async def test_small_image_caption_has_no_compressed_claim(
     caption = _chain_text(results[1])
     assert "已压缩" not in caption
     assert "scenery.jpg" in caption
-    url = _chain_images(results[1])[0].url
+    url = image_ref(_chain_images(results[1])[0])
     assert "width=" not in url, "不超过 max_side 的图不必再追加缩放参数"
 
 
@@ -330,7 +351,7 @@ async def test_caption_claims_compression_only_when_measured_smaller(
     assert "已压缩，可发送 /原图 获取原图" in caption
     assert "已压缩 /原图" not in caption
     assert "big.jpg" in caption
-    assert "width=" in _chain_images(results[1])[0].url
+    assert "width=" in image_ref(_chain_images(results[1])[0])
 
 
 async def test_caption_omits_compression_when_bed_returns_original(
@@ -409,7 +430,7 @@ async def test_probe_budget_exceeded_does_not_block_delivery(
         return (True, 1)
 
     monkeypatch.setattr(plugin, "_probe_url", hang)
-    monkeypatch.setattr(main_module, "PLAN_TOTAL_TIMEOUT", 0.1)
+    monkeypatch.setattr(delivery_mixin, "PLAN_TOTAL_TIMEOUT", 0.1)
 
     results = await _collect(plugin.trace(make_event("/溯源", chain=[_image_segment()])))
 
@@ -585,7 +606,8 @@ async def test_local_compress_chain_path_never_probes(
     assert probed == [], "local-compress 不依赖图床缩放，不应探测图床"
     images = _chain_images(results[1])
     assert len(images) == 2
-    assert all(isinstance(image.file, bytes) for image in images), "字节直发而非 URL"
+    assert all(_segment_bytes(image) for image in images), "字节直发而非 URL"
+    assert not any(image_ref(image).startswith("http") for image in images), "不得退化成 URL 直发"
     assert "已压缩，可发送 /原图 获取原图" in _chain_text(results[1])
 
 
@@ -673,7 +695,7 @@ async def test_compression_path_decodes_each_image_once(
     )
     _install_hits(monkeypatch, plugin, _hits("scenery.jpg"))
     calls: list[str] = []
-    monkeypatch.setattr(main_module, "image_file_ok", lambda path: calls.append(path) or True)
+    monkeypatch.setattr(delivery_mixin, "image_file_ok", lambda path: calls.append(path) or True)
 
     async def fake_load(_block, **_kwargs):
         return _big_png_bytes()
@@ -711,7 +733,7 @@ async def test_parallel_compression_keeps_block_order(
 
     sent = []
     for image in _chain_images(results[1]):
-        with PILImage.open(io.BytesIO(image.file)) as output:
+        with PILImage.open(io.BytesIO(_segment_bytes(image))) as output:
             sent.append(output.size)
     # max_side=1920：a 被缩到 1920x768，b、c 不超限保持原尺寸
     assert sent == [(1920, 768), (1500, 600), (900, 400)]
@@ -926,9 +948,7 @@ async def test_resolve_local_file_skips_fallback_for_heic_without_decoder(
     """认出 HEIC 容器却解不开时不再白跑一次兜底下载，并给出可操作提示。"""
     from astrbot.api.message_components import Image
 
-    import astrbot_plugin_weibo_suite.trace.main as main_module
-
-    monkeypatch.setattr(main_module, "heif_available", lambda: False)
+    monkeypatch.setattr(resolve_mixin, "heif_available", lambda: False)
     plugin = make_plugin()
 
     fake = tmp_path / "photo.heic"
@@ -941,7 +961,15 @@ async def test_resolve_local_file_skips_fallback_for_heic_without_decoder(
         raise AssertionError("HEIC 缺解码器时不该再走兜底下载")
 
     monkeypatch.setattr(plugin, "_download", spy)
-    seg = Image(url="https://qq.example.com/photo.heic", path=str(fake))
+    seg = Image(file="", url="https://qq.example.com/photo.heic", path=str(fake))
+
+    # 宿主已经把图片下载成本地文件：_resolve_local 首选 convert_to_file_path()
+    # 的返回值。桩与真包的 Image 构造函数签名不同（真包 file 必填），但两者都
+    # 支持在类上替换该方法，这里统一改成"直接给本地路径"的宿主行为。
+    async def host_converted_path(self):
+        return str(fake)
+
+    monkeypatch.setattr(type(seg), "convert_to_file_path", host_converted_path)
 
     resolved = await plugin._resolve_local(seg, probe=plugin._probe_mime)
     path, is_tmp, message = resolved.path, resolved.is_tmp, resolved.message
@@ -960,14 +988,18 @@ async def test_extract_images_dedupes_across_url_and_file_fields(make_event):
     from astrbot.api.message_components import Image as SegImage
     from astrbot.api.message_components import Reply
 
+    from astrbot_plugin_weibo_suite.tests.host_compat import real_host
+
     plugin_cls = ImageTracePlugin
     same = "https://img.example.com/file/same.jpg"
+    # 真 AstrBot 的 Reply 是 pydantic 模型，id 必填；桩只接受 chain。
+    reply_kwargs = {"id": "1"} if real_host() else {}
     event = make_event(
         "/溯源",
         chain=[
-            SegImage(url=same),
-            Reply(chain=[SegImage(url=same)]),
-            SegImage(url="https://img.example.com/file/other.jpg"),
+            SegImage(file="", url=same),
+            Reply(chain=[SegImage(file=same)], **reply_kwargs),
+            SegImage(file="", url="https://img.example.com/file/other.jpg"),
         ],
     )
 
@@ -1062,8 +1094,8 @@ async def test_auto_engine_reuses_features_and_mime_from_single_decode(
     def forbid_features(*_args, **_kwargs):
         raise AssertionError("解析结果已带 features，不应再调用 compute_features")
 
-    monkeypatch.setattr(main_module, "compute_features_with_mime", fake_features_with_mime)
-    monkeypatch.setattr(main_module, "compute_features", forbid_features)
+    monkeypatch.setattr(trace_mixin, "compute_features_with_mime", fake_features_with_mime)
+    monkeypatch.setattr(trace_mixin, "compute_features", forbid_features)
     monkeypatch.setattr(plugin, "_hash_pool_size", lambda: 1)
     monkeypatch.setattr(plugin, "_merged_hash_candidates", lambda *_a, **_k: ([], []))
 
@@ -1087,7 +1119,7 @@ async def test_download_bytes_reuses_open_response_for_large_images(
     并断言 `_download` 一次都没被调用。
     """
     plugin = make_plugin()
-    monkeypatch.setattr(main_module, "MEMORY_DOWNLOAD_MAX_BYTES", 10)
+    monkeypatch.setattr(resolve_mixin, "MEMORY_DOWNLOAD_MAX_BYTES", 10)
 
     async def no_second_request(*_args, **_kwargs):
         raise AssertionError("大图分支不应重新发起下载")
@@ -1100,7 +1132,7 @@ async def test_download_bytes_reuses_open_response_for_large_images(
 
 
 async def test_fallback_chain_maps_url_index_to_url_blocks_only(
-    make_plugin, make_event, monkeypatch
+    make_plugin, make_event, monkeypatch, tmp_path
 ):
     """混合批（先 path 后 url）回退到消息链时，URL 图不得取到空串。
 
@@ -1118,12 +1150,73 @@ async def test_fallback_chain_maps_url_index_to_url_blocks_only(
     monkeypatch.setattr(plugin, "_offbox_pipeline", no_pipeline)
 
     blocks = [
-        {"path": "/tmp/transcoded.jpg", "file_name": "a.jpg"},
+        {"path": str(tmp_path / "transcoded.jpg"), "file_name": "a.jpg"},
         {"url": "https://img.example.com/file/b.jpg", "file_name": "b.jpg"},
     ]
     results = await _collect(plugin._yield_delivery(event, "标题", blocks))
 
     images = _chain_images(results[0])
     assert len(images) == 2
-    assert images[0].path == "/tmp/transcoded.jpg"
-    assert images[1].url == "https://img.example.com/file/b.jpg"
+    assert os.path.normcase(os.path.abspath(images[0].path)) == os.path.normcase(
+        os.path.abspath(tmp_path / "transcoded.jpg")
+    )
+    assert image_ref(images[1]) == "https://img.example.com/file/b.jpg"
+
+
+# ----------------------------------------------------------------------
+# 退化图登记拒收 / 下载落盘不占事件循环
+# ----------------------------------------------------------------------
+
+
+async def test_register_image_rejects_solid_color_image(make_plugin, make_event, tmp_path):
+    """纯色图不能入库：入库后任意纯色图都会以相似度 1.0 命中这一行。"""
+    from astrbot.api.message_components import Image
+
+    plugin = make_plugin()
+    path = tmp_path / "pure.png"
+    PILImage.new("RGB", (64, 64), color=(255, 0, 0)).save(path)
+    event = make_event("/溯源登记", chain=[Image.fromFileSystem(str(path))])
+
+    results = await _collect(plugin.register_image(event))
+
+    assert any("纯色" in item.text for item in results), "应给出退化图的明确提示"
+    assert plugin.library.count() == 0
+    assert plugin.library.find_by_phash("0" * 64) is None
+
+
+async def test_stream_to_temp_writes_off_the_event_loop(make_plugin, monkeypatch):
+    """落盘的 write+fsync 必须在线程池：放在事件循环上会卡住同进程其它会话。"""
+
+    class _Content:
+        def __init__(self, chunks):
+            self._chunks = chunks
+
+        async def iter_chunked(self, _size):
+            for chunk in self._chunks:
+                yield chunk
+
+    class _Response:
+        def __init__(self, chunks):
+            self.content = _Content(chunks)
+
+    plugin = make_plugin()
+    batch = main_module._STREAM_WRITE_BATCH_BYTES
+    payload = b"x" * (batch + 7)
+    response = _Response([payload[:batch], payload[batch:]])
+
+    write_threads = []
+    original_fsync = os.fsync
+
+    def spy_fsync(fd):
+        write_threads.append(threading.current_thread())
+        return original_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+
+    path = await plugin._stream_response_to_temp(response, limit=len(payload) + 1)
+
+    assert Path(path).read_bytes() == payload
+    assert write_threads, "落盘必然经过 fsync"
+    assert all(thread is not threading.main_thread() for thread in write_threads), (
+        "写盘发生在事件循环线程上"
+    )

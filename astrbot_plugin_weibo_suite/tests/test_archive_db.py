@@ -651,3 +651,113 @@ def test_list_copy_entries_joins_first_image(store):
     assert with_image["cleaned_text"] == "文案一"
     assert entries[0]["pid"] is None
     assert [row["mid"] for row in store.list_copy_entries(uid="404")] == []
+
+
+def test_text_full_is_not_overwritten_by_truncated_text(store):
+    """P2-4：补全长文入库后，时间线刷新带来的短摘要不得把全文顶掉。"""
+    full = "全" * 800
+    store.upsert_post(make_post(text=full, text_full=1))
+    store.upsert_post(make_post(text="截" * 120))
+    row = store.get_post("1001")
+    assert row["text"] == full
+    assert row["text_full"] == 1
+
+
+def test_text_full_accepts_longer_incoming_text(store):
+    """反向：更长的正文照常更新，并升级 text_full。"""
+    store.upsert_post(make_post(text="短" * 50))
+    store.upsert_post(make_post(text="长" * 500, text_full=1))
+    row = store.get_post("1001")
+    assert row["text"] == "长" * 500
+    assert row["text_full"] == 1
+
+
+def test_list_media_bulk_matches_per_post_queries(store):
+    """P2-3：一次批量取回，结果必须与逐帖 list_media 等价。"""
+    for mid in ("1001", "1002", "1004"):
+        store.upsert_post(make_post(mid=mid))
+        store.upsert_media(
+            mid,
+            [
+                {"pid": f"p{mid}b", "idx": 1, "url": "u2"},
+                {"pid": f"p{mid}a", "idx": 0, "url": "u1"},
+            ],
+        )
+    mids = ["1001", "1002", "1003", "1004"]
+
+    bulk = store.list_media_bulk(mids)
+    assert set(bulk) == {"1001", "1002", "1004"}, "无媒体的帖不该出现空列表键"
+    for mid in bulk:
+        assert [row["pid"] for row in bulk[mid]] == [row["pid"] for row in store.list_media(mid)]
+
+
+def test_list_media_bulk_batches_past_sqlite_variable_limit(store):
+    """1200 个 mid 能查完，且结果与逐帖查一致。
+
+    注意：这条**证明不了分批**。本机 sqlite 的 SQLITE_LIMIT_VARIABLE_NUMBER
+    实测是 32766（不是早期版本默认的 999），一条 1200 个占位符的 IN 照样能过，
+    把分批循环改回单条超长 SQL 它依然绿。真正锁住分批语义的是下面两条按
+    真实执行的 SQL 段数断言的用例。
+    """
+    mids = [str(2000 + i) for i in range(1200)]
+    assert store.list_media_bulk(mids) == {}
+    store.upsert_post(make_post(mid=mids[-1]))
+    store.upsert_media(mids[-1], [{"pid": "pz", "idx": 0, "url": "u"}])
+    bulk = store.list_media_bulk(mids)
+    assert list(bulk) == [mids[-1]]
+
+
+_IN_CLAUSE_MARK = "FROM media WHERE mid IN ("
+
+
+def _media_in_clause_sizes(store, mids: list[str]) -> list[int]:
+    """跑一次 list_media_bulk，返回每条 "mid IN (...)" 语句里塞了几个 mid。
+
+    sqlite3 的 trace 回调拿到的是**参数已展开**的语句文本（CPython 走
+    sqlite3_expanded_sql，所以看到的是 '3000','3001' 而不是 ?），因此直接数
+    IN 列表里的字面量个数就是"这条 SQL 带了多少个 mid"。这是"到底发了几条
+    IN、每条多大"的直接证据，与 SQLite 的变量上限有多大无关。
+    """
+    connection = store._connection()
+    assert connection is not None
+    seen: list[str] = []
+    connection.set_trace_callback(seen.append)
+    try:
+        store.list_media_bulk(mids)
+    finally:
+        connection.set_trace_callback(None)
+    sizes: list[int] = []
+    for statement in seen:
+        if _IN_CLAUSE_MARK not in statement:
+            continue
+        inner = statement.split(_IN_CLAUSE_MARK, 1)[1].split(")", 1)[0]
+        sizes.append(inner.count("',") + 1)
+    return sizes
+
+
+def test_list_media_bulk_chunks_by_module_constant(store, monkeypatch):
+    """把分批常量调到 2：7 个 mid 必须发 4 条 IN（2/2/2/1），而不是一条。
+
+    变异验证：把 range(0, len, chunk) 改回单条超长 IN（或忽略该常量）时，
+    这里拿到的会是 [7] 而不是 [2, 2, 2, 1]，用例必然红。
+    """
+    from astrbot_plugin_weibo_suite.weibo import archive_db
+
+    monkeypatch.setattr(archive_db, "_BULK_MEDIA_CHUNK", 2)
+    mids = [str(3000 + i) for i in range(7)]
+    for mid in mids:
+        store.upsert_post(make_post(mid=mid))
+        store.upsert_media(mid, [{"pid": f"p{mid}", "idx": 0, "url": "u"}])
+
+    assert _media_in_clause_sizes(store, mids) == [2, 2, 2, 1]
+    assert len(store.list_media_bulk(mids)) == 7
+
+
+def test_list_media_bulk_issues_ceil_queries_at_default_chunk(store):
+    """默认批次（500）下 1200 个 mid → ceil(1200/500)=3 条 IN，而不是 1 条。"""
+    mids = [str(4000 + i) for i in range(1200)]
+    assert _media_in_clause_sizes(store, mids) == [500, 500, 200]
+
+
+def test_list_media_bulk_empty_input(store):
+    assert store.list_media_bulk([]) == {}

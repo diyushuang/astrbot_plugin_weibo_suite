@@ -10,6 +10,7 @@ import asyncio
 import time
 
 from astrbot_plugin_weibo_suite.constants import PLUGIN_VERSION as ROOT_PLUGIN_VERSION
+from astrbot_plugin_weibo_suite.tests.host_compat import command_name_of
 from astrbot_plugin_weibo_suite.weibo.constants import (
     ARCHIVE_DB_NAME,
     ARCHIVE_DIR_NAME,
@@ -136,26 +137,63 @@ def test_usage_lists_six_archive_commands():
 # ---------------------------------------------------------------- 指令注册
 
 
+def _registered_filters(func) -> list:
+    """取某个处理器注册在 star_handlers_registry 上的 event_filters。
+
+    桩模式没有这个模块（只有装饰器写回的函数属性，返回空表）；真宿主模式下
+    指令名/指令组/权限**只**存在于过滤器实例上，函数本身不带任何属性。
+    """
+    try:
+        from astrbot.core.star.star_handler import star_handlers_registry
+    except Exception:  # 桩模式
+        return []
+    for handler_md in star_handlers_registry:
+        if getattr(handler_md, "handler", None) is func:
+            return list(getattr(handler_md, "event_filters", ()) or ())
+    return []
+
+
+def _command_group_of(func) -> str | None:
+    """指令组名：桩读函数属性，真宿主读 CommandFilter.parent_command_names。"""
+    for event_filter in _registered_filters(func):
+        names = getattr(event_filter, "parent_command_names", None)
+        if names:
+            return names[0]
+    return getattr(func, "command_group_name", None)
+
+
+def _permission_of(func) -> str | None:
+    """权限：桩读函数属性，真宿主读 PermissionTypeFilter.permission_type。"""
+    for event_filter in _registered_filters(func):
+        permission = getattr(event_filter, "permission_type", None)
+        if permission is not None and getattr(permission, "name", ""):
+            return permission.name.lower()
+    return getattr(func, "permission_required", None)
+
+
 def test_six_archive_commands_registered_under_weibo_group():
     # 指令注册统一在入口 main.py（AstrBot 只按入口模块绑定 handler）
     from astrbot_plugin_weibo_suite.main import WeiboSuitePlugin
 
     for method, (name, admin) in NEW_COMMANDS.items():
         func = getattr(WeiboSuitePlugin, method)
-        assert func.command_name == name, method
-        assert func.command_group_name == "微博", method
-        assert getattr(func, "permission_required", None) == ("admin" if admin else None), method
+        assert command_name_of(func) == name, method
+        assert _command_group_of(func) == "微博", method
+        assert _permission_of(func) == ("admin" if admin else None), method
 
 
 def test_command_surface_grows_without_losing_legacy_commands():
     from astrbot_plugin_weibo_suite.main import WeiboSuitePlugin
     from astrbot_plugin_weibo_suite.tests import test_weibo_migration as legacy
 
-    found = {
-        node
-        for node in dir(WeiboSuitePlugin)
-        if node.startswith("weibo_") and hasattr(getattr(WeiboSuitePlugin, node), "command_name")
-    }
+    found = set()
+    for node in dir(WeiboSuitePlugin):
+        if not node.startswith("weibo_"):
+            continue
+        member = getattr(WeiboSuitePlugin, node)
+        # 真宿主下"是否注册成指令"只能查注册表（函数上没有 command_name 属性）
+        if callable(member) and command_name_of(member):
+            found.add(node)
     assert found >= set(NEW_COMMANDS)
     assert len(found) >= 23
     assert found >= legacy.LEGACY_WEIBO_COMMANDS

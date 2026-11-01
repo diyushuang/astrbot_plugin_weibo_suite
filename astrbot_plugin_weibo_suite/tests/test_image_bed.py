@@ -4,10 +4,15 @@
 的密钥与路径推导在同源、同桶、越界场景下的拒绝，和 S3 错误详情不做实体转义。
 """
 
+import pytest
+
+from astrbot_plugin_weibo_suite.trace import image_bed
 from astrbot_plugin_weibo_suite.trace.image_bed import (
     ImageBedClient,
     _public_url,
     extract_json_path,
+    is_retryable_upload_error,
+    upload_error_status,
 )
 from astrbot_plugin_weibo_suite.trace.s3_store import _s3_error_detail, uri_encode_path
 
@@ -212,3 +217,91 @@ async def test_cf_upload_does_not_fall_back_on_non_auth_errors(tmp_path):
     with pytest.raises(RuntimeError, match="HTTP 500"):
         await client._upload_cf(str(src))
     assert len(fake.calls) == 1
+
+
+# ----------------------------------------------------------------------
+# 上传重试与降级可见性
+# ----------------------------------------------------------------------
+
+
+def test_upload_error_status_and_retry_classification():
+    """状态码从上传器的统一文案里抠；4xx 终态不重试，5xx/429 重试。"""
+    forbidden = RuntimeError("CloudFlare-ImgBed 上传失败 HTTP 403: forbidden")
+    assert upload_error_status(forbidden) == 403
+    assert upload_error_status(ValueError("未配置 api_url")) == 0
+    for status in (400, 401, 403, 404, 413, 415, 422):
+        assert is_retryable_upload_error(RuntimeError(f"上传失败 HTTP {status}: x")) is False
+    for status in (408, 429, 500, 502, 503, 504):
+        assert is_retryable_upload_error(RuntimeError(f"上传失败 HTTP {status}: x")) is True
+    # 无状态码：配置/路径错误重试也白搭，其余按瞬时故障处理
+    assert is_retryable_upload_error(ValueError("未配置 api_url")) is False
+    assert is_retryable_upload_error(NotImplementedError("该模式不支持上传")) is False
+    assert is_retryable_upload_error(ConnectionResetError("connection reset")) is True
+
+
+async def test_upload_retries_transient_failure_then_succeeds(tmp_path, monkeypatch):
+    """5xx 是瞬时故障：退避重试后成功，不应直接降级成"存本地副本"。"""
+    monkeypatch.setattr(image_bed, "UPLOAD_RETRY_BASE_DELAY", 0)
+    client = make_client({"mode": "generic_http"}, tmp_path)
+    calls = []
+
+    async def flaky_upload(_path):
+        calls.append(_path)
+        if len(calls) < 3:
+            raise RuntimeError("图床上传失败 HTTP 502: bad gateway")
+        return "https://img.example.com/file/a.jpg"
+
+    url = await client._upload_with_retry(flaky_upload, "C:/a.jpg", "")
+
+    assert url == "https://img.example.com/file/a.jpg"
+    assert len(calls) == image_bed.UPLOAD_RETRY_ATTEMPTS
+
+
+async def test_upload_does_not_retry_terminal_status(tmp_path, monkeypatch):
+    """403 是权限问题：重试只会把真正的错误信息冲掉、还拖慢整批登记。"""
+    monkeypatch.setattr(image_bed, "UPLOAD_RETRY_BASE_DELAY", 0)
+    client = make_client({"mode": "generic_http"}, tmp_path)
+    calls = []
+
+    async def forbidden_upload(_path):
+        calls.append(_path)
+        raise RuntimeError("图床上传失败 HTTP 403: forbidden")
+
+    with pytest.raises(RuntimeError, match="HTTP 403"):
+        await client._upload_with_retry(forbidden_upload, "C:/a.jpg", "")
+
+    assert len(calls) == 1
+
+
+async def test_store_reports_degraded_until_a_upload_succeeds(tmp_path):
+    """图床挂了必须能被 /trace 状态看见，而不是只留一条早已过期的 warning。"""
+    source = tmp_path / "source.jpg"
+    source.write_bytes(b"image-data")
+    client = make_client({"mode": "generic_http"}, tmp_path / "plugin")
+
+    async def fail_upload(_path):
+        raise RuntimeError("图床上传失败 HTTP 403: forbidden")
+
+    client._upload = fail_upload
+    stored = await client.store(str(source))
+
+    assert stored.ok is True
+    assert stored.file_path  # 仍存本地副本，不阻断登记
+    degraded = client.status()
+    assert degraded["degraded"] is True
+    assert degraded["degraded_since"] > 0
+    assert "403" in degraded["degraded_reason"]
+
+    async def ok_upload(_path):
+        return "https://img.example.com/file/a.jpg"
+
+    client._upload = ok_upload
+    recovered = await client.store(str(source))
+
+    assert recovered.url == "https://img.example.com/file/a.jpg"
+    assert client.status() == {
+        "mode": "generic_http",
+        "degraded": False,
+        "degraded_reason": "",
+        "degraded_since": 0.0,
+    }

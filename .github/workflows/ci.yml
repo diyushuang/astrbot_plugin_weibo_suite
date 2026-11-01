@@ -31,3 +31,63 @@ jobs:
         run: pytest -q
       - name: Release manifest
         run: python -m astrbot_plugin_weibo_suite.scripts.build_release --check
+
+  # 真实宿主门禁（装真 AstrBot 后跑两步）。
+  #
+  # 动机：其余 job 里的 astrbot 是 tests/conftest.py 注入的桩，因此"插件类能不能被
+  # 真实 star_manager 构造""面板响应函数的签名对不对""装饰器 / permission / 消息
+  # 组件语义"这类问题在桩下永远是绿的——P1-1（error_response 的 status_code 是
+  # keyword-only，面板 22 处按位置传，真机全 500）就是这样漏出去的。
+  # 本 job 用 REAL_ASTRBOT_REQUIRED=1（不许 skip 逃逸）+ WEIBO_SUITE_REAL_ASTRBOT=1
+  # （conftest 不再注入 astrbot 桩、改用真包），分两步：
+  #   1) test_real_astrbot.py —— 干净子进程里 import 真 astrbot、构造插件、核对 web
+  #      响应契约。完全不经过 conftest，是最强的宿主语义验证，先跑（快、报错清楚）。
+  #   2) 全量套件 —— 门开着再整跑一遍：这一遍真正让 1200+ 条用例跑在真 AstrBot 上
+  #      （Star/组件/filter/permission 全是真的），能抓出只在真宿主下才暴露的差异。
+  # AstrBot 版本钉在 metadata.yaml 的同一区间，两条口径必须同步改。
+  real-astrbot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install plugin + dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r astrbot_plugin_weibo_suite/requirements.txt -r requirements-dev.txt
+      # 与 metadata.yaml 的 astrbot_version 保持同一区间：<4.30 是"验证过的上界"，
+      # 4.30+ 未验证，放宽前请先在本地把两步都跑绿。
+      - name: Install real AstrBot
+        run: pip install "AstrBot>=4.28.0,<4.30"
+      - name: Print real AstrBot error_response signature
+        run: |
+          python - <<'PY'
+          import inspect
+          import astrbot
+          from astrbot.api import web
+
+          kind = inspect.signature(web.error_response).parameters["status_code"].kind
+          print("astrbot", getattr(astrbot, "__version__", "?"), "status_code:", kind)
+          PY
+      # 第一步：真宿主冒烟。干净子进程 + 不开 conftest 门，双保险地绕开一切桩。
+      - name: Real AstrBot load smoke (clean subprocess, real host APIs)
+        env:
+          REAL_ASTRBOT_REQUIRED: "1"
+          WEIBO_SUITE_REAL_ASTRBOT: "1"
+        run: |
+          pytest astrbot_plugin_weibo_suite/tests/test_real_astrbot.py -q
+
+      # 第二步：全量套件跑在真 AstrBot 上。WEIBO_SUITE_REAL_ASTRBOT=1 让 conftest
+      # 不再覆盖 sys.modules["astrbot"]，用例拿到的是真 Star / 真消息组件 / 真
+      # filter；REAL_ASTRBOT_REQUIRED=1 让"装载失败就 skip"的路径直接变红。
+      # 缺可选依赖（如没装 pillow-heif 时的 HEIC 用例）在这里不再被 skip 掩盖。
+      - name: Full test suite on real AstrBot (stub disabled)
+        env:
+          REAL_ASTRBOT_REQUIRED: "1"
+          WEIBO_SUITE_REAL_ASTRBOT: "1"
+          PYTHONIOENCODING: utf-8
+        run: |
+          pytest astrbot_plugin_weibo_suite/tests -q

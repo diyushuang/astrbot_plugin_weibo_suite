@@ -217,6 +217,36 @@ def test_xhs_parse_user_notes_reads_nickname_and_cards():
     assert post.link.endswith("/explore/65aabbccddeeff0011223344")
 
 
+def test_xhs_card_carries_timestamp_from_the_card():
+    """P2-8 回归：卡片 ts 原来是硬编码 0.0。
+
+    ts 恒 0 会让 `SnsService._check_account` 的
+    `fresh.sort(key=lambda p: (p.ts or 0.0, p.post_id))` 退化成按 post_id
+    字典序排——"推最新 3 条"实际推的是"id 最大的 3 条"。
+    """
+    state = {
+        "user": {
+            "userPageData": {"basicInfo": {"nickname": "n"}},
+            "notes": [
+                {"noteId": "a" * 24, "displayTitle": "旧", "time": 1700000000000},
+                {"noteId": "b" * 24, "displayTitle": "新", "createTime": 1730000000000},
+                {"noteId": "c" * 24, "displayTitle": "无时间"},
+            ],
+        }
+    }
+    _nickname, _avatar, posts = xhs.parse_user_notes(state)
+    by_id = {post.post_id: post for post in posts}
+    # 毫秒被换成秒
+    assert by_id["a" * 24].ts == 1700000000.0
+    assert by_id["b" * 24].ts == 1730000000.0
+    # 取不到时间的用抓取时刻兜底，绝不留 0（否则排序退化）
+    assert by_id["c" * 24].ts > 1e9
+
+    # 乱序输入 -> 按 ts 取最新 3 条时能挑出真正最新的那些
+    fresh = sorted(posts, key=lambda p: (p.ts, p.post_id))
+    assert fresh[-1].post_id == "b" * 24
+
+
 def test_xhs_parse_user_notes_accepts_raw_value_wrapper():
     wrapped = {
         "user": {
@@ -404,6 +434,34 @@ def test_rss_detect_signal_rejects_html_and_rate_limit_pages():
 def test_rss_parse_feed_never_raises_on_garbage():
     assert rss.parse_feed("not xml at all") == []
     assert rss.parse_feed("") == []
+
+
+def test_rss_parse_feed_refuses_internal_entities():
+    """P3-14 回归：stdib 会展开内部实体（billion laughs），见到 <!ENTITY 直接拒收。
+
+    外部实体（XXE 的 `SYSTEM`/`PUBLIC`）stdlib 本来就不展开，但内部实体是
+    会展开的——feed 地址由用户填，属于不可信输入，不能让它把内存吃光。
+    """
+    bomb = (
+        '<?xml version="1.0"?>'
+        "<!DOCTYPE lolz ["
+        '<!ENTITY lol "lol">'
+        '<!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">'
+        "]>"
+        "<rss><channel><item><title>&lol2;</title></item></channel></rss>"
+    )
+    assert rss.parse_feed(bomb) == []
+    # 正常 feed 不含 DOCTYPE 实体，仍然能解析
+    assert len(rss.parse_feed(RSS_XML, account_id="x")) == 1
+
+
+def test_douyin_dead_post_url_builder_is_gone():
+    """P3-9：`post_url` 拼查询串不做 urlencode 且无调用者，已删除。
+
+    留着它迟早有人拿来用——sec_uid 里一旦出现 `&` 或 `+`，签名参数会被
+    截断成别的参数（抖音侧表现为 403，且完全看不出原因）。
+    """
+    assert not hasattr(dy, "post_url")
 
 
 # ---------------------------------------------------------------- 汇总入口
