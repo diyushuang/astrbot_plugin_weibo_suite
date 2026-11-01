@@ -588,10 +588,11 @@
         "description": "【generic_http 选填】鉴权请求头名称",
         "type": "string",
         "default": "Authorization",
+        "secret": true,
         "condition": {
           "mode": "generic_http"
         },
-        "hint": "Lsky Pro 用 Authorization；EasyImages 等部分图床用 token。留空表示不发送鉴权头。"
+        "hint": "这里只填头名（如 Authorization、token），不要填「Authorization: Bearer xxx」这种整行值——令牌填上面的「鉴权 Token」一项。留空表示不发送鉴权头。"
       },
       "auth_prefix": {
         "description": "【generic_http 选填】鉴权头值前缀",
@@ -1675,6 +1676,11 @@
           "type": "list",
           "default": [],
           "description": "@全体关键词（留空=不过滤）"
+        },
+        "at_all_uids": {
+          "type": "list",
+          "default": [],
+          "description": "@全体生效的账号白名单（sec_uid／昵称／平台名任一命中；留空=不限博主）"
         },
         "douyin_cookie": {
           "type": "string",

@@ -17,6 +17,7 @@ import base64
 import contextlib
 import hashlib
 import inspect
+import os
 import re
 import time
 from collections.abc import Callable, MutableMapping
@@ -38,8 +39,17 @@ _URL_OR_IP_RE = re.compile(
     r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?\b",
     re.IGNORECASE,
 )
+# 面板错误文本回传给浏览器时还要遮掉本机绝对路径：异常串里常带
+# C:\Users\<name>\AppData\... 或 /home/<name>/...，等于把部署目录和用户名
+# 告诉任何一个能打开面板的人。先遮 URL（URL 里也有 /），再遮裸路径。
+_ABS_PATH_RE = re.compile(
+    r"(?<![\w:\\])[A-Za-z]:\\(?:[^\\\s'\"<>|,;:]+\\)*[^\\\s'\"<>|,;:]*|"
+    r"(?<![\w:/])/(?:[\w.-]+/)+[\w.-]*",
+)
 _UPLOAD_SUFFIXES = {".csv", ".md", ".markdown", ".json"}
 _UPLOAD_MAX_BYTES = 64 * 1024 * 1024
+# 上传分块大小：multipart 边读边写，避免 read(-1) 把整个 64MB 顶进内存
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 try:  # 新版 AstrBot：astrbot.api.web 提供请求代理与响应助手
     from astrbot.api.web import error_response, json_response
@@ -65,7 +75,7 @@ except ImportError:  # 旧版 Dashboard 走 Quart 原生上下文，做最小等
         def json_response(payload: dict):
             return jsonify(payload)
 
-        def error_response(message: str, status_code: int = 400):
+        def error_response(message: str, *, status_code: int = 400):
             resp = jsonify({"status": "error", "message": message})
             resp.status_code = status_code
             return resp
@@ -78,7 +88,7 @@ except ImportError:  # 旧版 Dashboard 走 Quart 原生上下文，做最小等
         def json_response(payload: dict):
             raise RuntimeError("AstrBot WebUI 不可用（缺少 quart），控制面板未启用")
 
-        def error_response(message: str, status_code: int = 400):
+        def error_response(message: str, *, status_code: int = 400):
             raise RuntimeError("AstrBot WebUI 不可用（缺少 quart），控制面板未启用")
 
         class web_request:
@@ -463,7 +473,7 @@ class DashboardAPI:
     async def clear_errors(self):
         store = getattr(self.p, "_errlog", None)
         if store is None:
-            return error_response("错误留存未启用（initialize 未完成或挂载失败）", 404)
+            return error_response("错误留存未启用（initialize 未完成或挂载失败）", status_code=404)
         cleared = await asyncio.to_thread(store.clear)
         self._log.info(f"面板清空错误留存 {cleared} 条")
         return json_response({"cleared": cleared})
@@ -473,7 +483,7 @@ class DashboardAPI:
         try:
             return json_response(self.p.preview_push())
         except Exception as e:
-            return error_response(f"推送预览生成失败: {self._safe_error(e)}", 500)
+            return error_response(f"推送预览生成失败: {self._safe_error(e)}", status_code=500)
 
     # ---------------- 操作 ----------------
 
@@ -491,7 +501,7 @@ class DashboardAPI:
             return error_response("缺少 post_id")
         ok, message = p.cancel_pending(post_id)
         if not ok:
-            return error_response(message, 409)
+            return error_response(message, status_code=409)
         self._log.info(f"面板取消推送 {post_id}：{message}")
         return json_response({"ok": True, "message": message})
 
@@ -504,7 +514,7 @@ class DashboardAPI:
             return error_response("缺少 post_id")
         ok, message = p.restore_pending(post_id)
         if not ok:
-            return error_response(message, 409)
+            return error_response(message, status_code=409)
         self._log.info(f"面板恢复推送 {post_id}：{message}")
         return json_response({"ok": True, "message": message})
 
@@ -513,21 +523,21 @@ class DashboardAPI:
         p = self.p
         ok, message = p.stop_push_round()
         if not ok:
-            return error_response(message, 409)
+            return error_response(message, status_code=409)
         self._log.info(f"面板停止本轮推送：{message}")
         return json_response({"ok": True, "message": message})
 
     async def check_now(self):
         p = self.p
         if p._checking:
-            return error_response("已有检查任务在进行中，请稍候", 409)
+            return error_response("已有检查任务在进行中，请稍候", status_code=409)
         if not p.accounts:
             return error_response("尚未监控任何账号，请先添加监控博主")
         if self._now() < p._blocked_until:
             remain = int((p._blocked_until - self._now()) // 60) + 1
-            return error_response(f"微博风控冷却中（约 {remain} 分钟后自动恢复）", 409)
+            return error_response(f"微博风控冷却中（约 {remain} 分钟后自动恢复）", status_code=409)
         if p._manual_check_task and not p._manual_check_task.done():
-            return error_response("手动检查已在进行中", 409)
+            return error_response("手动检查已在进行中", status_code=409)
 
         async def _run():
             try:
@@ -539,7 +549,12 @@ class DashboardAPI:
                 self._log.warning(f"手动检查失败: {e!r}")
                 p._record_event("error", detail=f"手动检查失败: {e}")
 
-        p._manual_check_task = asyncio.create_task(_run())
+        # 必须进 _jobs：否则卸载时 shutdown() 取消不到它，面板关掉后这轮检查
+        # 还会继续打微博接口、写已关闭的归档库。
+        task = asyncio.create_task(_run())
+        p._manual_check_task = task
+        self._jobs.add(task)
+        task.add_done_callback(self._jobs.discard)
         return json_response({"started": True})
 
     async def accounts(self):
@@ -814,6 +829,7 @@ class DashboardAPI:
     @staticmethod
     def _safe_error(value: Any, limit: int = 240) -> str:
         text = _URL_OR_IP_RE.sub("<地址已隐藏>", str(value or ""))
+        text = _ABS_PATH_RE.sub("<路径已隐藏>", text)
         return text[:limit].rstrip() + ("…" if len(text) > limit else "")
 
     def _record_unified(self, detail: str) -> None:
@@ -848,58 +864,8 @@ class DashboardAPI:
                 with contextlib.suppress(OSError):
                     path.unlink()
 
-    async def _read_upload(self, body: dict) -> tuple[Path | None, str]:
-        suffix = Path(str(body.get("filename") or "upload.bin")).suffix.lower()
-        raw_b64 = str(body.get("content_base64") or "").strip()
-        data: bytes | None = None
-        if raw_b64:
-            # base64 先按长度预检再解码：直接 b64decode 会把超大请求整块解进内存
-            if len(raw_b64) * 3 / 4 > _UPLOAD_MAX_BYTES:
-                return None, "上传文件超过 64MB"
-            try:
-                data = base64.b64decode(raw_b64, validate=True)
-            except (ValueError, TypeError):
-                return None, "上传内容不是有效的 base64"
-        else:
-            storage = None
-            name = str(body.get("filename") or "")
-            for attribute in ("files", "form"):
-                source = getattr(web_request, attribute, None)
-                if source is None:
-                    continue
-                try:
-                    value = source() if callable(source) else source
-                    if inspect.isawaitable(value):
-                        value = await value
-                except Exception:
-                    continue
-                if hasattr(value, "get"):
-                    storage = value.get("file") or value.get("upload")
-                    if storage is None and hasattr(value, "values"):
-                        storage = next(iter(value.values()), None)
-                    if storage is not None:
-                        name = str(getattr(storage, "filename", "") or name)
-                        suffix = Path(name).suffix.lower()
-                        break
-            if storage is None:
-                return None, "请选择文件（或提交 filename + content_base64）"
-            declared = getattr(storage, "size", None)
-            if isinstance(declared, int) and declared > _UPLOAD_MAX_BYTES:
-                return None, "上传文件超过 64MB"
-            reader = getattr(storage, "read", None)
-            if not callable(reader):
-                return None, "上传对象不支持读取"
-            data = reader()
-            if inspect.isawaitable(data):
-                data = await data
-            if not isinstance(data, bytes):
-                data = bytes(data or b"")
-        if suffix not in _UPLOAD_SUFFIXES:
-            return None, "只接受 CSV、Markdown 或 JSON 文件"
-        if not data:
-            return None, "上传文件为空"
-        if len(data) > _UPLOAD_MAX_BYTES:
-            return None, "上传文件超过 64MB"
+    async def _upload_dir(self) -> tuple[Path | None, str]:
+        """上传落盘目录：数据目录下的 webui_uploads（不存在则创建）。"""
         base = getattr(self.p, "_data_dir", None)
         if not base:
             # 不回落 Path.cwd()：那会把用户上传件写进 AstrBot 安装目录
@@ -908,12 +874,122 @@ class DashboardAPI:
         # 建目录与清理过期上传件都是同步磁盘操作，放线程避免卡住事件循环
         await asyncio.to_thread(folder.mkdir, parents=True, exist_ok=True)
         await asyncio.to_thread(self._prune_upload_dir, folder)
+        return folder, ""
+
+    async def _read_upload(self, body: dict) -> tuple[Path | None, str, int]:
+        """把面板上传落成一个临时文件。
+
+        返回「路径, 错误文本, HTTP 状态码」：成功时错误文本为空、状态码为 0。
+        两条来源分别走"内存字节"（base64）与"流式"（multipart）：multipart 以前
+        用 read(-1) 一次性把 64MB 读进内存，几个并发上传就能把进程顶穿，
+        现在按 1MB 分块写盘，并在超过上限时立刻中止并删掉半成品。
+        """
+        suffix = Path(str(body.get("filename") or "upload.bin")).suffix.lower()
+        raw_b64 = str(body.get("content_base64") or "").strip()
+        if raw_b64:
+            # base64 先按长度预检再解码：直接 b64decode 会把超大请求整块解进内存
+            if len(raw_b64) * 3 / 4 > _UPLOAD_MAX_BYTES:
+                return None, "上传文件超过 64MB", 413
+            try:
+                data = base64.b64decode(raw_b64, validate=True)
+            except (ValueError, TypeError):
+                return None, "上传内容不是有效的 base64", 400
+            return await self._store_bytes(data, suffix)
+
+        storage = None
+        name = str(body.get("filename") or "")
+        for attribute in ("files", "form"):
+            source = getattr(web_request, attribute, None)
+            if source is None:
+                continue
+            try:
+                value = source() if callable(source) else source
+                if inspect.isawaitable(value):
+                    value = await value
+            except Exception:
+                continue
+            if hasattr(value, "get"):
+                storage = value.get("file") or value.get("upload")
+                if storage is None and hasattr(value, "values"):
+                    storage = next(iter(value.values()), None)
+                if storage is not None:
+                    name = str(getattr(storage, "filename", "") or name)
+                    suffix = Path(name).suffix.lower()
+                    break
+        if storage is None:
+            return None, "请选择文件（或提交 filename + content_base64）", 400
+        declared = getattr(storage, "size", None)
+        if isinstance(declared, int) and declared > _UPLOAD_MAX_BYTES:
+            return None, "上传文件超过 64MB", 413
+        reader = getattr(storage, "read", None)
+        if not callable(reader):
+            return None, "上传对象不支持读取", 400
+        return await self._store_stream(reader, suffix)
+
+    async def _store_bytes(self, data: bytes, suffix: str) -> tuple[Path | None, str, int]:
+        """base64 分支：内容已在内存里，只做校验后写盘。"""
+        if suffix not in _UPLOAD_SUFFIXES:
+            return None, "只接受 CSV、Markdown 或 JSON 文件", 400
+        if not data:
+            return None, "上传文件为空", 400
+        if len(data) > _UPLOAD_MAX_BYTES:
+            return None, "上传文件超过 64MB", 413
+        folder, error = await self._upload_dir()
+        if folder is None:
+            return None, error, 400
         # 文件名用内容摘要：内建 hash() 受 PYTHONHASHSEED 影响，跨进程不可复现
         digest = hashlib.sha1(data).hexdigest()[:12]
         target = folder / f"{int(time.time())}-{digest}{suffix}"
-        # 写盘同样放线程：64MB 的同步写会卡住事件循环
         await asyncio.to_thread(target.write_bytes, data)
-        return target, ""
+        return target, "", 0
+
+    async def _store_stream(self, reader, suffix: str) -> tuple[Path | None, str, int]:
+        """multipart 分支：边读边写，超过上限立即中止并清理半成品。"""
+        if suffix not in _UPLOAD_SUFFIXES:
+            return None, "只接受 CSV、Markdown 或 JSON 文件", 400
+        folder, error = await self._upload_dir()
+        if folder is None:
+            return None, error, 400
+        part = folder / f".upload-{int(time.time())}-{os.urandom(4).hex()}.part"
+        digest = hashlib.sha1()
+        total = 0
+        chunked = True
+        handle = await asyncio.to_thread(open, part, "wb")
+        try:
+            while True:
+                if chunked:
+                    try:
+                        chunk = reader(_UPLOAD_CHUNK_BYTES)
+                    except TypeError:
+                        # 不支持分块读取的旧式存储对象：退回一次性读，长度仍受校验
+                        chunked = False
+                        continue
+                else:
+                    chunk = reader()
+                if inspect.isawaitable(chunk):
+                    chunk = await chunk
+                if not chunk:
+                    break
+                chunk = bytes(chunk)
+                total += len(chunk)
+                if total > _UPLOAD_MAX_BYTES:
+                    return None, "上传文件超过 64MB", 413
+                digest.update(chunk)
+                await asyncio.to_thread(handle.write, chunk)
+            if total == 0:
+                return None, "上传文件为空", 400
+            target = folder / f"{int(time.time())}-{digest.hexdigest()[:12]}{suffix}"
+            # 必须先落盘关闭再改名：Windows 上打开着的文件无法 rename（WinError 32）
+            await asyncio.to_thread(handle.close)
+            await asyncio.to_thread(os.replace, part, target)
+            return target, "", 0
+        finally:
+            with contextlib.suppress(OSError, ValueError):
+                await asyncio.to_thread(handle.close)
+            if part.exists():
+                # 超限/空文件/读取异常都要删掉半成品，否则 .part 会一直堆在数据目录
+                with contextlib.suppress(OSError):
+                    await asyncio.to_thread(part.unlink, missing_ok=True)
 
     @staticmethod
     def _row_summary(row: dict) -> dict:
@@ -953,7 +1029,7 @@ class DashboardAPI:
             copylib = await asyncio.to_thread(store.copy_stats)
             recent = await p.archive_query("", limit=8, offset=0)
         except Exception as exc:
-            return error_response(f"读取归档总览失败：{self._safe_error(exc)}", 500)
+            return error_response(f"读取归档总览失败：{self._safe_error(exc)}", status_code=500)
         return json_response(
             {
                 "enabled": True,
@@ -1004,7 +1080,7 @@ class DashboardAPI:
         if not uid:
             return error_response("请输入有效微博 uid")
         if p.archive_backfill_running():
-            return error_response("已有回填任务在跑", 409)
+            return error_response("已有回填任务在跑", status_code=409)
         since = str(body.get("since") or "").strip()[:10]
         full = bool(body.get("full"))
 
@@ -1028,20 +1104,20 @@ class DashboardAPI:
         uid = self._extract_uid(str(body.get("uid") or "")) or str(body.get("uid") or "")
         report = await self.p.archive_reconcile(uid)
         if report.get("error"):
-            return error_response(report["error"], 409)
+            return error_response(report["error"], status_code=409)
         self._record_unified(f"完成归档对账 {uid or '全部账号'}")
         return json_response(report)
 
     async def archive_import(self):
         body = await self._body()
-        path, error = await self._read_upload(body)
+        path, error, status = await self._read_upload(body)
         if path is None:
-            return error_response(error)
+            return error_response(error, status_code=status)
         if path.suffix.lower() != ".json":
-            return error_response("归档导入只接受 JSON 种子文件")
+            return error_response("归档导入只接受 JSON 种子文件", status_code=400)
         result = await self.p.archive_import_json(str(path))
         if result.get("error"):
-            return error_response(self._safe_error(result["error"]), 400)
+            return error_response(self._safe_error(result["error"]), status_code=400)
         self._record_unified(f"导入归档种子 {path.name}")
         return json_response(result)
 
@@ -1051,7 +1127,7 @@ class DashboardAPI:
         try:
             stats = self.p.pipeline_stats()
         except Exception as exc:
-            return error_response(f"读取管线状态失败：{self._safe_error(exc)}", 500)
+            return error_response(f"读取管线状态失败：{self._safe_error(exc)}", status_code=500)
         return json_response(
             {
                 "status": stats,
@@ -1070,7 +1146,7 @@ class DashboardAPI:
             return error_response("limit 必须为整数")
         result = await self.p.pipeline_backfill(limit)
         if result.get("error"):
-            return error_response(self._safe_error(result["error"]), 409)
+            return error_response(self._safe_error(result["error"]), status_code=409)
         self._record_unified(f"补跑图床管线，入队 {result.get('queued', 0)} 帖")
         return json_response(result)
 
@@ -1115,7 +1191,7 @@ class DashboardAPI:
     async def copylib_overview(self):
         stats = self.p.copylib_status()
         if not stats.get("ok"):
-            return error_response(stats.get("error", "文案库不可用"), 409)
+            return error_response(stats.get("error", "文案库不可用"), status_code=409)
         return json_response(stats)
 
     async def copylib_list(self):
@@ -1131,15 +1207,15 @@ class DashboardAPI:
 
     async def copylib_import(self):
         body = await self._body()
-        path, error = await self._read_upload(body)
+        path, error, status = await self._read_upload(body)
         if path is None:
-            return error_response(error)
+            return error_response(error, status_code=status)
         if path.suffix.lower() not in {".csv", ".md", ".markdown"}:
-            return error_response("文案导入只接受 CSV 或 Markdown 文件")
+            return error_response("文案导入只接受 CSV 或 Markdown 文件", status_code=400)
         uid = self._extract_uid(str(body.get("uid") or "")) or ""
         result = await self.p.copylib_import(str(path), uid)
         if not result.get("ok"):
-            return error_response(self._safe_error(result.get("error")), 400)
+            return error_response(self._safe_error(result.get("error")), status_code=400)
         self._record_unified(f"导入文案 {path.name}")
         return json_response(result)
 
@@ -1148,11 +1224,11 @@ class DashboardAPI:
     async def trace_status(self):
         trace = getattr(self.p, "_trace_plugin", None)
         if trace is None:
-            return error_response("溯源域未初始化", 409)
+            return error_response("溯源域未初始化", status_code=409)
         try:
             library = await asyncio.to_thread(trace.library.stats)
         except Exception as exc:
-            return error_response(f"读取图库状态失败：{self._safe_error(exc)}", 500)
+            return error_response(f"读取图库状态失败：{self._safe_error(exc)}", status_code=500)
         vector: dict[str, Any] = {
             "enabled": bool(getattr(trace.vector, "enabled", False)),
             "model": str(getattr(trace.vector, "embed_model", "") or ""),
@@ -1178,10 +1254,10 @@ class DashboardAPI:
     async def trace_rescan(self):
         trace = getattr(self.p, "_trace_plugin", None)
         if trace is None:
-            return error_response("溯源域未初始化", 409)
+            return error_response("溯源域未初始化", status_code=409)
         current = self._trace_task
         if current is not None and not current.done():
-            return error_response("图库重扫已在进行中", 409)
+            return error_response("图库重扫已在进行中", status_code=409)
         body = await self._body()
         force = bool(body.get("force"))
         event = _ApiEvent("溯源重扫 force" if force else "溯源重扫")
@@ -1212,10 +1288,10 @@ class DashboardAPI:
     async def trace_repair_history(self):
         trace = getattr(self.p, "_trace_plugin", None)
         if trace is None:
-            return error_response("溯源域未初始化", 409)
+            return error_response("溯源域未初始化", status_code=409)
         try:
             cleaned = int(trace._repair_history_keys())
         except Exception as exc:
-            return error_response(f"历史键修复失败：{self._safe_error(exc)}", 500)
+            return error_response(f"历史键修复失败：{self._safe_error(exc)}", status_code=500)
         self._record_unified(f"修复会话历史键 {cleaned} 条")
         return json_response({"cleaned": cleaned})

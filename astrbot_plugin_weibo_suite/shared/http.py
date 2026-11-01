@@ -59,6 +59,10 @@ class ResponseTooLargeError(Exception):
 # 避免异常或被劫持的端点用超大响应体耗尽内存。
 DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024
 
+# 单次请求的兜底超时：不传 timeout 时 aiohttp 默认是 5 分钟总超时，一个卡住的
+# 图床/微博端点就能把轮询链挂死那么久。这里给一个明确的 30 秒，调用方仍可覆盖。
+DEFAULT_REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30.0, connect=10.0, sock_read=20.0)
+
 # 跨域重定向时强制剥离的请求头（prepare 回调之外的兜底保护）
 _CREDENTIAL_HEADERS = frozenset(
     {
@@ -390,6 +394,8 @@ class GuardedHttpClient:
         timeout: aiohttp.ClientTimeout | None = None,
     ) -> aiohttp.ClientResponse:
         """Run a guarded request and return the final response context."""
+        if timeout is None:
+            timeout = DEFAULT_REQUEST_TIMEOUT
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
                 headers={"User-Agent": USER_AGENT},
@@ -400,8 +406,8 @@ class GuardedHttpClient:
             kwargs = (
                 dict(prepare(current_url, current_method, cross_origin) or {}) if prepare else {}
             )
-            if timeout is not None:
-                kwargs["timeout"] = timeout
+            # prepare 里显式给了 timeout 就以它为准（例如大文件下载要放宽）
+            kwargs.setdefault("timeout", timeout)
             return kwargs
 
         return await guarded_request(

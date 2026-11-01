@@ -68,31 +68,63 @@ class WeiboSuitePlugin(_WeiboMonitorPlugin, _SnsCommandsMixin):
         trace._weibo_external_source = self.copylib_snapshot
 
     async def initialize(self) -> None:
-        # Trace first: the monitoring initializer installs the shared logger last,
-        # so one handler captures both domains' warnings and errors.
-        await self._trace_plugin.initialize()
-        self._trace_initialized = True
-        # 服务要在微博域 initialize 之前绑定：那边的 pipeline_start() 会起 worker
-        self._bind_pipeline_services()
-        # 文案源是惰性供应器，先接上；archive.db 在微博域 initialize 里才打开
-        self._bind_checkin_source()
-        await super().initialize()
-        self._weibo_initialized = True
+        # 宿主（star_manager）在 initialize 抛错时只做模块级清理，从不调用
+        # terminate()：这里必须自己回滚，否则已建的 errlog 写线程、远程哈希
+        # 刷新任务、sqlite 连接都会变成孤儿，重载时还会叠加一份。
+        try:
+            # Trace first: the monitoring initializer installs the shared logger last,
+            # so one handler captures both domains' warnings and errors.
+            await self._trace_plugin.initialize()
+            self._trace_initialized = True
+            # 服务要在微博域 initialize 之前绑定：那边的 pipeline_start() 会起 worker
+            self._bind_pipeline_services()
+            # 文案源是惰性供应器，先接上；archive.db 在微博域 initialize 里才打开
+            self._bind_checkin_source()
+            await super().initialize()
+            self._weibo_initialized = True
+        except BaseException as exc:
+            logger.error(f"插件初始化失败，开始回收已建资源: {exc!r}")
+            for message in await self._rollback_initialize():
+                logger.error("初始化失败后的回滚未完成 " + message)
+            raise
+
+    async def _rollback_initialize(self) -> list[str]:
+        """初始化中途失败时按「微博域 → 溯源域」的逆序尽力回收，返回失败摘要。
+
+        不看 _trace_initialized/_weibo_initialized：失败点可能正好落在某个域
+        的 initialize 内部，那个域的标记还没置位，但它已经建了一半的资源。
+        两个 terminate 都做了幂等保护，对没跑起来的域调用是安全的。
+        """
+        errors: list[str] = []
+        try:
+            await super().terminate()
+        except Exception as exc:
+            errors.append(f"微博域: {exc}")
+        self._weibo_initialized = False
+        try:
+            await self._trace_plugin.terminate()
+        except Exception as exc:
+            errors.append(f"溯源域: {exc}")
+        self._trace_initialized = False
+        return errors
 
     async def terminate(self) -> None:
         errors: list[str] = []
-        if self._trace_initialized:
-            try:
-                await self._trace_plugin.terminate()
-            except Exception as exc:
-                errors.append(f"溯源域: {exc}")
-            self._trace_initialized = False
+        # 顺序与 initialize 相反：微博域先停。它的推送管线持有溯源域注入的
+        # bed/library 句柄，必须先 pipeline_stop() 再让 trace 关 sqlite/HTTP，
+        # 否则卸载瞬间还在跑的单帖会写已关闭的连接。
         if self._weibo_initialized:
             try:
                 await super().terminate()
             except Exception as exc:
                 errors.append(f"微博域: {exc}")
             self._weibo_initialized = False
+        if self._trace_initialized:
+            try:
+                await self._trace_plugin.terminate()
+            except Exception as exc:
+                errors.append(f"溯源域: {exc}")
+            self._trace_initialized = False
         if errors:
             logger.error("插件卸载时部分资源清理失败: " + "；".join(errors))
 
@@ -498,6 +530,20 @@ class WeiboSuitePlugin(_WeiboMonitorPlugin, _SnsCommandsMixin):
 # Star.__init_subclass__ 会给每个 Star 子类建一条元数据；trace/weibo 域内的类
 # 只是复用 KV/生命周期能力的实现细节，不是独立插件。若不清掉，WebUI 会把它们
 # 当成没有名字的插件列出来，重载时还会尝试终止空实例。
+#
+# 手搓注册表而不是让子类不继承 Star：trace/weibo 复用 Star 的 KV/生命周期
+# 能力，路径上绕不开 __init_subclass__。这里只删「本包内除 main 自身以外」的
+# 条目，理由是：
+#   * main.py 自己的条目必须留着 —— astrbot.api.logger 的解析
+#     （astrbot/api/__init__.py::_resolve_caller_logger）是拿每条元数据的
+#     module_path 去掉最后一段当 package 前缀来匹配的；main 那条给出
+#     "<plugin_pkg>.main" → 前缀 "<plugin_pkg>"，于是本包所有子模块
+#     （含 trace/、weibo/、shared/）的模块级 logger 照样命中专属 logger，
+#     errlog 不会漏收。
+#   * 代价：手动构造的 trace/weibo 实例上 self.logger 会回落到全局 logger
+#     （Star.__init__ 按 __module__ 查 star_map 查不到）。目前全仓对该属性
+#     的调用为 0，日志一律走模块级 logger，故可接受；将来若启用 self.logger，
+#     需要先在这里补回条目，或改成显式注入 logger。
 try:
     from astrbot.core.star.star import star_map, star_registry
 except ImportError:  # 轻量测试桩不提供内部注册表

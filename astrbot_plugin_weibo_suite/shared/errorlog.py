@@ -29,6 +29,13 @@ _PROXY_USERINFO_RE = re.compile(r"\b[\w.+-]+:[^\s@/'\"<>]+@[\w.-]+(?::\d+)?")
 _BARE_FILE_PATH_RE = re.compile(r"(?:^|(?<=[\s（(【]))/file/[^\s'\"<>，。；：、）】]+")
 # 面板每条错误最多展示这么多字符；完整原文仍在 errors.log 里
 ERRLOG_MSG_LIMIT = 1000
+# 写盘/轮转失败的上报间隔：磁盘满时每批都失败，不限制会把日志刷成瀑布
+_WRITE_FAIL_LOG_INTERVAL = 60.0
+# 专门用于"留存本身失败"的 logger：关掉 propagate 断开与插件日志器的链路，
+# 避免「写盘失败 → 记日志 → 又进这个 handler」的自我喂养；无 handler 时
+# 落到 logging.lastResort（stderr），容器日志里仍看得见。
+_WRITER_LOG = logging.getLogger(f"{PLUGIN_THREAD_TAG}.errlog-writer")
+_WRITER_LOG.propagate = False
 
 
 def _redact_error_msg(value: Any, limit: int = ERRLOG_MSG_LIMIT) -> str:
@@ -101,6 +108,9 @@ class _ErrorLogStore(logging.Handler):
         # "队列真空了"与"线程还没轮到"，避免提前返回
         self._enqueued = 0
         self._drained_seq = 0
+        # 写盘失败限频状态（见 _report_write_failure）
+        self._last_write_error_ts = 0.0
+        self._suppressed_write_errors = 0
         self._writer = threading.Thread(
             target=self._write_loop,
             name=f"{PLUGIN_THREAD_TAG}-errlog-writer",
@@ -151,6 +161,24 @@ class _ErrorLogStore(logging.Handler):
                 size += n
         return batch
 
+    def _report_write_failure(self, what: str, exc: OSError) -> None:
+        """写盘/轮转失败限频上报。
+
+        以前这里是 except OSError: pass —— 磁盘满、只读挂载、目录被删都会让
+        留存静默失效，而面板仍然显示"已留存 N 条"，排查时最具误导性。
+        现在每 60 秒最多出一条，期间被压掉的次数一并带上。
+        """
+        now = time.monotonic()
+        with self._lock:
+            if now - self._last_write_error_ts < _WRITE_FAIL_LOG_INTERVAL:
+                self._suppressed_write_errors += 1
+                return
+            self._last_write_error_ts = now
+            suppressed = self._suppressed_write_errors
+            self._suppressed_write_errors = 0
+        note = f"（此前 {suppressed} 次同类失败已抑制）" if suppressed else ""
+        _WRITER_LOG.warning("%s: %r%s", what, exc, note)
+
     def _write_batch(self, batch: list[str]) -> None:
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -162,8 +190,8 @@ class _ErrorLogStore(logging.Handler):
                 # 整机被顶死时最怕进程来不及退出就没了：这一批已经攒好，
                 # 一次 fsync 换确定性留存，且不再发生在事件循环线程里
                 os.fsync(f.fileno())
-        except OSError:
-            pass
+        except OSError as exc:
+            self._report_write_failure("写入 errors.log 失败", exc)
 
     def _rotate_if_needed(self, incoming: int = 0) -> None:
         """超过阈值只留后半段。
@@ -192,8 +220,8 @@ class _ErrorLogStore(logging.Handler):
                     size += b
                 half = "".join(reversed(keep))
             self._path.write_text(half, encoding="utf-8")
-        except OSError:
-            pass
+        except OSError as exc:
+            self._report_write_failure("轮转 errors.log 失败", exc)
 
     # ---------------- logging.Handler ----------------
 

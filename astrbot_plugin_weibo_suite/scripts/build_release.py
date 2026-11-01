@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import zipfile
 from pathlib import Path
 
@@ -38,6 +39,12 @@ PLUGIN_FILES = (
 EXCLUDED_PARTS = {"__pycache__", ".pytest_cache", ".ruff_cache", "tests", "scripts"}
 EXCLUDED_SUFFIXES = {".pyc", ".pyo", ".db", ".db-wal", ".db-shm", ".part"}
 
+# 版本比对必须取"整行字段值"，不能做子串包含：以前用
+# f"version: {EXPECTED_VERSION}" in metadata 判断，metadata 里留一行注释
+# "# version: v0.8.1" 就能让 v0.9.9 的包蒙混过关。
+_VERSION_LINE_RE = re.compile(r"^version[ \t]*:[ \t]*(\S+)[ \t]*$", re.MULTILINE)
+_PLUGIN_VERSION_RE = re.compile(r"""^PLUGIN_VERSION[ \t]*=[ \t]*["']([^"']+)["']""", re.MULTILINE)
+
 
 def plugin_root() -> Path:
     return Path(__file__).resolve().parents[1]
@@ -64,21 +71,35 @@ def iter_manifest_files(root: Path | None = None) -> list[Path]:
     return [selected[key] for key in sorted(selected)]
 
 
-def verify_manifest(root: Path | None = None) -> list[Path]:
-    base = root or plugin_root()
-    metadata = (base / "metadata.yaml").read_text(encoding="utf-8")
-    if f"version: {EXPECTED_VERSION}" not in metadata:
-        raise ValueError(f"metadata.yaml 版本与 {EXPECTED_VERSION} 不一致")
-    constants = (base / "constants.py").read_text(encoding="utf-8")
-    if f'PLUGIN_VERSION = "{EXPECTED_VERSION}"' not in constants:
-        raise ValueError(f"constants.py 版本与 {EXPECTED_VERSION} 不一致")
+def _declared_version(text: str, pattern: re.Pattern[str], source: str) -> str:
+    match = pattern.search(text)
+    if match is None:
+        raise ValueError(f"{source} 缺少版本声明")
+    return match.group(1)
+
+
+def verify_versions(base: Path) -> None:
+    """三处版本声明必须与 EXPECTED_VERSION 完全相同（不做子串包含）。"""
+    checks = [(base / "metadata.yaml", _VERSION_LINE_RE, "metadata.yaml")]
+    constants = base / "constants.py"
+    if constants.is_file():
+        checks.append((constants, _PLUGIN_VERSION_RE, "constants.py"))
     # 微博域历史上自己又定义了一份 PLUGIN_VERSION（日志里显示用）；两处不同步
     # 会让"版本号到底是多少"取决于谁读的，这里一并校验。
     domain_constants = base / "weibo" / "constants.py"
     if domain_constants.is_file():
-        text = domain_constants.read_text(encoding="utf-8")
-        if 'PLUGIN_VERSION = "' in text and f'PLUGIN_VERSION = "{EXPECTED_VERSION}"' not in text:
-            raise ValueError(f"weibo/constants.py 版本与 {EXPECTED_VERSION} 不一致")
+        checks.append((domain_constants, _PLUGIN_VERSION_RE, "weibo/constants.py"))
+    for path, pattern, label in checks:
+        if not path.is_file():
+            continue
+        found = _declared_version(path.read_text(encoding="utf-8"), pattern, label)
+        if found != EXPECTED_VERSION:
+            raise ValueError(f"{label} 版本 {found!r} 与 {EXPECTED_VERSION!r} 不一致")
+
+
+def verify_manifest(root: Path | None = None) -> list[Path]:
+    base = root or plugin_root()
+    verify_versions(base)
 
     files = iter_manifest_files(base)
     present = {path.relative_to(base).as_posix() for path in files}
@@ -93,14 +114,19 @@ def verify_manifest(root: Path | None = None) -> list[Path]:
     if missing_runtime:
         raise ValueError(f"发布清单缺少运行文件: {sorted(missing_runtime)}")
 
-    all_runtime_py = {
+    # 覆盖面校验针对"所有要发布的文件"，不只是 .py：以前只比 *.py，
+    # views/ 下新增的 js/html/css、data/ 下的资源漏登记也能 --check 通过，
+    # 发布包缺文件却直到用户打开面板才 404。
+    shipped = {
         path.relative_to(base).as_posix()
-        for path in base.rglob("*.py")
-        if not set(path.relative_to(base).parts) & EXCLUDED_PARTS
+        for path in base.rglob("*")
+        if path.is_file()
+        and not set(path.relative_to(base).parts) & EXCLUDED_PARTS
+        and path.suffix not in EXCLUDED_SUFFIXES
     }
-    unlisted = sorted(all_runtime_py - present)
+    unlisted = sorted(shipped - present)
     if unlisted:
-        raise ValueError(f"运行期 Python 文件未登记进 PLUGIN_FILES: {unlisted}")
+        raise ValueError(f"文件未登记进 PLUGIN_FILES: {unlisted}")
     return files
 
 
