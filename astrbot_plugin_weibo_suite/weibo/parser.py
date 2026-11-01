@@ -35,13 +35,31 @@ class MediaTooLarge(WeiboFetchError):
         self.size_bytes = size_bytes
 
 
+_IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
+_IMG_ALT_ATTR_RE = re.compile(
+    r"""\balt\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))""",
+    re.IGNORECASE,
+)
+
+
+def _img_alt_text(match: re.Match[str]) -> str:
+    """整段 <img ...> 换成它的 alt 文本（三种引号写法都认，没有 alt 就换成空）。"""
+    alt = _IMG_ALT_ATTR_RE.search(match.group(0))
+    if not alt:
+        return ""
+    return alt.group(1) or alt.group(2) or alt.group(3) or ""
+
+
 def _clean_text(raw: str, limit: int) -> str:
     """清洗 m.weibo.cn 返回的 HTML 富文本，截断到 limit。"""
     if not raw:
         return ""
     text = re.sub(r"<br\s*/?>", "\n", raw, flags=re.I)
-    # 微博表情等内嵌图片，保留 alt 文本（如 [笑cry]）
-    text = re.sub(r'<img[^>]*alt="([^"]*)"[^>]*>', r"\1", text, flags=re.I)
+    # 微博表情等内嵌图片，保留 alt 文本（如 [笑cry]）。alt 的三种写法都要认：
+    # 双引号、单引号、无引号——改版后裸值写法出现过，旧正则只认双引号，
+    # 结果表情被整段剥掉，正文里出现无意义的空洞。正则用 [^>]*? 且字符类
+    # 互斥，不存在灾难性回溯路径。
+    text = _IMG_TAG_RE.sub(_img_alt_text, text)
     text = re.sub(r"<[^>]+>", "", text)
     text = html_lib.unescape(text)
     text = re.sub(r"[ \t\r\f\v]+", " ", text)

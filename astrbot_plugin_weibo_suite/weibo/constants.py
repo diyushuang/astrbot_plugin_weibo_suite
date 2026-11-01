@@ -111,6 +111,10 @@ BAD_NAME_RE = re.compile(r'[\\/:*?"<>|\s]+')
 # 诊断文件：每批相册下载/上传在重负载动作"之前"写入体量与配置快照并立即刷盘。
 # 整机被内存顶死时主日志往往来不及落盘，这份文件重启后还能还原死机前最后几批
 # 的状态（与 astrbot_plugin_weibo_album 的 diagnostic.log 同一套做法）
+# 游客身份（含 .weibo.cn 的 SUB cookie）单独落一个 0600 小文件：
+# state.json 常被用户整份贴进 issue 排查，把 cookie 混在里面等于交出登录态。
+VISITOR_FILE = "visitor_cookies.json"
+
 DIAG_FILE = "diagnostic.log"
 DIAG_MAX_BYTES = 512 * 1024  # 诊断文件轮转阈值：超限只留后半段
 # 错误留存：本插件所有 warning/error 留存进内存环形缓冲 + 后台线程写盘，
@@ -120,6 +124,7 @@ ERRLOG_FILE = "errors.log"
 ERRLOG_MAX_BYTES = 512 * 1024  # 轮转阈值：超限只留后半段
 # ERRLOG_BUFFER / ERRLOG_PAGE_LIMIT 与面板共享，见 constants.py
 GIF_MAX_BYTES = 30 * 1024 * 1024  # 实况图 GIF 产物上限：超限回落封面静图，防超大 GIF
+GIF_TRANSCODE_TIMEOUT = 60  # 单条实况图 ffmpeg 转码上限（秒）：超时按失败回落封面静图
 SINAIMG_RE = re.compile(
     r"(https?:)?//([a-z0-9]+)\.sinaimg\.cn/([a-z0-9]+)/([0-9a-zA-Z]+)\.(\w+)", re.I
 )
@@ -226,6 +231,10 @@ ARCHIVE_QUEUE_MAX = 500
 # 队列满时转存待办的条数上限：不能因为"满了"就把 mid 直接丢掉（那会让 media
 # 永远停在 pending，只有对账才看得出来）。满了丢最旧的，等 worker 空闲重投。
 ARCHIVE_PENDING_RETRY_MAX = 500
+# 关闭归档 worker 时的宽限秒数：先投停止哨兵让**当前这一条** mid 收尾，
+# 超过宽限再硬 cancel。直接 cancel 会把下到一半的原图连同 mark_media 一起丢掉，
+# 且日志里看不出是哪条 mid（P3-13）。
+ARCHIVE_CLOSE_GRACE_SECONDS = 5.0
 # 回填翻页安全上限：异常数据（如游标不前进）时也必须能停下来
 BACKFILL_SAFETY_MAX_PAGES = 1000
 # 媒体状态顺序即推进等级（rank 0..N），DB 层据此保证状态单调不回退

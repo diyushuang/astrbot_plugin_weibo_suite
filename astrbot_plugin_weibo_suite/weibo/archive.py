@@ -15,6 +15,7 @@ ARCHIVE_DB_NAME = globals().get("ARCHIVE_DB_NAME") or "archive.db"
 ARCHIVE_DIR_NAME = globals().get("ARCHIVE_DIR_NAME") or "archive"
 ARCHIVE_QUEUE_MAX = globals().get("ARCHIVE_QUEUE_MAX") or 500
 BACKFILL_SAFETY_MAX_PAGES = globals().get("BACKFILL_SAFETY_MAX_PAGES") or 1000
+ARCHIVE_CLOSE_GRACE_SECONDS = globals().get("ARCHIVE_CLOSE_GRACE_SECONDS") or 5.0
 MEDIA_STATES = tuple(
     globals().get("MEDIA_STATES") or ("pending", "downloaded", "album", "bed", "thumb", "vector")
 )
@@ -24,6 +25,8 @@ ARCHIVE_GAP_LIMIT = 20  # 对账明细最多 20 条（按类型分组后取前 N
 ARCHIVE_GAP_KEEP = 40  # 单类型最多缓存多少条明细，避免全库扫描时吃内存
 ARCHIVE_SCAN_LIMIT = 5000  # 对账扫描帖子上限（防御性，避免一次命令扫几万条）
 ARCHIVE_SCAN_PAGE = 200
+# 关闭哨兵：worker 读到它就干净退出（不当作待下载的 mid）
+_ARCHIVE_STOP = object()
 
 
 def _archive_int(value, default: int = 0) -> int:
@@ -136,13 +139,39 @@ class ArchiveMixin:
             logger.warning(f"归档初始化失败（不影响其它功能）: {e}")
 
     async def archive_close(self) -> None:
-        """取消 worker、等收尾、关库；幂等不抛。"""
+        """让 worker 收尾、必要时硬取消、关库；幂等不抛。
+
+        先投停止哨兵而不是直接 cancel：cancel 会打断正在写的原图，让这条 mid
+        既没 mark_media 也不在队列里（进程退出后彻底消失，只有对账能发现）。
+        给一个有限宽限（ARCHIVE_CLOSE_GRACE_SECONDS）让当前那条下完，超时才硬取消。
+        """
         task = getattr(self, "_archive_worker_task", None)
         self._archive_worker_task = None
         if task is not None and not task.done():
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+            stopped = False
+            try:
+                self._archive_queue().put_nowait(_ARCHIVE_STOP)
+                stopped = True
+            except Exception:  # 队列满/已关闭：只能硬取消
+                stopped = False
+            if not stopped:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+                store = getattr(self, "_archive", None)
+                self._archive = None
+                if store is not None:
+                    with contextlib.suppress(Exception):
+                        store.close()
+                return
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=ARCHIVE_CLOSE_GRACE_SECONDS)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+            except Exception:  # worker 自己抛错退出：不用再 cancel
+                logger.debug("归档 worker 关闭时已自行退出", exc_info=True)
         store = getattr(self, "_archive", None)
         self._archive = None
         if store is not None:
@@ -238,6 +267,8 @@ class ArchiveMixin:
             "created_raw": str(post.get("created_raw") or post.get("time") or ""),
             "text": str(post.get("text") or ""),
             "text_raw": str(post.get("raw_text") or post.get("text_raw") or ""),
+            # P2-4：text 是否已经是长文全文，默认 0；只有补全真的换过正文才置 1。
+            "text_full": 1 if post.get("text_full") else 0,
             "is_long": 1 if post.get("is_long") else 0,
             "is_retweet": 1 if post.get("is_retweet") else 0,
             "orig_text": str(post.get("orig_text") or ""),
@@ -347,11 +378,17 @@ class ArchiveMixin:
             is_long = bool(post.get("is_long"))
             # 长文一律补全：text_max_length 默认 100，按">=140 或含全文"判定
             # 永远不成立，归档库里就只剩摘要，清洗后也无法恢复全文。
-            need_text = bool(is_long)
+            # force=True（/微博回填 --full）绕过 is_long 这类启发式：字段缺失时
+            # 也要真的去拉一次长文，否则 --full 就是空操作（历史 bug）。
+            need_text = bool(is_long) or force
+            # 图集补全不跟随 force：_ensure_full_pics 自己会判定要不要补，
+            # 无条件调用等于给每条旧帖多花一次详情请求。
             need_pics = pic_total > len(pics)
             if need_text and mid:
                 full = await self._archive_long_text(mid)
-                if full and len(full) > len(text):
+                # 只在真拿到更完整正文时替换；force 允许等长覆盖（截断形态可能
+                # 不同），但永不把已有正文改短。
+                if full and (len(full) > len(text) or (force and len(full) >= len(text))):
                     post["text"] = full
                     post["text_full"] = 1
             if need_pics:
@@ -410,6 +447,10 @@ class ArchiveMixin:
                 mid = await queue.get()
             except asyncio.CancelledError:
                 raise
+            if mid is _ARCHIVE_STOP:  # 关闭哨兵：当前已无在途任务
+                with contextlib.suppress(Exception):
+                    queue.task_done()
+                return
             try:
                 await self.archive_download_post(str(mid))
             except asyncio.CancelledError:
@@ -962,6 +1003,15 @@ class ArchiveMixin:
                 _archive_int(with_anchor.get("created_at"), 0),
                 str(with_anchor.get("mid") or ""),
             )
+            # 一页的媒体行一次查完（P2-3）：逐帖 list_media 会让 5000 上限的
+            # 全库对账变成 5000 次 SQL，每页 200 次同步查询还会长时间占着
+            # store 的全局锁，把监控侧的写入一起堵住。
+            bulk_fn = getattr(store, "list_media_bulk", None)
+            media_map = (
+                bulk_fn([str(p.get("mid") or "") for p in batch if p.get("mid")]) or {}
+                if callable(bulk_fn)
+                else {}
+            )
             for post in batch:
                 seen["posts"] += 1
                 mid = str(post.get("mid") or "")
@@ -974,7 +1024,10 @@ class ArchiveMixin:
                         buckets["post_no_text"].append(
                             {"kind": "post_no_text", "mid": mid, "detail": "正文为空"}
                         )
-                media = store.list_media(mid) or []
+                if callable(bulk_fn):
+                    media = media_map.get(mid) or []
+                else:  # 兼容旧存储实现（测试替身等）
+                    media = store.list_media(mid) or []
                 if media:
                     seen["posts_with_media"] += 1
                 pic_total = _archive_int(post.get("pic_total"), -1)

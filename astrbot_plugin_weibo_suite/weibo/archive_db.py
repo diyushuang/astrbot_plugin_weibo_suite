@@ -35,6 +35,15 @@ from .constants import MEDIA_STATES
 logger = logging.getLogger("weibo_suite.archive_db")
 
 _SCHEMA_VERSION = 2
+# 批量查媒体时一条 WHERE mid IN (...) 里塞多少个占位符。
+#
+# 这里不是"撞上限才分批"，而是**主动分批**：SQLite 的绑定变量上限在编译期由
+# SQLITE_LIMIT_VARIABLE_NUMBER 决定，3.32 起默认 32766，但 3.32 之前默认只有
+# 999，且各发行版/嵌入式绑定可能把下限调得更低（aarch64 的安卓旧版就是 999）。
+# 一条 5000 个 mid 的 IN 在新版上能过、在旧版上直接 "too many SQL variables"，
+# 这种"只在某些用户那里炸"的错误最难查，所以按 500 一批发，代价只是几次往返。
+# 拆成模块级常量纯粹是为了让测试能把它调小、真正触发分批分支。
+_BULK_MEDIA_CHUNK = 500
 
 # 媒体状态机的权威顺序（合同第 2 节，定义在 weibo/constants.py）：下标即 rank，
 # "达到或超过该 rank" 才计入该态；这里只把顺序翻成 rank 映射，不另存一份字面量。
@@ -61,6 +70,7 @@ _POST_COLUMNS: tuple[str, ...] = (
     "created_raw",
     "text",
     "text_raw",
+    "text_full",
     "is_long",
     "is_retweet",
     "orig_text",
@@ -108,6 +118,7 @@ _POST_INSERT_DEFAULTS: dict[str, Any] = {
     "created_raw": "",
     "text": "",
     "text_raw": "",
+    "text_full": 0,
     "is_long": 0,
     "is_retweet": 0,
     "orig_text": "",
@@ -138,6 +149,7 @@ CREATE TABLE IF NOT EXISTS posts (
     created_raw  TEXT NOT NULL DEFAULT '',
     text         TEXT NOT NULL DEFAULT '',
     text_raw     TEXT NOT NULL DEFAULT '',
+    text_full    INTEGER NOT NULL DEFAULT 0,
     is_long      INTEGER NOT NULL DEFAULT 0,
     is_retweet   INTEGER NOT NULL DEFAULT 0,
     orig_text    TEXT NOT NULL DEFAULT '',
@@ -227,6 +239,30 @@ def _merge(old: Any, new: Any) -> Any:
     if _is_blank(new) and not _is_blank(old):
         return old
     return new
+
+
+def _merge_text(
+    old: Any,
+    new: Any,
+    *,
+    old_full: int = 0,
+    new_full: int = 0,
+) -> tuple[str, int]:
+    """正文合并：更长者胜，且 text_full=1 一旦建立就不被非全文摘要降级。
+
+    补全长文是把解析侧截断的摘要换成全文；若沿用"非空即覆盖"，时间线刷新或
+    重复导入带来的短摘要会把全文顶掉，库里就永久只剩摘要。反之全文也可能比
+    旧摘要长，所以正文取长的那份、text_full 只升不降。
+    """
+    old_text = _as_text(old)
+    new_text = _as_text(new)
+    if not new_text.strip():
+        return old_text, 1 if old_full else 0
+    if not old_text.strip():
+        return new_text, 1 if new_full else 0
+    if len(new_text) >= len(old_text):
+        return new_text, 1 if (new_full or old_full) else 0
+    return old_text, 1 if old_full else 0
 
 
 def _to_int(value: Any, default: int = 0) -> int:
@@ -329,6 +365,7 @@ def _post_values(post: Mapping[str, Any]) -> dict[str, Any]:
         "created_raw": created_raw,
         "text": _as_text(_pick(post, ("text", "t"))),
         "text_raw": _as_text(_pick(post, ("text_raw", "raw_text"))),
+        "text_full": _as_flag(_pick(post, ("text_full",))),
         "is_long": _as_flag(_pick(post, ("is_long", "lt"))),
         "is_retweet": _as_flag(_pick(post, ("is_retweet", "rt"))),
         "orig_text": _as_text(_pick(post, ("orig_text",))),
@@ -442,6 +479,10 @@ class ArchiveStore:
         }
         if "cleaned_text" not in post_columns:
             connection.execute("ALTER TABLE posts ADD COLUMN cleaned_text TEXT NOT NULL DEFAULT ''")
+        # P2-4：text_full 标记「text 已经是长文全文」。老库升级后就地补列，
+        # 已有长文行只能标记为"未知"（0），下一次补全再改写。
+        if "text_full" not in post_columns:
+            connection.execute("ALTER TABLE posts ADD COLUMN text_full INTEGER NOT NULL DEFAULT 0")
         media_columns = {
             str(row["name"]) for row in connection.execute("PRAGMA table_info(media)").fetchall()
         }
@@ -499,6 +540,12 @@ class ArchiveStore:
                 connection.execute(_POST_UPSERT_SQL, [inserted[column] for column in _POST_COLUMNS])
             else:
                 merged: dict[str, Any] = {"mid": mid}
+                merged_text, merged_text_full = _merge_text(
+                    row["text"],
+                    values.get("text"),
+                    old_full=_as_flag(row["text_full"]),
+                    new_full=_as_flag(values.get("text_full")),
+                )
                 for column in _POST_COLUMNS:
                     if column == "mid":
                         continue
@@ -509,6 +556,10 @@ class ArchiveStore:
                     elif column == "source":
                         # 首见来源保留：monitor 归档过的帖后来用 json 再导入也不改来源。
                         merged[column] = _as_text(old_value) or _as_text(new_value) or "monitor"
+                    elif column == "text":
+                        merged[column] = merged_text
+                    elif column == "text_full":
+                        merged[column] = merged_text_full
                     else:
                         merged[column] = _merge(old_value, new_value)
                 merged["updated_at"] = _utc_iso()
@@ -926,6 +977,35 @@ class ArchiveStore:
                 "SELECT * FROM media WHERE mid = ? ORDER BY idx ASC, pid ASC", (str(mid),)
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def list_media_bulk(self, mids: Sequence[str]) -> dict[str, list[dict]]:
+        """批量取多帖的媒体行，替代对账时按帖的 N+1 查询（P2-3）。
+
+        按 _BULK_MEDIA_CHUNK（500）个 mid 一批查询：SQLite 3.32 起绑定变量默认
+        上限是 32766，但更老的版本默认只有 999、嵌入式绑定还可能更低，一条 WHERE
+        mid IN (...) 塞进 5000 个 mid 在旧版本上会直接报 "too many SQL
+        variables"。返回 {mid: [row, ...]}，同一 mid 内排序与 list_media 一致；
+        没有媒体行的 mid 不出现在结果里（调用方按 get(mid) or [] 处理）。
+        """
+        wanted = [str(mid) for mid in mids if str(mid or "").strip()]
+        result: dict[str, list[dict]] = {}
+        if not wanted:
+            return result
+        with self._lock:
+            connection = self._connection()
+            if connection is None:
+                return result
+            for start in range(0, len(wanted), _BULK_MEDIA_CHUNK):
+                chunk = wanted[start : start + _BULK_MEDIA_CHUNK]
+                placeholders = ", ".join("?" for _ in chunk)
+                rows = connection.execute(
+                    f"SELECT * FROM media WHERE mid IN ({placeholders})"
+                    " ORDER BY mid ASC, idx ASC, pid ASC",
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    result.setdefault(str(row["mid"]), []).append(dict(row))
+        return result
 
     def get_media(self, mid: str, pid: str) -> dict | None:
         with self._lock:

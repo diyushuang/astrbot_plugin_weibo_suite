@@ -155,9 +155,9 @@ class AlbumMixin:
         **兼容性提醒**：``inst.bot`` 与 ``metadata.id`` 都是适配器的非公开属性，
         AstrBot 未把它们纳入插件 API 承诺；取用一律走 ``getattr`` 并容许缺失
         （连 platform_manager 本身也当可选处理），任何一个环节变了都只是"拿不到
-        bot → 退回提示用户"，不会抛异常打断推送链路。实测于 AstrBot 4.28.2；
-        升级 AstrBot 大版本后请重新确认这两个属性仍在（metadata.yaml 已把
-        astrbot_version 上界收在 <5）。
+        bot → 退回提示用户"，不会抛异常打断推送链路。实测于 AstrBot 4.29.4；
+        升级 AstrBot 版本后请重新确认这两个属性仍在（metadata.yaml 已把
+        astrbot_version 上界收在 <4.30，即只承诺 4.29.x 及以前验证过的行为）。
         """
         pm = getattr(self.context, "platform_manager", None)
         get_insts = getattr(pm, "get_insts", None)
@@ -466,12 +466,22 @@ class AlbumMixin:
                 stderr=asyncio.subprocess.DEVNULL,
             )
             try:
-                await asyncio.wait_for(proc.wait(), timeout=60)
+                await asyncio.wait_for(proc.wait(), timeout=GIF_TRANSCODE_TIMEOUT)
             except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
+                logger.info(f"{PLUGIN_NAME} 实况图转码超过 {GIF_TRANSCODE_TIMEOUT}s，改用封面静图")
                 return False
-        return proc.returncode == 0 and gif.is_file() and gif.stat().st_size > 0
+            finally:
+                # 超时之外还有一条更常见的路：terminate 会 cancel 上传任务，取消从
+                # wait_for 里穿出来。以前只处理了 TimeoutError，这种情况下 ffmpeg
+                # 既不 kill 也不 wait——插件重载不换进程，孤儿转码会一直吃满 CPU。
+                # 所以回收逻辑必须放在 finally：任何路径（含取消）都把子进程收干净。
+                if proc.returncode is None:
+                    with contextlib.suppress(ProcessLookupError, OSError):
+                        proc.kill()
+                    # kill 之后仍要 wait：不回收就是僵尸进程
+                    with contextlib.suppress(Exception):
+                        await proc.wait()
+            return proc.returncode == 0 and gif.is_file() and gif.stat().st_size > 0
 
     async def _live_gif(self, pic: dict[str, str], folder: Path) -> Path | None:
         """下载实况图的视频段并转 GIF；任何一步失败返回 None，由上层回落封面。"""
@@ -545,9 +555,12 @@ class AlbumMixin:
         results = await asyncio.gather(*(one(p) for p in pics), return_exceptions=True)
         files: list[tuple[dict[str, str], Path]] = []
         for r in results:
+            if isinstance(r, asyncio.CancelledError):
+                # 取消不能被当成"这张图跳过"：吞掉它，调用方会以为这一批已经下齐
+                # 而继续去 _upload_files 上传，热重载后的半批目录就是这么来的
+                raise r
             if isinstance(r, BaseException):
-                # 子任务被撤（热重载/关停）时也按跳过收下，别让 CancelledError
-                # 从 gather 里穿出去把父任务一起带走
+                # 其余异常（单张下载失败）按跳过收下，不拖垮整批
                 logger.warning(f"相册图片下载异常，跳过: {r!r}")
             elif r is not None:
                 files.append(r)

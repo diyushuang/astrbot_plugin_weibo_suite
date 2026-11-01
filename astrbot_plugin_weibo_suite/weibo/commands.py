@@ -167,6 +167,31 @@ class CommandsMixin:
         )
         yield event.plain_result("\n".join(lines))
 
+    def _album_target_args(self, rest: list[str], gid: str | None) -> tuple[str, str] | None:
+        """把「[群号] 相册名」的剩余参数拆成 (目标群, 相册名)。
+
+        历史 bug：群内省略群号的写法里，**以数字开头的相册名**（如「2024 图集」）
+        被当成「群号 + 相册名」，规则落到一个不存在的群 2024 上——推送照常，
+        相册永远不传，而且面板上看不出错。判定顺序：
+
+        1. 群内且整段正好命中已知相册（解析缓存）→ 当前群 + 整段，最可信；
+        2. 首段是 5 位以上纯数字（QQ 群号最短 5 位，相册名很少长这样）→ 群号；
+        3. 其余情况在群里一律当作当前群的相册名（含纯数字相册 ID）。
+        """
+        joined = " ".join(rest).strip()
+        if gid:
+            try:
+                if joined and self._album_cache.get(f"{gid}:{joined}"):
+                    return str(gid), joined
+            except AttributeError:  # 极简测试桩没有缓存
+                pass
+            if len(rest) >= 2 and rest[0].isdigit() and len(rest[0]) >= 5:
+                return rest[0], " ".join(rest[1:]).strip()
+            return str(gid), joined
+        if len(rest) >= 2 and rest[0].isdigit():
+            return rest[0], " ".join(rest[1:]).strip()
+        return None
+
     async def weibo_album_bind(self, event: AstrMessageEvent, uid_text: str = ""):
         """把某博主的微博图片自动上传到本群指定相册（管理员）。
 
@@ -292,16 +317,14 @@ class CommandsMixin:
         rest: list[str] = []
         with contextlib.suppress(ValueError):
             rest = tokens[tokens.index(kw) + 1 :]
-        # 群内省略群号时只剩一段：数字相册 ID 不能被误判成群号
-        if len(rest) >= 2 and rest[0].isdigit():
-            target_gid, album = rest[0], " ".join(rest[1:])
-        elif gid:
-            target_gid, album = str(gid), " ".join(rest)
-        else:
+        # 群内省略群号时只剩一段：数字开头的相册名不能被误判成群号
+        target = self._album_target_args(rest, gid)
+        if target is None:
             yield event.plain_result(
                 "私聊使用必须写明群号：微博关键词相册 <关键词> <群号> <相册名或ID>"
             )
             return
+        target_gid, album = target
         if not album:
             yield event.plain_result(
                 "请补上相册名或ID：微博关键词相册 <关键词> <群号> <相册名或ID>\n"
@@ -368,16 +391,14 @@ class CommandsMixin:
         rest: list[str] = []
         with contextlib.suppress(ValueError):
             rest = tokens[tokens.index(kw) + 1 :]
-        # 同 微博关键词相册：群内单段参数一律视为相册名/ID
-        if len(rest) >= 2 and rest[0].isdigit():
-            target_gid, album = rest[0], " ".join(rest[1:])
-        elif gid:
-            target_gid, album = str(gid), " ".join(rest)
-        else:
+        # 同 微博关键词相册：群内数字开头的相册名不能被误判成群号
+        target = self._album_target_args(rest, gid)
+        if target is None:
             yield event.plain_result(
                 "私聊使用必须写明群号：微博博主关键词相册 <uid> <关键词> <群号> <相册名或ID>"
             )
             return
+        target_gid, album = target
         if not album:
             yield event.plain_result(
                 "请补上相册名或ID：微博博主关键词相册 <uid> <关键词> <群号> <相册名或ID>"
@@ -569,7 +590,9 @@ class CommandsMixin:
         if store is not None:
             for uid in list(self.accounts):
                 try:
-                    cur = store.get_cursor(uid)
+                    # 同步 SQLite 查询放线程池：这段循环在事件循环里跑，账号多时
+                    # 每次跨库持锁查询都会把整条消息处理卡住（P3-7）
+                    cur = await asyncio.to_thread(store.get_cursor, uid)
                 except Exception as e:
                     logger.warning(f"读取回填游标失败: {e!r}")
                     continue

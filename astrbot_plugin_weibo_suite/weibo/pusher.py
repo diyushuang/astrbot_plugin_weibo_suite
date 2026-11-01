@@ -104,7 +104,7 @@ class PusherMixin:
         return chain
 
     async def _send_with_timeout(
-        self, session: str, chain: MessageChain, *, timeout_seconds: int | None = None
+        self, session: str, chain: MessageChain, *, timeout_seconds: float | None = None
     ) -> bool:
         """带超时的主动消息发送，防止单个适配器卡死拖住整个轮询任务。"""
         send_timeout = (
@@ -888,6 +888,20 @@ class PusherMixin:
             if item.get("video_files"):
                 self._save_state_debounced()
 
+    @staticmethod
+    def _sessions_for_item(item: dict[str, Any], sessions: list[str]) -> list[str]:
+        """本条这一轮该发给哪些会话。
+
+        只有真的经历过"部分会话明确失败"的条目才带 retry_sessions：此时本轮只
+        补发这些会话——已经送达的会话再发一遍，群里就是同一条消息出现两遍。
+        配置里新加的会话不参与老条目的补发（那条微博对它是历史内容，重发是刷屏）。
+        """
+        retry = item.get("retry_sessions")
+        if not isinstance(retry, list) or not retry:
+            return list(sessions)
+        wanted = {str(s) for s in retry}
+        return [s for s in sessions if s in wanted]
+
     async def _flush_pending(self) -> bool:
         """把待推送队列发送到所有绑定的会话，返回本轮是否有需落盘的状态变化。
 
@@ -949,17 +963,41 @@ class PusherMixin:
                 if not sessions:
                     # 未绑定推送目标：保留消息但不消耗重试次数
                     continue
+                target_sessions = self._sessions_for_item(item, sessions)
+                if not target_sessions:
+                    # 上次失败的会话已从"推送目标"里被删掉：没有可补发的对象了。
+                    # 条目必须在这里终态，否则会永远卡在队列里（媒体也一直占着）
+                    acc = [str(s) for s in (item.get("sent_acc") or [])]
+                    self._pending_discard(item)
+                    self._record_push(
+                        str(item.get("uid") or ""),
+                        bool(acc),
+                        str(item.get("text") or ""),
+                        (f"推送到 {len(acc)} 个会话" if acc else "没有任何会话送达")
+                        + "；其余目标会话推送失败后已从推送目标中移除，本条不再重试",
+                    )
+                    changed = True
+                    continue
                 if item.get("retries", 0) >= max_retries:
                     retries = item.get("retries", 0)
                     uid, text = str(item.get("uid") or ""), str(item.get("text") or "")
                     logger.warning(
                         f"推送重试 {retries} 轮超限，微博 {item['post_id']} 停止整条重发"
                     )
-                    delivered, unknown = await self._last_chance_flush(item, sessions)
+                    # 只对还没送到的会话做最后一搏：已经收到的会话再发一遍，
+                    # 群里就是同一条微博出现两遍
+                    delivered, unknown = await self._last_chance_flush(item, target_sessions)
+                    acc = [str(s) for s in (item.get("sent_acc") or [])]
+                    for s_ in delivered + unknown:
+                        if s_ not in acc:
+                            acc.append(s_)
+                    # 前几轮就已送达的会话同样算"这条推送出去了"，记账看累计口径
+                    got_sent = [str(s) for s in (item.get("sent_acc") or [])] + delivered
+                    left = [s_ for s_ in target_sessions if s_ not in set(delivered) | set(unknown)]
                     # 群文件兜底就在上面这次调用里做的：记账要连它一起说清楚
                     file_note = self._video_file_summary(item)
                     tail = f"，{file_note}" if file_note else ""
-                    if delivered:
+                    if got_sent:
                         # 降级链确实发出去了：记账必须跟着结果走，否则会留下
                         # "面板写着放弃、群里却有这条微博"的倒挂
                         self._record_push(
@@ -967,7 +1005,8 @@ class PusherMixin:
                             True,
                             text,
                             f"整条重试 {retries} 轮无果，去视频降级后推送到 "
-                            f"{len(delivered)} 个会话{tail}",
+                            f"{len(acc)} 个会话{tail}"
+                            + (f"，另 {len(left)} 个会话{retries} 轮重试后放弃" if left else ""),
                         )
                     elif unknown:
                         self._record_push(
@@ -1025,7 +1064,7 @@ class PusherMixin:
                 # 还在用它、还在往群里发），只能打 _cancel_requested，由下面收尾
                 item["_send_active"] = True
                 try:
-                    for session in sessions:
+                    for session in target_sessions:
                         if item.get("_cancel_requested"):
                             # 正在发送时被取消：不再往后面的会话发（已发出的收不回）
                             break
@@ -1062,25 +1101,68 @@ class PusherMixin:
                 if cancel_late:
                     item.pop("_cancel_requested", None)
                     item["_cancel_done"] = True
-                if sent_sessions:
-                    self._pending_discard(item)
+                if not (sent_sessions or timed_out_sessions or failed_sessions):
+                    # 一个会话都没走到（正常不可达）：原样留队、不消耗重试次数，
+                    # 免得凭空累加 retries 把条目提前判死
+                    continue
+                # 本轮"这条到底送到了哪些会话"：部分失败时它要跟着条目留队，
+                # 下一轮只补发失败的会话
+                acc = [str(s) for s in (item.get("sent_acc") or [])]
+                for s_ in sent_sessions + timed_out_sessions:
+                    if s_ not in acc:
+                        acc.append(s_)
+                if failed_sessions and not cancel_late:
+                    # 部分会话明确失败：条目**留在**队列里（不 discard、不删媒体），
+                    # 下一轮只对这些会话重发。以前只要有一个会话成功就整条出队，
+                    # 失败的群永远收不到，记账却写"待重试"——既虚报成功又丢了重试对象
+                    item["sent_acc"] = acc
+                    item["retry_sessions"] = list(failed_sessions)
+                    item["retries"] = int(item.get("retries", 0)) + 1
+                    # 本轮发送窗口已经收尾，残留的"发送中"戳必须清掉：否则插件
+                    # 重载时 _load_state 会把这条按"结果未知"整条丢弃，失败的
+                    # 会话再也补不上
+                    item.pop("last_send_ts", None)
+                    if sent_sessions or timed_out_sessions:
+                        self._dispatch_album_uploads(item, sent_sessions + timed_out_sessions)
+                    if sent_sessions:
+                        pushed_this_round += 1
+                    logger.warning(
+                        f"微博 {item['post_id']} 已送到 {len(acc)} 个会话，"
+                        f"{len(failed_sessions)} 个会话明确失败；第 {item['retries']} 轮，"
+                        "条目留在队列中只补发失败会话"
+                    )
+                    changed = True
+                    # 重试名单与已送达名单必须跨重启存活，媒体也要留着补发
+                    self._save_state()
+                    last_save = time.monotonic()
+                    if delay and idx < total - 1:
+                        await asyncio.sleep(delay)
+                    continue
+                # 到这里本条的会话循环已经定论：整条彻底出队，并且**只在这一处**
+                # 记一次账（成功与否按真实送达的会话数说，禁止虚报）
+                self._pending_discard(item)
+                delivered = bool(sent_sessions) or bool(item.get("sent_acc"))
+                reason = self._reject_reason(item)
+                # 走到这里时 retry_sessions 还是本轮实际补发的那批会话：记账里
+                # 必须能看出"这条是部分失败后补发才送达的"，否则面板只剩一句
+                # "推送到 N 个会话"，看不出曾经有过失败
+                retried = len(item.get("retry_sessions") or [])
+                if delivered:
                     pushed_this_round += 1
                     logger.info(f"已推送微博 {item['post_id']}")
-                    # 摘段标记可能来自本轮的补发，也可能来自更早的轮次（摘段后
-                    # 下一轮才发出去），记账口径一致
-                    reason = self._reject_reason(item)
                     self._record_push(
                         str(item.get("uid") or ""),
                         True,
                         str(item.get("text") or ""),
-                        f"推送到 {len(sent_sessions)} 个会话"
+                        f"推送到 {len(acc)} 个会话"
+                        + (f"，其中 {retried} 个会话是前几轮失败后补发送达的" if retried else "")
                         + (
                             f"，另 {len(timed_out_sessions)} 个会话超时结果未知未重发"
                             if timed_out_sessions
                             else ""
                         )
                         + (
-                            f"，{len(failed_sessions)} 个会话明确失败待重试"
+                            f"，{len(failed_sessions)} 个会话推送失败（面板取消，未再补发）"
                             if failed_sessions
                             else ""
                         )
@@ -1089,13 +1171,7 @@ class PusherMixin:
                     )
                     # 超时的会话多半其实已送达，相册上传有自己的台账去重，一并派发
                     self._dispatch_album_uploads(item, sent_sessions + timed_out_sessions)
-                    changed = True
-                    now_mono = time.monotonic()
-                    if now_mono - last_save >= STATE_SAVE_DEBOUNCE:
-                        self._save_state()
-                        last_save = now_mono
                 elif timed_out_sessions:
-                    self._pending_discard(item)
                     # 结果未知多半是实际已送达：按占用了发送配额计，防大载荷
                     # 超时后本轮又源源不断发出后续条目
                     pushed_this_round += 1
@@ -1107,10 +1183,18 @@ class PusherMixin:
                         "如群里没收到请点原帖链接",
                     )
                     self._dispatch_album_uploads(item, timed_out_sessions)
-                    changed = True
-                else:
-                    item["retries"] = item.get("retries", 0) + 1
-                    changed = True
+                elif cancel_late and failed_sessions:
+                    # 面板取消与"全部会话失败"撞在一起：取消已经单独记过一笔
+                    # 事件，这里不再往推送统计里写失败
+                    logger.info(
+                        f"面板取消推送：微博 {item['post_id']} 取消时 "
+                        f"{len(failed_sessions)} 个会话尚未送出，本条不再重发"
+                    )
+                changed = True
+                now_mono = time.monotonic()
+                if now_mono - last_save >= STATE_SAVE_DEBOUNCE:
+                    self._save_state()
+                    last_save = now_mono
                 # 多条之间留间隔防刷屏；最后一条之后无需再等
                 if delay and idx < total - 1:
                     await asyncio.sleep(delay)
@@ -1170,8 +1254,11 @@ class PusherMixin:
         return bool(self.config.get("message_with_videos", True))
 
     def _video_tmp_root(self) -> Path:
-        assert self._data_dir is not None
-        return self._data_dir / VIDEO_TMP_DIR
+        # 同 _state_file：assert 会被 python -O 剥掉，退化点在别处更难查
+        data_dir = self._data_dir
+        if data_dir is None:
+            raise RuntimeError(f"{PLUGIN_NAME} 数据目录不可用，视频临时目录无法定位")
+        return data_dir / VIDEO_TMP_DIR
 
     def _wipe_video_tmp(self):
         """清掉上次运行残留的视频临时文件（正常流程发完即删，这里只兜底）。"""
@@ -1675,7 +1762,13 @@ class PusherMixin:
 
     # ---------------------------------------------------------------- 多平台订阅投递
 
-    async def deliver_sns_payload(self, payload: dict, session: str) -> str:
+    async def deliver_sns_payload(
+        self,
+        payload: dict,
+        session: str,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> str:
         """把一条多平台订阅的更新推到某个会话。
 
         返回 `"sent"` / `"unknown"` / `"failed"`，语义与 `_send_rich_media` 一致：
@@ -1715,20 +1808,47 @@ class PusherMixin:
                 if url:
                     chain.chain.append(Image.fromURL(str(url)))
 
+        at_all = False
         if self._sns_at_all_hit(payload, session):
             allowed, _why = await self._at_all_gate(session)
             if allowed:
                 chain = MessageChain(chain=[AtAll(), *chain.chain])
+                at_all = True
 
         try:
-            ok = await self._send_with_timeout(session, chain)
+            ok = await self._send_with_timeout(session, chain, timeout_seconds=timeout_seconds)
         except (asyncio.TimeoutError, TimeoutError):
-            # 超时时消息可能已经出群，重试会重复——按 unknown 上报
+            # 超时时消息可能已经出群，重试会重复——按 unknown 上报。
+            # @全体 按"可能已发出"照样记一次配额：不记就会在超时后反复
+            # 叠加 @全体，被平台当成刷屏。
+            if at_all:
+                self._at_all_mark_sent()
             return "unknown"
         except Exception as exc:  # 一个群发失败不能拖垮整轮
             logger.warning(f"多平台订阅推送失败 {session}: {exc!r}")
-            return "failed"
-        return "sent" if ok else "failed"
+            if not at_all:
+                return "failed"
+            # 带 @全体 的链明确失败：平台侧限制（不是管理员 / @全体频率）
+            # 居多，整条更新跟着丢是更糟的结果——补发一次不带 @ 的正文。
+            # 没发出去就不记配额，否则限制会白白吃掉一次额度。
+            plain = MessageChain(
+                chain=[part for part in chain.chain if not isinstance(part, AtAll)]
+            )
+            try:
+                ok = await self._send_with_timeout(session, plain, timeout_seconds=timeout_seconds)
+            except (asyncio.TimeoutError, TimeoutError):
+                logger.warning(f"多平台订阅去 @全体 补发超时，结果未知 {session}")
+                return "unknown"
+            except Exception as retry_exc:
+                logger.warning(f"多平台订阅去 @全体 补发失败 {session}: {retry_exc!r}")
+                return "failed"
+            return "sent" if ok else "failed"
+        if ok:
+            # 真正带 @全体 出群才记配额（与 weibo 推送同口径）
+            if at_all:
+                self._at_all_mark_sent()
+            return "sent"
+        return "failed"
 
     def _sns_at_all_hit(self, payload: dict, session: str) -> bool:
         """订阅域的 @全体：平台开关 + 关键词 + 账号白名单，三关都过才生效。"""

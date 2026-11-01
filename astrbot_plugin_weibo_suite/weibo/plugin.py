@@ -127,6 +127,8 @@ class WeiboMonitorPlugin(
         self._visitor_cookies: dict[str, str] = {}
         self._visitor_ts = 0.0
         self._ua: str = ""
+        # 上次写进 visitor_cookies.json 的内容，用来跳过无变化的重复写盘
+        self._visitor_blob = ""
         # 续期节奏控制
         self._last_renew_ts = 0.0
         self._renew_times: list[float] = []
@@ -563,8 +565,73 @@ class WeiboMonitorPlugin(
             self.accounts.pop(uid, None)
 
     def _state_file(self) -> Path:
-        assert self._data_dir is not None
-        return self._data_dir / "state.json"
+        # 不用 assert：python -O 会把 assert 整条剥掉，_data_dir 为 None 时
+        # 就会退化成 "None / state.json" 的 AttributeError，报错点离真因很远。
+        data_dir = self._data_dir
+        if data_dir is None:
+            raise RuntimeError(f"{PLUGIN_NAME} 数据目录不可用（StarTools.get_data_dir 失败）")
+        return data_dir / "state.json"
+
+    def _visitor_file(self) -> Path:
+        """游客身份文件（含 SUB cookie）的落点；不随 state.json 一起分发。"""
+        data_dir = self._data_dir
+        if data_dir is None:
+            raise RuntimeError(f"{PLUGIN_NAME} 数据目录不可用（StarTools.get_data_dir 失败）")
+        return data_dir / VISITOR_FILE
+
+    def _load_visitor_state(self) -> None:
+        """从 visitor_cookies.json 恢复游客身份；文件缺失/损坏时保持匿名。"""
+        try:
+            raw = self._visitor_file().read_text(encoding="utf-8")
+            payload = json.loads(raw)
+        except FileNotFoundError:
+            return
+        except Exception as e:
+            logger.warning(f"{PLUGIN_NAME} 读取 {VISITOR_FILE} 失败（将重新取游客身份）: {e}")
+            return
+        if not isinstance(payload, dict):
+            return
+        cookies = payload.get("cookies")
+        if not isinstance(cookies, dict) or not cookies.get("SUB"):
+            return
+        self._visitor_cookies = {str(k): str(v) for k, v in cookies.items()}
+        self._visitor_ts = float(payload.get("ts") or 0)
+        ua = str(payload.get("ua") or "")
+        self._ua = ua if ua in UA_POOL else ""
+        self._visitor_blob = raw
+
+    def _save_visitor_state(self, *, force: bool = False) -> None:
+        """写游客身份文件（POSIX 权限 0600）；内容没变就不重复写盘。
+
+        失败只告警不抛：身份续不上最多是下次重新抓一次游客 cookie，绝不能
+        反过来让状态落盘或推送失败。
+        """
+        try:
+            path = self._visitor_file()
+        except RuntimeError:
+            return
+        payload = {
+            "cookies": self._visitor_cookies,
+            "ts": self._visitor_ts,
+            "ua": self._ua,
+        }
+        blob = json.dumps(payload, ensure_ascii=False, indent=2)
+        if not force and blob == self._visitor_blob:
+            return
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(blob, encoding="utf-8")
+            # 先给临时文件收紧权限再原子替换：直接写正式文件会留下一个 0644
+            # 窗口，同机其他用户正好能读到 SUB
+            with contextlib.suppress(OSError):
+                os.chmod(tmp, 0o600)
+            tmp.replace(path)
+            self._visitor_blob = blob
+        except Exception as e:
+            logger.warning(f"{PLUGIN_NAME} 保存 {VISITOR_FILE} 失败（下次写入再试）: {e}")
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
 
     @staticmethod
     def _normalize_item(item: dict[str, Any]) -> dict[str, Any]:
@@ -593,6 +660,11 @@ class WeiboMonitorPlugin(
         item.setdefault("video_fail", "")
         # v1.7.0 起携带原始正文（关键词相册路由匹配用）；旧条目回退渲染后消息
         item.setdefault("raw_text", "")
+        # 部分会话推送失败时条目会留在队列里跨轮补发，这两张名单必须跟着
+        # state.json 一起活下来，否则重载后会把已送达的会话再发一遍
+        for key in ("sent_acc", "retry_sessions"):
+            if not isinstance(item.get(key), list):
+                item[key] = []
         return item
 
     @staticmethod
@@ -606,6 +678,9 @@ class WeiboMonitorPlugin(
         return {k: v for k, v in item.items() if not k.startswith("_")}
 
     def _load_state(self):
+        # 游客身份独立文件：即使 state.json 缺失/损坏也要能恢复，否则每次
+        # 状态重建都会白丢一份有效 cookie 并触发一次风控风险更高的重取
+        self._load_visitor_state()
         try:
             raw = self._state_file().read_text(encoding="utf-8")
             state = json.loads(raw)
@@ -649,13 +724,18 @@ class WeiboMonitorPlugin(
         self.cancelled = cancelled
         self._cancel_prune()
         self.last_check_ts = float(state.get("last_check_ts") or 0)
-        visitor = state.get("visitor") or {}
-        cookies = visitor.get("cookies") or {}
-        if isinstance(cookies, dict) and cookies.get("SUB"):
-            self._visitor_cookies = {str(k): str(v) for k, v in cookies.items()}
-            self._visitor_ts = float(visitor.get("ts") or 0)
-            ua = str(visitor.get("ua") or "")
-            self._ua = ua if ua in UA_POOL else ""
+        # 旧版把游客 cookie 明文塞在 state.json 的 visitor 段里：这里做一次性
+        # 迁移——优先用独立文件里的身份，只有它缺失时才读旧段，读完立刻写进
+        # 新文件，下次 _save_state 就不再输出 visitor 段（老库因此自动脱敏）。
+        if not self._visitor_cookies.get("SUB"):
+            visitor = state.get("visitor") or {}
+            cookies = visitor.get("cookies") if isinstance(visitor, dict) else None
+            if isinstance(cookies, dict) and cookies.get("SUB"):
+                self._visitor_cookies = {str(k): str(v) for k, v in cookies.items()}
+                self._visitor_ts = float(visitor.get("ts") or 0)
+                ua = str(visitor.get("ua") or "")
+                self._ua = ua if ua in UA_POOL else ""
+                self._save_visitor_state(force=True)
         # v1.5.0 起随状态文件持久化运行统计与最近动态（旧文件缺省时用默认值）
         stats = state.get("stats")
         if isinstance(stats, dict):
@@ -752,11 +832,8 @@ class WeiboMonitorPlugin(
             # 恢复不了，而"取消"恰恰多发生在需要重载配置排障的时候
             "cancelled": [self._dump_item(it) for it in self.cancelled],
             "last_check_ts": self.last_check_ts,
-            "visitor": {
-                "cookies": self._visitor_cookies,
-                "ts": self._visitor_ts,
-                "ua": self._ua,
-            },
+            # 游客 cookie 不在这里：state.json 会被用户整份贴出去排查，
+            # 身份走独立的 visitor_cookies.json（0600），见 _save_visitor_state
             "stats": self.stats,
             "activity": list(self.activity),
             # @全体 的频次台账（账号级、所有群共享）与最近一次投递结果：重载后
@@ -766,9 +843,11 @@ class WeiboMonitorPlugin(
             # 一次性升级迁移标记：重启/重载后据此不再重复迁移
             "migrations": sorted(self._migrations),
         }
+        # 身份文件独立落盘：即使下面 state.json 写失败也不能连累它
+        self._save_visitor_state()
         try:
             # 先写临时文件再原子替换：进程恰好死在写入中途不会留下截断的
-            # state.json（截断会让下次启动丢掉游客身份与整个待推送队列）
+            # state.json（截断会让下次启动丢掉整个待推送队列与已见记录）
             tmp = self._data_dir / "state.json.tmp"
             tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
             tmp.replace(self._state_file())
@@ -837,7 +916,9 @@ class WeiboMonitorPlugin(
         """推送成功/放弃的统一记账：动态 + 累计 + 按天 + 按博主。"""
         key = "push_ok" if ok else "push_fail"
         self.stats[key] = int(self.stats.get(key, 0)) + 1
-        day = datetime.now().strftime("%Y-%m-%d")
+        # 按天桶必须用中国时区：服务器常跑 UTC，用 datetime.now() 会让
+        # 00:00–08:00（北京时间）的推送记到前一天，面板"今日"对不上
+        day = datetime.now(tz=_TZ_CN).strftime("%Y-%m-%d")
         bucket = self.stats.setdefault("daily", {}).setdefault(day, {"push_ok": 0, "push_fail": 0})
         bucket[key] = int(bucket.get(key, 0)) + 1
         name = self._account_name(uid)
@@ -861,7 +942,9 @@ class WeiboMonitorPlugin(
 
     def _prune_stats(self):
         """统计桶只留最近 STATS_DAILY_KEEP 天；博主计数只在长出头时裁掉已取消监控的。"""
-        cutoff = (datetime.now() - timedelta(days=STATS_DAILY_KEEP)).strftime("%Y-%m-%d")
+        # 裁剪口径与 _record_push 的写入口径必须一致，否则 UTC 机器上会把
+        # 当天（北京时间）的桶当成过期数据删掉
+        cutoff = (datetime.now(tz=_TZ_CN) - timedelta(days=STATS_DAILY_KEEP)).strftime("%Y-%m-%d")
         daily = self.stats.get("daily") or {}
         self.stats["daily"] = {k: v for k, v in daily.items() if str(k) >= cutoff}
         by_uid = self.stats.get("by_uid") or {}
