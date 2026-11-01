@@ -14,11 +14,13 @@ class ApiMixin:
         collect: dict[str, str] | None = None,
     ) -> str:
         await self._validate_url(url)
-        await self._pace()
         assert self._http is not None
         timeout = aiohttp.ClientTimeout(total=15)
         last_err: Exception | None = None
         for attempt in range(3):
+            # 每次尝试都要重新排队限速：1.5s/3s 的退避短于 REQUEST_GAP 下限，
+            # 直接重发就是"被限流后立刻再打"，最容易把风控推到 IP 级。
+            await self._pace()
             try:
                 async with self._http.get(
                     url,
@@ -62,10 +64,10 @@ class ApiMixin:
                 self._blocked_until = 0.0
                 return data
             except WeiboRiskError as e:
+                # 风控刚触发就进入 IP 级冷却：继续换身份/重试只会加重风控。
+                # 原实现冷却生效后立刻再打 homepage + genvisitor + 重发请求。
                 self._mark_risk_blocked(e)
-                if attempt == 2:
-                    raise
-                await self._renew_quietly_force()
+                raise
             except WeiboAuthError as e:
                 if attempt == 2:
                     raise

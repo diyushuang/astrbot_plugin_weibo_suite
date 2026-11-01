@@ -99,9 +99,19 @@ def set_allowed_private_hosts(hosts) -> None:
 
     以主机名（而非 IP）入白名单：解析结果仍走原有流程（含钉扎），只是不再
     因落在私网段被拒。传空集合即恢复默认的全拒绝，插件卸载时应如此清理。
+
+    历史遗留 / 兼容接口：这是模块级可变全局状态，多实例场景下谁最后调用谁
+    生效。新代码请把集合按实例传给 GuardedHttpClient / guarded_request，让
+    「是否允许内网」由调用方当场决定，不要依赖这里。
     """
     global _ALLOWED_PRIVATE_HOSTS
     _ALLOWED_PRIVATE_HOSTS = {str(h).strip().lower() for h in hosts if str(h or "").strip()}
+
+
+# 「不豁免任何私网地址」的显式默认值：调用方应传它而不是留空依赖模块级全局。
+# 留空的语义是"沿用 set_allowed_private_hosts 设置的历史全局"，一旦某个实例
+# 调过它，同进程内所有未显式传参的请求都会跟着放宽——SSRF 保护随模块状态漂移。
+DENY_PRIVATE_HOSTS: frozenset[str] = frozenset()
 
 
 def _url_port(parsed) -> int:
@@ -132,9 +142,10 @@ def resolve_public_addrs(
     不依赖 aiohttp 对 IP 直连跳过 resolver 的内部实现行为，升级后
     仍保持"未钉扎即拒绝"的 fail-closed 语义。
 
-    allowed_private_hosts 未传（None）时使用模块级全局白名单（兼容既有调用方与
-    测试）；传入集合（含空集合）时只按该集合豁免——GuardedHttpClient 按实例
-    携带自己的集合，避免多个插件实例通过全局变量互相覆盖。
+    allowed_private_hosts 未传（None）时使用模块级全局白名单——仅为兼容既有
+    调用方与测试；新代码请显式传入集合（空集合即 deny-by-default），
+    GuardedHttpClient 也已按实例携带自己的集合，避免多个插件实例通过全局
+    变量互相覆盖。
     """
     try:
         parsed = urlparse(url)
@@ -422,7 +433,7 @@ async def stream_to_file(
     *,
     max_bytes: int,
     prepare: Callable[[str, str, bool], dict] | None = None,
-    allowed_private_hosts: set[str] | None = None,
+    allowed_private_hosts: set[str] | frozenset[str] | None = DENY_PRIVATE_HOSTS,
     chunk_size: int = 64 * 1024,
 ) -> int:
     """Download one guarded response into ``destination`` atomically.
@@ -430,11 +441,18 @@ async def stream_to_file(
     The implementation rejects declared or observed oversize bodies, HTML error
     disguises and truncated bodies. Data is written to ``.part`` first and only
     atomically replaces the destination after a complete successful read.
+
+    磁盘操作（建目录、逐块写、flush/fsync、原子改名、清理 .part）都放进
+    ``asyncio.to_thread``，await 本函数不会阻塞事件循环。
+
+    allowed_private_hosts 默认是空集合（deny-by-default），不读取模块级
+    全局白名单：调用方要放行内网图床必须显式传集合，避免 SSRF 拦截强度
+    取决于"别的实例有没有调过 set_allowed_private_hosts"。
     """
     if max_bytes <= 0:
         raise ValueError("max_bytes must be positive")
     destination = Path(destination)
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(destination.parent.mkdir, parents=True, exist_ok=True)
     part = destination.with_name(destination.name + ".part")
     response = await guarded_request(
         session,
@@ -469,17 +487,18 @@ async def stream_to_file(
                     total += len(chunk)
                     if total > max_bytes:
                         raise ResponseTooLargeError(f"响应实际大小超过上限 {max_bytes}")
-                    handle.write(chunk)
-                handle.flush()
-                os.fsync(handle.fileno())
+                    # 写盘放线程：慢盘上单块 write 也可能阻塞事件循环
+                    await asyncio.to_thread(handle.write, chunk)
+                await asyncio.to_thread(handle.flush)
+                await asyncio.to_thread(os.fsync, handle.fileno())
         except Exception:
             with contextlib.suppress(OSError):
-                part.unlink()
+                await asyncio.to_thread(part.unlink)
             raise
         encoded = str(response.headers.get("Content-Encoding", "")).strip().lower()
         if declared is not None and not encoded and total != declared:
             raise ValueError(f"响应被截断：收到 {total}/{declared} 字节")
-        part.replace(destination)
+        await asyncio.to_thread(part.replace, destination)
         return total
     finally:
         response.release()

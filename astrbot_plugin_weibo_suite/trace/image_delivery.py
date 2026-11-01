@@ -487,16 +487,24 @@ def send_diagnosis(exc: BaseException) -> str:
 _CF_IMAGE_PREFIX = "/cdn-cgi/image/"
 
 
-def is_cloudflare_imgbed_url(url: str) -> bool:
+def is_cloudflare_imgbed_url(url: str, base_url: str | None = None) -> bool:
     """按 CloudFlare-ImgBed 标准 /file/ 路径识别可缩放直链。
 
     同时识别 Cloudflare Image Resizing 路径式（/cdn-cgi/image/.../file/...），
     因为这种 URL 的源文件仍是 ImgBed /file/ 直链，只是缩放参数嵌在路径里。
+
+    base_url: 可选。给出时还要求目标 URL 的主机与它一致——`/file/` 只是图床
+    的路径约定，任意域名下的 `/file/x.jpg` 不一定来自本图床。不传时保持旧
+    行为（只看路径），避免影响只做路径判断的调用方。
     """
     try:
         parsed = urlsplit(str(url or ""))
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             return False
+        if base_url:
+            expected = urlsplit(str(base_url or ""))
+            if not expected.netloc or parsed.netloc.lower() != expected.netloc.lower():
+                return False
         path = unquote(parsed.path)
         if path.startswith("/file/"):
             return True
@@ -666,7 +674,7 @@ def build_imgbed_file_url(base_url: str, file_name: str) -> str | None:
     if parsed.scheme or parsed.netloc:
         return None
     candidate = f"{base}/file/{quote(decoded, safe='/')}"
-    return candidate if is_cloudflare_imgbed_url(candidate) else None
+    return candidate if is_cloudflare_imgbed_url(candidate, base) else None
 
 
 def is_napcat_parseable_url(url: str) -> bool:

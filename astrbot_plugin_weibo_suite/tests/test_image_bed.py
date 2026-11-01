@@ -106,3 +106,103 @@ def test_s3_path_encoding_and_error_detail_refuse_entities():
     assert uri_encode_path("/bucket/a b+%.jpg") == "/bucket/a%20b%2B%25.jpg"
     malicious = b'<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><Error/>'
     assert "<!ENTITY" in _s3_error_detail(malicious)
+
+
+class _FakeResponse:
+    """只实现 read_limited_text 用到的那点表面：status / headers / content.read。"""
+
+    def __init__(self, status: int, body: str):
+        self.status = status
+        self.headers = {}
+        self.content = self
+        self._pending = [body.encode("utf-8")]
+
+    async def read(self, _size: int) -> bytes:
+        return self._pending.pop(0) if self._pending else b""
+
+    def get_encoding(self) -> str:
+        return "utf-8"
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+
+class _FakeHttpClient:
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls: list[dict] = []
+
+    async def request(self, method, url, prepare=None, timeout=None):
+        kwargs = prepare(url, method) if callable(prepare) else {}
+        self.calls.append({"url": url, "headers": dict(kwargs.get("headers") or {})})
+        return self._responses.pop(0)
+
+
+def _cf_client(tmp_path, fake, auth_code="SECRET123"):
+    async def getter():
+        return fake
+
+    return ImageBedClient(
+        str(tmp_path),
+        {
+            "mode": "cloudflare_imgbed",
+            "cfi_base_url": "https://img.example.com",
+            "cfi_auth_code": auth_code,
+        },
+        getter,
+    )
+
+
+async def test_cf_upload_sends_auth_code_as_header_not_in_query(tmp_path):
+    """鉴权码只能进请求头：出现在查询串就等于跟着 URL 进了访问日志与异常栈。"""
+    src = tmp_path / "a.jpg"
+    src.write_bytes(b"\xff\xd8\xff\xe0")
+    fake = _FakeHttpClient([_FakeResponse(200, '[{"src": "/file/a.jpg"}]')])
+    client = _cf_client(tmp_path, fake)
+
+    url = await client._upload_cf(str(src))
+
+    assert url == "https://img.example.com/file/a.jpg"
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["headers"].get("X-Auth-Code") == "SECRET123"
+    assert "authCode" not in fake.calls[0]["url"]
+    assert "SECRET123" not in fake.calls[0]["url"]
+
+
+async def test_cf_upload_falls_back_to_query_param_for_old_sites(tmp_path):
+    """老站点只认 ?authCode=：被 401 拒一次后必须自动回落，而不是整单上传失败。"""
+    src = tmp_path / "a.jpg"
+    src.write_bytes(b"\xff\xd8\xff\xe0")
+    fake = _FakeHttpClient(
+        [
+            _FakeResponse(401, '{"error":"unauthorized"}'),
+            _FakeResponse(200, '[{"src": "/file/a.jpg"}]'),
+        ]
+    )
+    client = _cf_client(tmp_path, fake)
+
+    url = await client._upload_cf(str(src))
+
+    assert url == "https://img.example.com/file/a.jpg"
+    assert len(fake.calls) == 2
+    assert "X-Auth-Code" in fake.calls[0]["headers"]
+    assert "authCode=SECRET123" in fake.calls[1]["url"]
+    # 回落只做一次，且不能把请求头也带上（否则等于两条路一起漏）
+    assert "X-Auth-Code" not in fake.calls[1]["headers"]
+
+
+async def test_cf_upload_does_not_fall_back_on_non_auth_errors(tmp_path):
+    """500 不是鉴权问题，回落只会把错误信息冲掉。"""
+    src = tmp_path / "a.jpg"
+    src.write_bytes(b"\xff\xd8\xff\xe0")
+    fake = _FakeHttpClient([_FakeResponse(500, "boom")])
+    client = _cf_client(tmp_path, fake)
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="HTTP 500"):
+        await client._upload_cf(str(src))
+    assert len(fake.calls) == 1

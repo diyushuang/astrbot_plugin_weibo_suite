@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import time
 from pathlib import Path
 
@@ -60,8 +61,9 @@ LEGACY_WEIBO_COMMANDS = {
 
 
 def test_all_legacy_weibo_commands_are_preserved():
-    root = Path(__file__).resolve().parents[1] / "weibo"
-    tree = ast.parse((root / "commands.py").read_text(encoding="utf-8"))
+    # 指令装饰器必须在入口 main.py（AstrBot 只绑定入口模块的 handler）
+    root = Path(__file__).resolve().parents[1]
+    tree = ast.parse((root / "main.py").read_text(encoding="utf-8"))
     methods: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
@@ -72,6 +74,62 @@ def test_all_legacy_weibo_commands_are_preserved():
                 methods.add(node.name)
     missing = LEGACY_WEIBO_COMMANDS - methods
     assert not missing, f"P2 平移的微博指令在后续扩展中丢失: {sorted(missing)}"
+
+
+def test_runtime_written_config_keys_are_declared_in_schema():
+    """AstrBot 会按 schema 裁剪未声明的键；指令/面板写入的键必须在 schema 里。"""
+    schema = json.loads(
+        (Path(__file__).resolve().parents[1] / "_conf_schema.json").read_text(encoding="utf-8")
+    )
+    for key in (
+        "monitored_uids",
+        "push_sessions",
+        "album_rules",
+        "album_keyword_rules",
+        "album_max_images",
+        "at_all_uids",
+        "at_all_keywords",
+        "custom_cookie",
+        "proxy",
+    ):
+        assert key in schema, f"配置键 {key} 未登记进 _conf_schema.json，重启会被裁掉"
+    for group, field in (
+        ("monitor", "monitored_uids"),
+        ("push", "push_sessions"),
+        ("album", "album_rules"),
+    ):
+        assert field in schema[group]["items"], f"{group}.{field} 未在分组中声明"
+
+
+def test_group_config_mirrors_to_flat_keys(make_weibo_plugin):
+    """面板写入的是 schema 分组；业务代码读平铺键，启动镜像必须对齐。"""
+    plugin = make_weibo_plugin(
+        monitor={
+            "poll_interval": 60,
+            "monitored_uids": ["123456"],
+            "include_retweets": False,
+        },
+        push={"push_sessions": ["aiocqhttp:group:1"], "at_all": True},
+        album={"album_enabled": False, "album_rules": ["123456:7890:相册"]},
+    )
+    plugin._sync_config_groups()
+    assert plugin.config["poll_interval"] == 60
+    assert plugin.config["include_retweets"] is False
+    assert plugin._sessions() == ["aiocqhttp:group:1"]
+    assert plugin.config["at_all"] is True
+    assert plugin.config["album_enabled"] is False
+    plugin._sync_accounts_from_config()
+    assert "123456" in plugin.accounts
+
+
+def test_runtime_config_writes_stay_in_sync_with_groups(make_weibo_plugin):
+    plugin = make_weibo_plugin(push={}, album={})
+    plugin._set_cfg("push_sessions", ["aiocqhttp:group:2"])
+    plugin._set_cfg("album_rules", ["1:2:3"])
+    plugin._set_cfg("at_all", True)
+    assert plugin.config["push"]["push_sessions"] == ["aiocqhttp:group:2"]
+    assert plugin.config["album"]["album_rules"] == ["1:2:3"]
+    assert plugin.config["push"]["at_all"] is True
 
 
 def test_mixins_compose_cooperatively(make_weibo_plugin):
@@ -192,8 +250,8 @@ async def test_at_all_notice_ttl_cleanup(make_weibo_plugin):
     assert "fresh" in plugin._at_all_notices
 
 
-def test_composite_exposes_both_domains(make_weibo_plugin):
-    from astrbot_plugin_weibo_suite.composite import WeiboSuitePlugin
+def test_entry_plugin_exposes_both_domains(make_weibo_plugin):
+    from astrbot_plugin_weibo_suite.main import WeiboSuitePlugin
     from astrbot_plugin_weibo_suite.tests.conftest import FakeConfig, _Context
 
     plugin = WeiboSuitePlugin(_Context(), FakeConfig(monitored_uids=["123456"]))

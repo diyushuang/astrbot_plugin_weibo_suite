@@ -2,16 +2,88 @@
 
 from __future__ import annotations
 
+import weakref
+
+from ..views_backend.dashboard import register_dashboard
+from ..views_backend.sns_api import register_sns_dashboard
 from .album import AlbumMixin
 from .api import ApiMixin
 from .archive import ArchiveMixin
 from .archive_db import ArchiveStore
 from .commands import CommandsMixin
+from .copylib import CopylibMixin
 from .monitor import MonitorMixin
 from .pipeline import PipelineMixin
 from .pusher import PusherMixin
 from .runtime import *
 from .visitor import VisitorMixin
+
+# 旧平铺键 → (分组, 字段)。AstrBot 的配置面板按 schema 分组展示，而微博域
+# 的业务代码一路以平铺键读写；启动时把分组值镜像到平铺键，运行时写入则两边
+# 同步，避免"面板改了不生效"与"命令改了重启就丢"。
+WEIBO_CFG_PATHS: dict[str, tuple[str, str]] = {
+    "poll_interval": ("monitor", "poll_interval"),
+    "monitored_uids": ("monitor", "monitored_uids"),
+    "include_retweets": ("monitor", "include_retweets"),
+    "filter_keywords": ("monitor", "filter_keywords"),
+    "whitelist_keywords": ("monitor", "whitelist_keywords"),
+    "max_post_age_minutes": ("monitor", "max_post_age_minutes"),
+    "proxy": ("monitor", "proxy"),
+    "custom_cookie": ("monitor", "custom_cookie"),
+    "at_all": ("push", "at_all"),
+    "message_format": ("push", "message_format"),
+    "push_sessions": ("push", "push_sessions"),
+    "push_delay_seconds": ("push", "push_delay_seconds"),
+    "max_push_per_round": ("push", "max_push_per_round"),
+    "max_pending_retries": ("push", "max_pending_retries"),
+    "message_with_images": ("push", "message_with_images"),
+    "message_with_videos": ("push", "message_with_videos"),
+    "max_videos_per_post": ("push", "max_videos_per_post"),
+    "message_send_timeout": ("push", "message_send_timeout"),
+    "text_max_length": ("push", "text_max_length"),
+    "show_full_weibo_text": ("push", "show_full_weibo_text"),
+    "show_hashtags": ("push", "show_hashtags"),
+    "weibo_emoji_translate": ("push", "weibo_emoji_translate"),
+    "at_all_uids": ("push", "at_all_uids"),
+    "at_all_keywords": ("push", "at_all_keywords"),
+    "at_all_daily_limit": ("push", "at_all_daily_limit"),
+    "at_all_check_permission": ("push", "at_all_check_permission"),
+    "at_all_verify": ("push", "at_all_verify"),
+    "callback_api_base": ("push", "callback_api_base"),
+    "video_prefer_file": ("push", "video_prefer_file"),
+    "video_quality": ("push", "video_quality"),
+    "video_max_mb": ("push", "video_max_mb"),
+    "video_inline_max_mb": ("push", "video_inline_max_mb"),
+    "video_file_fallback": ("push", "video_file_fallback"),
+    "video_file_temp": ("push", "video_file_temp"),
+    "album_enabled": ("album", "album_enabled"),
+    "album_rules": ("album", "album_rules"),
+    "album_keyword_rules": ("album", "album_keyword_rules"),
+    "album_max_images": ("album", "album_max_images"),
+    "album_live_gif": ("album", "album_live_gif"),
+    "album_same_host": ("album", "album_same_host"),
+    "album_notify": ("album", "album_notify"),
+    "album_download_concurrency": ("album", "album_download_concurrency"),
+    "album_upload_concurrency": ("album", "album_upload_concurrency"),
+    "album_upload_interval": ("album", "album_upload_interval"),
+    "album_upload_payload_mb": ("album", "album_upload_payload_mb"),
+}
+
+WEIBO_LAYOUT_VERSION = "1"
+
+
+def _resolve_data_dir() -> Path | None:
+    """插件数据目录；取不到就返回 None，绝不用当前工作目录顶上。
+
+    退化成 `Path.cwd()` 看着能用，实际会把导出文件、上传缓存写进 AstrBot
+    安装目录（甚至插件源码树），既污染发行包又让"数据在哪"变得不可预测。
+    调用方拿到 None 应显式报错降级（见 copylib._copylib_dir）。
+    """
+    try:
+        return Path(StarTools.get_data_dir(PLUGIN_NAME))
+    except Exception as exc:  # 轻量测试桩/异常环境下不要阻断插件构造
+        logger.debug(f"{PLUGIN_NAME} 数据目录解析失败（相关功能降级）: {exc!r}")
+        return None
 
 
 class WeiboMonitorPlugin(
@@ -21,6 +93,7 @@ class WeiboMonitorPlugin(
     PusherMixin,
     AlbumMixin,
     ArchiveMixin,
+    CopylibMixin,
     PipelineMixin,
     CommandsMixin,
     Star,
@@ -40,7 +113,14 @@ class WeiboMonitorPlugin(
         self._http: aiohttp.ClientSession | None = None
         self._poll_task: asyncio.Task | None = None
         self._checking = False
-        self._data_dir: Path | None = None
+        # 数据目录要在构造期就拿到：文案导出、WebUI 上传落盘都用 _data_dir 定位
+        # 落点，若拖到 initialize() 才赋值，任何"未走 initialize"的路径（面板在
+        # 初始化前的调用、单测直接构造、初始化中途抛异常）都会退化成写当前工作
+        # 目录，把用户文案/上传件撒进 AstrBot 安装目录甚至插件源码树。
+        self._data_dir: Path | None = _resolve_data_dir()
+        # 多平台订阅（抖音/小红书/Instagram）。惰性创建：只有真正用到时才构造，
+        # 这样纯微博用户的启动路径与升级前完全一致。
+        self.sns: Any = None
         self._state_dirty = False
         self._state_save_task: asyncio.Task | None = None
         # 游客身份 cookie（仅 .weibo.cn 匿名游客，非用户账号）；UA 与身份绑定
@@ -89,13 +169,15 @@ class WeiboMonitorPlugin(
         self._album_cache: dict[str, tuple[float, str, str]] = {}
         # same_host 的相册文件名回读很贵：只在台账 miss 时查，并缓存 10 分钟。
         self._album_existing_cache: dict[str, tuple[float, str]] = {}
-        self._self_ids: dict[int, str] = {}  # id(bot) -> 登录账号 self_id 缓存
+        # bot 实例 -> 登录账号 self_id；弱引用避免协议端重连后旧对象泄漏
+        self._self_ids: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
         self._ffmpeg = ""  # ffmpeg 可执行文件路径，initialize 时探测
         self._diag_path: Path | None = None  # 相册上传诊断文件（initialize 时解析）
         self._errlog: _ErrorLogStore | None = None  # 错误留存（initialize 时挂载）
         self._errlog_target: logging.Logger | None = None  # 留存挂在哪个日志器
         # ---- WebUI 控制面板（dashboard.py 注册路由，旧版 AstrBot 自动降级）----
         self._web_ready = False
+        self._sns_web_ready = False
         self._manual_check_task: asyncio.Task | None = None
         # 面板手动取消：被取消的条目在撤销窗口内留在这里（可一键放回队列）。
         # 与 pending 分开存：pending 是"还要发的"，这里是"已经决定不发、还能反悔的"，
@@ -143,7 +225,7 @@ class WeiboMonitorPlugin(
         # 最近一次回填统计：archive.py 写，微博回填状态 指令读
         self._backfill_last_stats: dict[str, Any] = {}
         # ---- 图床/向量管线（P4）：宿主状态在这里，业务全部在 pipeline.py ----
-        # 服务由 composite 注入（溯源域的 bed/vector/library）；未注入时管线整体降级
+        # 服务由入口 main.py 注入（溯源域的 bed/vector/library）；未注入时管线整体降级
         self._pipeline_services: Any | None = None
         self._pipeline_queue: asyncio.Queue[str] | None = None
         self._pipeline_worker_task: asyncio.Task | None = None
@@ -152,7 +234,11 @@ class WeiboMonitorPlugin(
         self._pipeline_backoff: float = 0.0
 
     async def initialize(self):
-        self._data_dir = StarTools.get_data_dir(PLUGIN_NAME)
+        # 面板分组 → 平铺镜像：必须先于任何业务配置读取
+        self._sync_config_groups()
+        self._data_dir = _resolve_data_dir() or self._data_dir
+        if self._data_dir is None:
+            raise RuntimeError(f"{PLUGIN_NAME} 无法确定数据目录（StarTools.get_data_dir 失败）")
         # 归档库先于轮询打开：增量归档钩子挂在 _check_account 上，store 未就绪
         # 时钩子会静默跳过。archive_open 自身不抛，这里只是双保险：归档坏了
         # 也绝不能让插件起不来。
@@ -184,6 +270,19 @@ class WeiboMonitorPlugin(
                 f"错误留存已回读上次运行残留的 {restored} 条告警"
                 "（面板可查，可能包含崩溃前的最后记录）"
             )
+        try:
+            self._web_ready = register_dashboard(
+                self, PLUGIN_NAME, PLUGIN_VERSION, _extract_uid, redact_proxy
+            )
+        except Exception as exc:  # 面板异常绝不阻断监控、归档或推送
+            self._web_ready = False
+            logger.warning(f"{PLUGIN_NAME} 统一 WebUI 注册失败（面板降级）: {exc!r}")
+        # 订阅域的 7 条接口单独注册：它失效不该把整个面板拖下水
+        try:
+            self._sns_web_ready = register_sns_dashboard(self, PLUGIN_NAME, PLUGIN_VERSION)
+        except Exception as exc:
+            self._sns_web_ready = False
+            logger.warning(f"{PLUGIN_NAME} 订阅面板接口注册失败（降级）: {exc!r}")
         await self._diag(
             f"启动 ffmpeg={'有' if self._ffmpeg else '无'} "
             f"album_download_concurrency={self._int_cfg('album_download_concurrency', 5)} "
@@ -208,11 +307,11 @@ class WeiboMonitorPlugin(
         if proxy:
             if proxy.startswith(("http://", "https://")):
                 self._proxy = proxy
-                logger.info(f"{PLUGIN_NAME} 使用代理出网: {_redact_proxy(proxy)}")
+                logger.info(f"{PLUGIN_NAME} 使用代理出网: {redact_proxy(proxy)}")
             else:
                 logger.warning(
                     f"{PLUGIN_NAME} proxy 配置无效（需 http:// 或 https:// 开头），"
-                    f"已忽略: {_redact_proxy(proxy)}"
+                    f"已忽略: {redact_proxy(proxy)}"
                 )
         # 自定义 Cookie 模式：直接使用用户身份，跳过游客身份的预热与续期
         self._custom_cookies = self._parse_cookie_string(
@@ -231,16 +330,53 @@ class WeiboMonitorPlugin(
         else:
             await self._renew_visitor_quietly()
         self._poll_task = asyncio.create_task(self._poll_loop())
-        # 统一 WebUI 在 P6 接入；P2 不复制旧面板业务逻辑。
-        self._web_ready = False
+        # 多平台订阅域：取数、守卫、投递全部由 SnsService 自己管；这里只负责把它
+        # 拉起来。投递走的是本域已有的 deliver_sns_payload()，两条推送共用一条链。
+        try:
+            await self.sns_start()
+        except Exception as exc:  # 订阅域起不来不能影响微博监控
+            logger.warning(f"{PLUGIN_NAME} 多平台订阅启动失败（该功能降级）: {exc!r}")
         logger.info(
             f"{PLUGIN_NAME} 已启动：监控 {len(self.accounts)} 个账号，"
             f"推送目标 {len(self._sessions())} 个"
         )
 
+    # ---------------------------------------------------------------- 多平台订阅
+
+    def sns_cfg(self, key: str, default=None):
+        """读 `sns` 配置组（整组是唯一定义面：AstrBot 会删掉未声明的平铺键）。"""
+        group = self.config.get("sns")
+        if isinstance(group, dict) and group.get(key) is not None:
+            return group[key]
+        return default
+
+    def sns_service(self):
+        """惰性构造订阅服务（需求驱动：不订阅就不加载任何订阅域代码）。"""
+        if self.sns is None:
+            from ..sns.service import SnsService
+
+            self.sns = SnsService(self, logger=logger)
+        return self.sns
+
+    async def sns_start(self) -> None:
+        if not self.sns_cfg("enabled", True):
+            return
+        service = self.sns_service()
+        await service.start()
+
+    async def sns_stop(self) -> None:
+        if self.sns is not None:
+            await self.sns.stop()
+            self.sns = None
+
     async def terminate(self):
         # 留存 Handler 先排空并摘除：重载时重复挂载会把每条告警收两遍。
         remove_error_log(self)
+        # 订阅域要在关 HTTP 会话/浏览器之前停：它在途的取数还挂着 session
+        try:
+            await self.sns_stop()
+        except Exception as exc:
+            logger.warning(f"{PLUGIN_NAME} 多平台订阅停止失败: {exc}")
         if self._poll_task:
             self._poll_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -271,6 +407,14 @@ class WeiboMonitorPlugin(
             with contextlib.suppress(asyncio.CancelledError):
                 await self._backfill_task
             self._backfill_task = None
+        # 面板触发的任务（图床重扫、手动检查等）要在关业务资源之前撤掉：
+        # 它们会调 trace 域的方法，资源关了还会继续写状态。
+        dashboard_api = getattr(self, "_dashboard_api", None)
+        if dashboard_api is not None:
+            try:
+                await dashboard_api.shutdown()
+            except Exception as e:  # 面板收尾失败不影响其余清理
+                logger.warning(f"{PLUGIN_NAME} 管理面板后台任务停止失败: {e}")
         # 管线 worker 也在用 HTTP 与 archive.db：必须在关归档库之前停，否则它会
         # 在关闭中的连接上继续跑单帖流程
         try:
@@ -305,6 +449,37 @@ class WeiboMonitorPlugin(
         if callable(saver):
             saver()
 
+    def _cfg_group(self, group: str) -> dict:
+        value = self.config.get(group)
+        return value if isinstance(value, dict) else {}
+
+    def _ensure_cfg_group(self, group: str) -> dict:
+        value = self.config.get(group)
+        if not isinstance(value, dict):
+            value = {}
+            self.config[group] = value
+        return value
+
+    def _sync_config_groups(self) -> None:
+        """把面板分组值镜像到平铺键（微博域业务代码只读平铺键）。
+
+        AstrBot 按 schema 删除未声明的键，旧版平铺配置无法靠"另存一份"存活；
+        分组是唯一持久面，所以启动时以分组为准覆盖平铺镜像。运行期写入统一走
+        `_set_cfg`，同时更新两边，避免"面板改了不生效"或"命令改了重启就丢"。
+        """
+        for key, (group, field) in WEIBO_CFG_PATHS.items():
+            group_cfg = self._cfg_group(group)
+            if field in group_cfg:
+                self.config[key] = group_cfg[field]
+
+    def _set_cfg(self, key: str, value) -> None:
+        """写配置：平铺键供业务代码读取，同时回写 schema 分组供面板展示。"""
+        self.config[key] = value
+        path = WEIBO_CFG_PATHS.get(key)
+        if path:
+            group, field = path
+            self._ensure_cfg_group(group)[field] = value
+
     def _migrate_album_max_images(self):
         """存量配置一次性迁移：旧默认 9 → 18（v1.12.1）。
 
@@ -330,7 +505,7 @@ class WeiboMonitorPlugin(
         self._migrations.add("album_max_images_v18")
         if cur != OLD_ALBUM_MAX_IMAGES:
             return
-        self.config["album_max_images"] = DEFAULT_MAX_IMAGES
+        self._set_cfg("album_max_images", DEFAULT_MAX_IMAGES)
         self._save_config()
         logger.warning(
             f"{PLUGIN_NAME} 检测到 album_max_images 仍为旧版本默认值 "
@@ -557,7 +732,6 @@ class WeiboMonitorPlugin(
     def _save_state(self):
         if self._data_dir is None:
             return
-        self._state_dirty = False
         scheduled = self._state_save_task
         if scheduled and not scheduled.done() and scheduled is not asyncio.current_task():
             scheduled.cancel()
@@ -598,8 +772,13 @@ class WeiboMonitorPlugin(
             tmp = self._data_dir / "state.json.tmp"
             tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
             tmp.replace(self._state_file())
+            self._state_dirty = False
         except Exception as e:
-            logger.warning(f"{PLUGIN_NAME} 保存 state.json 失败: {e}")
+            # 写盘失败（磁盘满/权限/临时文件被占用）必须把 dirty 置回：否则内存里
+            # 已经推进的 pending、seen_ids、游客 cookie 永远不会再尝试落盘，
+            # 下次重载回到旧快照——丢队列、丢身份，还可能重复推送。
+            self._state_dirty = True
+            logger.warning(f"{PLUGIN_NAME} 保存 state.json 失败（稍后重试）: {e}")
             with contextlib.suppress(OSError):
                 tmp.unlink(missing_ok=True)
 
@@ -610,6 +789,11 @@ class WeiboMonitorPlugin(
             return
         scheduled = self._state_save_task
         if scheduled and not scheduled.done():
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:  # 同步调用（测试/脚本）没有事件循环：直接落盘
+            self._save_state()
             return
         self._state_save_task = asyncio.create_task(self._flush_state_after_debounce())
 

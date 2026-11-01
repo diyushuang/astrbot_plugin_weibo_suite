@@ -24,7 +24,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r astrbot_plugin_weibo_suite/requirements.txt -r requirements-dev.txt
       - name: Ruff
-        run: ruff check .
+        run: |
+          ruff check .
+          ruff format --check .
       - name: Pytest
         run: pytest -q
       - name: Release manifest

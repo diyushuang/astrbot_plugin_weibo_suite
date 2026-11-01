@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -29,7 +30,11 @@ from typing import Any
 
 from .constants import MEDIA_STATES
 
-_SCHEMA_VERSION = 1
+# 存储层自带 logger：它不依赖 astrbot 运行时（单测/脚本可直接用），
+# 又必须在 schema 降级这类"能毁库"的场景留下明确告警。
+logger = logging.getLogger("weibo_suite.archive_db")
+
+_SCHEMA_VERSION = 2
 
 # 媒体状态机的权威顺序（合同第 2 节，定义在 weibo/constants.py）：下标即 rank，
 # "达到或超过该 rank" 才计入该态；这里只把顺序翻成 rank 映射，不另存一份字面量。
@@ -67,6 +72,7 @@ _POST_COLUMNS: tuple[str, ...] = (
     "pushed_at",
     "cleaned_at",
     "reconciled_at",
+    "cleaned_text",
     "updated_at",
 )
 
@@ -89,6 +95,7 @@ _MEDIA_COLUMNS: tuple[str, ...] = (
     "bed_at",
     "thumb_at",
     "vector_at",
+    "thumb_url",
     "updated_at",
 )
 
@@ -112,6 +119,7 @@ _POST_INSERT_DEFAULTS: dict[str, Any] = {
     "pushed_at": "",
     "cleaned_at": "",
     "reconciled_at": "",
+    "cleaned_text": "",
 }
 
 _SCHEMA_SQL = """
@@ -141,6 +149,7 @@ CREATE TABLE IF NOT EXISTS posts (
     pushed_at    TEXT NOT NULL DEFAULT '',
     cleaned_at   TEXT NOT NULL DEFAULT '',
     reconciled_at TEXT NOT NULL DEFAULT '',
+    cleaned_text TEXT NOT NULL DEFAULT '',
     updated_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_posts_uid_created ON posts(uid, created_at DESC);
@@ -165,6 +174,7 @@ CREATE TABLE IF NOT EXISTS media (
     bed_at       TEXT NOT NULL DEFAULT '',
     thumb_at     TEXT NOT NULL DEFAULT '',
     vector_at    TEXT NOT NULL DEFAULT '',
+    thumb_url    TEXT NOT NULL DEFAULT '',
     updated_at   TEXT NOT NULL,
     PRIMARY KEY (mid, pid)
 );
@@ -193,8 +203,7 @@ _MEDIA_INSERT_SQL = (
 )
 
 _STATE_SEL = ", ".join(
-    f"COALESCE(SUM(CASE WHEN m.state_rank >= {rank} THEN 1 ELSE 0 END), 0)"
-    f" AS {state}_count"
+    f"COALESCE(SUM(CASE WHEN m.state_rank >= {rank} THEN 1 ELSE 0 END), 0) AS {state}_count"
     for rank, state in enumerate(MEDIA_STATES)
 )
 
@@ -394,18 +403,28 @@ class ArchiveStore:
         self._lock = threading.Lock()
         self._conn: sqlite3.Connection | None = None
 
-        connection = sqlite3.connect(
-            str(self.db_path), check_same_thread=False, timeout=10.0
-        )
+        connection = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=10.0)
         connection.row_factory = sqlite3.Row
         with self._lock:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA synchronous=NORMAL")
             connection.execute("PRAGMA busy_timeout=5000")
             connection.executescript(_SCHEMA_SQL)
+            self._migrate_schema(connection)
             connection.commit()
             self._schema_version = self._read_schema_version(connection)
-            if self._schema_version <= _SCHEMA_VERSION:
+            if self._schema_version > _SCHEMA_VERSION:
+                # 库是更高版本插件写的：保留其版本号不回写（回写会让降级后的插件
+                # 把自己的旧结构"盖章"成新版本，之后再升级就永远不再迁移）。
+                # 同时明确告警——继续跑等于用旧 SQL 打新表，缺列会在写入时才炸。
+                logger.error(
+                    "归档库 schema 版本(%s) 高于当前插件(%s)：可能是降级运行，"
+                    "请升级插件或先备份后重建 archive.db（%s）",
+                    self._schema_version,
+                    _SCHEMA_VERSION,
+                    self.db_path,
+                )
+            elif self._schema_version < _SCHEMA_VERSION:
                 connection.execute(
                     "INSERT INTO meta (key, value) VALUES ('schema_version', ?)"
                     " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -416,10 +435,22 @@ class ArchiveStore:
             self._conn = connection
 
     @staticmethod
+    def _migrate_schema(connection: sqlite3.Connection) -> None:
+        """老库就地补列（幂等）：P5 起 posts.cleaned_text / media.thumb_url。"""
+        post_columns = {
+            str(row["name"]) for row in connection.execute("PRAGMA table_info(posts)").fetchall()
+        }
+        if "cleaned_text" not in post_columns:
+            connection.execute("ALTER TABLE posts ADD COLUMN cleaned_text TEXT NOT NULL DEFAULT ''")
+        media_columns = {
+            str(row["name"]) for row in connection.execute("PRAGMA table_info(media)").fetchall()
+        }
+        if "thumb_url" not in media_columns:
+            connection.execute("ALTER TABLE media ADD COLUMN thumb_url TEXT NOT NULL DEFAULT ''")
+
+    @staticmethod
     def _read_schema_version(connection: sqlite3.Connection) -> int:
-        row = connection.execute(
-            "SELECT value FROM meta WHERE key = 'schema_version'"
-        ).fetchone()
+        row = connection.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
         if row is None:
             return 0
         value = _to_int(row["value"], 0)
@@ -465,9 +496,7 @@ class ArchiveStore:
                     if _is_blank(inserted.get(column)):
                         inserted[column] = default
                 inserted["updated_at"] = _utc_iso()
-                connection.execute(
-                    _POST_UPSERT_SQL, [inserted[column] for column in _POST_COLUMNS]
-                )
+                connection.execute(_POST_UPSERT_SQL, [inserted[column] for column in _POST_COLUMNS])
             else:
                 merged: dict[str, Any] = {"mid": mid}
                 for column in _POST_COLUMNS:
@@ -483,9 +512,7 @@ class ArchiveStore:
                     else:
                         merged[column] = _merge(old_value, new_value)
                 merged["updated_at"] = _utc_iso()
-                connection.execute(
-                    _POST_UPSERT_SQL, [merged[column] for column in _POST_COLUMNS]
-                )
+                connection.execute(_POST_UPSERT_SQL, [merged[column] for column in _POST_COLUMNS])
             connection.commit()
         return mid
 
@@ -495,9 +522,7 @@ class ArchiveStore:
             connection = self._connection()
             if connection is None:
                 return None
-            row = connection.execute(
-                "SELECT * FROM posts WHERE mid = ?", (str(mid),)
-            ).fetchone()
+            row = connection.execute("SELECT * FROM posts WHERE mid = ?", (str(mid),)).fetchone()
         return _post_row_to_dict(row) if row is not None else None
 
     def has_post(self, mid: str) -> bool:
@@ -505,9 +530,7 @@ class ArchiveStore:
             connection = self._connection()
             if connection is None:
                 return False
-            row = connection.execute(
-                "SELECT 1 FROM posts WHERE mid = ?", (str(mid),)
-            ).fetchone()
+            row = connection.execute("SELECT 1 FROM posts WHERE mid = ?", (str(mid),)).fetchone()
         return row is not None
 
     def count_posts(self, uid: str | None = None, *, source: str | None = None) -> int:
@@ -524,14 +547,10 @@ class ArchiveStore:
             connection = self._connection()
             if connection is None:
                 return 0
-            row = connection.execute(
-                f"SELECT COUNT(*) FROM posts{where}", params
-            ).fetchone()
+            row = connection.execute(f"SELECT COUNT(*) FROM posts{where}", params).fetchone()
         return _to_int(row[0]) if row is not None else 0
 
-    def list_posts(
-        self, uid: str | None = None, *, limit: int = 20, offset: int = 0
-    ) -> list[dict]:
+    def list_posts(self, uid: str | None = None, *, limit: int = 20, offset: int = 0) -> list[dict]:
         """按 created_at DESC, mid DESC 列出帖子（含 pics）。"""
         where = " WHERE uid = ?" if uid else ""
         params: list[Any] = [str(uid)] if uid else []
@@ -541,8 +560,46 @@ class ArchiveStore:
             if connection is None:
                 return []
             rows = connection.execute(
-                "SELECT * FROM posts"
-                f"{where} ORDER BY created_at DESC, mid DESC LIMIT ? OFFSET ?",
+                f"SELECT * FROM posts{where} ORDER BY created_at DESC, mid DESC LIMIT ? OFFSET ?",
+                params,
+            ).fetchall()
+        return [_post_row_to_dict(row) for row in rows]
+
+    def iter_posts_keyset(
+        self,
+        uid: str | None = None,
+        *,
+        after: tuple[int, str] | None = None,
+        limit: int = 200,
+    ) -> list[dict]:
+        """按 (created_at, mid) 键集分页列出帖子，供全库扫描使用。
+
+        ``list_posts`` 用的 ``LIMIT/OFFSET`` 在并发插入（监控侧一直在写新帖）
+        时会让整页向后位移，导致漏扫——对账会因此报出"全部通过"的假结论。
+        键集分页以「上一页最后一行的 (created_at, mid)」为锚点，插入新行
+        只会出现在已扫过的区间之前，不会挤掉待扫区间。
+
+        排序键与 ``list_posts`` 一致（created_at DESC, mid DESC），``after``
+        传上一页最后一行的 (created_at, mid)；首屏传 None。
+        """
+        clauses: list[str] = []
+        params: list[Any] = []
+        if uid:
+            clauses.append("uid = ?")
+            params.append(str(uid))
+        if after is not None:
+            anchor_at, anchor_mid = int(after[0]), str(after[1])
+            # 行值比较的等价展开：同一 created_at 下按 mid 继续向后
+            clauses.append("(created_at < ? OR (created_at = ? AND mid < ?))")
+            params.extend([anchor_at, anchor_at, anchor_mid])
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(max(1, _to_int(limit, 200)))
+        with self._lock:
+            connection = self._connection()
+            if connection is None:
+                return []
+            rows = connection.execute(
+                f"SELECT * FROM posts{where} ORDER BY created_at DESC, mid DESC LIMIT ?",
                 params,
             ).fetchall()
         return [_post_row_to_dict(row) for row in rows]
@@ -600,6 +657,162 @@ class ArchiveStore:
                 params,
             ).fetchall()
         return [_post_row_to_dict(row) for row in rows]
+
+    def mark_post_cleaned(self, mid: str, cleaned_text: str) -> None:
+        """写入清洗结果并打 cleaned_at（``cleaned_text`` 是文案库的唯一正文来源）。"""
+        now = _utc_iso()
+        with self._lock:
+            connection = self._connection()
+            if connection is None:
+                return
+            connection.execute(
+                "UPDATE posts SET cleaned_text = ?, cleaned_at = ?, updated_at = ? WHERE mid = ?",
+                (str(cleaned_text), now, now, str(mid)),
+            )
+            connection.commit()
+
+    def iter_uncleaned_posts(self, uid: str | None = None, limit: int = 0) -> list[dict]:
+        """还没清洗过的帖子，按时间从旧到新。
+
+        判据用 cleaned_at 而不是 cleaned_text：纯链接/纯表情帖清洗结果为空串，
+        用文本判空会让它们每轮都被重洗，"待清洗"永远不归零。
+        """
+        where = ["cleaned_at = ''"]
+        params: list[Any] = []
+        if uid:
+            where.append("uid = ?")
+            params.append(str(uid))
+        sql = (
+            "SELECT mid, uid, author, created_at, text, text_raw, orig_text,"
+            " is_long, is_retweet, source FROM posts WHERE "
+            + " AND ".join(where)
+            + " ORDER BY created_at ASC, mid ASC"
+        )
+        if limit and limit > 0:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        with self._lock:
+            connection = self._connection()
+            if connection is None:
+                return []
+            rows = connection.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def copy_accounts(self) -> list[dict]:
+        """文案库里的账号维度统计：uid / author / total / cleaned / long。"""
+        with self._lock:
+            connection = self._connection()
+            if connection is None:
+                return []
+            rows = connection.execute(
+                "SELECT uid, MAX(author) AS author, COUNT(*) AS total,"
+                " COALESCE(SUM(CASE WHEN cleaned_text <> '' THEN 1 ELSE 0 END), 0)"
+                " AS cleaned, COALESCE(SUM(is_long), 0) AS long"
+                " FROM posts GROUP BY uid ORDER BY total DESC, uid ASC"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def copy_stats(self, uid: str | None = None) -> dict:
+        """文案库总览：帖子总数 / 已清洗 / 长文 / 转发 / 带图帖子。"""
+        where = ""
+        params: list[Any] = []
+        if uid:
+            where = " WHERE uid = ?"
+            params.append(str(uid))
+        with self._lock:
+            connection = self._connection()
+            if connection is None:
+                return {"total": 0, "cleaned": 0, "long": 0, "retweet": 0, "with_pics": 0}
+            row = connection.execute(
+                "SELECT COUNT(*) AS total,"
+                " COALESCE(SUM(CASE WHEN cleaned_text <> '' THEN 1 ELSE 0 END), 0)"
+                " AS cleaned, COALESCE(SUM(is_long), 0) AS long,"
+                " COALESCE(SUM(is_retweet), 0) AS retweet,"
+                " COALESCE(SUM(CASE WHEN pic_total > 0 THEN 1 ELSE 0 END), 0)"
+                " AS with_pics FROM posts" + where,
+                params,
+            ).fetchone()
+        # 显式取列：sqlite3.Row 迭代产出的是值不是键，不能写成 for key in row
+        return {
+            "total": _to_int(row["total"]),
+            "cleaned": _to_int(row["cleaned"]),
+            "long": _to_int(row["long"]),
+            "retweet": _to_int(row["retweet"]),
+            "with_pics": _to_int(row["with_pics"]),
+        }
+
+    def list_copy_posts(
+        self,
+        uid: str | None = None,
+        *,
+        keyword: str = "",
+        include_retweets: bool = True,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict]:
+        """文案列表（已清洗优先），供 ``文案列表`` / WebUI 使用。"""
+        where: list[str] = []
+        params: list[Any] = []
+        if uid:
+            where.append("uid = ?")
+            params.append(str(uid))
+        if not include_retweets:
+            where.append("is_retweet = 0")
+        if keyword:
+            where.append("(cleaned_text LIKE ? OR text LIKE ?)")
+            like = f"%{keyword}%"
+            params.extend([like, like])
+        sql = (
+            "SELECT mid, uid, author, created_at, link, is_long, is_retweet,"
+            " pic_total, cleaned_at, cleaned_text, text FROM posts"
+        )
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY created_at DESC, mid DESC LIMIT ? OFFSET ?"
+        params.extend([max(1, int(limit)), max(0, int(offset))])
+        with self._lock:
+            connection = self._connection()
+            if connection is None:
+                return []
+            rows = connection.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_copy_entries(self, uid: str | None = None) -> list[dict]:
+        """签到用：每条帖子一行 + 首页图片（idx 最小且有 url），含缩略图地址。"""
+        where = " WHERE p.cleaned_text <> ''"
+        params: list[Any] = []
+        if uid:
+            where += " AND p.uid = ?"
+            params.append(str(uid))
+        sql = (
+            "SELECT p.mid, p.uid, p.author, p.created_at, p.link, p.is_long,"
+            " p.is_retweet, p.pic_total, p.cleaned_text, p.text,"
+            " m.pid, m.url AS image_url, m.thumb_url AS thumb_url,"
+            " m.local_path FROM posts p"
+            " LEFT JOIN media m ON m.mid = p.mid AND m.kind = 'image' AND m.pid = ("
+            "SELECT m2.pid FROM media m2 WHERE m2.mid = p.mid AND m2.kind = 'image'"
+            " AND m2.url <> '' ORDER BY m2.idx ASC, m2.pid ASC LIMIT 1)"
+            + where
+            + " ORDER BY p.created_at DESC, p.mid DESC"
+        )
+        with self._lock:
+            connection = self._connection()
+            if connection is None:
+                return []
+            rows = connection.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def copy_signature(self) -> str:
+        """文案库指纹：签到侧缓存失效用（条数 + 最近更新时间 + 最新清洗时间）。"""
+        with self._lock:
+            connection = self._connection()
+            if connection is None:
+                return ""
+            row = connection.execute(
+                "SELECT COUNT(*) AS total, COALESCE(MAX(updated_at), '') AS updated,"
+                " COALESCE(MAX(cleaned_at), '') AS cleaned FROM posts"
+            ).fetchone()
+        return f"{_to_int(row['total'])}|{row['updated']}|{row['cleaned']}"
 
     def set_post_time(self, mid: str, column: str, value: str) -> None:
         """写 pushed_at / cleaned_at / reconciled_at；非法列名抛 ValueError。"""
@@ -675,6 +888,7 @@ class ArchiveStore:
                             "",
                             "",
                             "",
+                            "",
                             now,
                         ],
                     )
@@ -732,6 +946,7 @@ class ArchiveStore:
         local_path: str | None = None,
         size: int | None = None,
         error: str | None = None,
+        thumb_url: str | None = None,
     ) -> None:
         """推进媒体状态；rank 只前进不后退，状态推进时写对应时间戳列。"""
         if state not in _MEDIA_STATE_RANK:
@@ -766,6 +981,9 @@ class ArchiveStore:
             if error is not None:
                 assignments.append("error = ?")
                 params.append(str(error))
+            if thumb_url is not None:
+                assignments.append("thumb_url = ?")
+                params.append(str(thumb_url))
             assignments.append("updated_at = ?")
             params.append(_utc_iso())
             params.extend([str(mid), str(pid)])
@@ -812,8 +1030,7 @@ class ArchiveStore:
                 "SELECT COUNT(*) AS total, "
                 + _STATE_SEL
                 + ", COALESCE(SUM(CASE WHEN m.state = 'pending' AND m.attempts > 0"
-                " THEN 1 ELSE 0 END), 0) AS failed"
-                + source,
+                " THEN 1 ELSE 0 END), 0) AS failed" + source,
                 params,
             ).fetchone()
         stats = {"total": _to_int(row["total"])}
@@ -911,6 +1128,11 @@ class ArchiveStore:
                 "SELECT COUNT(*) AS posts,"
                 " COALESCE(SUM(CASE WHEN TRIM(text) <> '' THEN 1 ELSE 0 END), 0)"
                 " AS posts_with_text,"
+                # 待补正文＝还没被清洗流水线打上 cleaned_at 的帖子。判据必须用
+                # cleaned_at 而不是 TRIM(text)：纯链接/纯表情帖清洗结果合法为空串，
+                # 按 text 判会把它们永久算成"缺正文"并反复重试。
+                " COALESCE(SUM(CASE WHEN cleaned_at = '' THEN 1 ELSE 0 END), 0)"
+                " AS posts_need_text,"
                 " COALESCE(SUM(CASE WHEN pic_total >= 0 THEN pic_total ELSE 0 END), 0)"
                 " AS media_expected"
                 f" FROM posts{post_where}",
@@ -929,15 +1151,12 @@ class ArchiveStore:
                 " COALESCE(SUM(CASE WHEN m.state = 'pending' THEN 1 ELSE 0 END), 0)"
                 " AS pending,"
                 " COALESCE(SUM(CASE WHEN m.state = 'pending' AND m.attempts > 0"
-                " THEN 1 ELSE 0 END), 0) AS failed, "
-                + _STATE_SEL
-                + media_from,
+                " THEN 1 ELSE 0 END), 0) AS failed, " + _STATE_SEL + media_from,
                 media_params,
             ).fetchone()
             with_media_row = connection.execute(
                 "SELECT COUNT(DISTINCT m.mid) AS posts_with_media"
-                " FROM media m JOIN posts p ON p.mid = m.mid"
-                + (" WHERE p.uid = ?" if uid else ""),
+                " FROM media m JOIN posts p ON p.mid = m.mid" + (" WHERE p.uid = ?" if uid else ""),
                 media_params,
             ).fetchone()
 
@@ -950,7 +1169,7 @@ class ArchiveStore:
                 "posts": posts,
                 "posts_with_text": posts_with_text,
                 "posts_without_text": max(0, posts - posts_with_text),
-                "posts_need_text": max(0, posts - posts_with_text),
+                "posts_need_text": _to_int(post_row["posts_need_text"]),
                 "posts_with_media": _to_int(with_media_row["posts_with_media"]),
                 "media_expected": media_expected,
                 "pic_total_sum": media_expected,
@@ -979,9 +1198,7 @@ class ArchiveStore:
             connection = self._connection()
             if connection is None:
                 return default
-            row = connection.execute(
-                "SELECT value FROM meta WHERE key = ?", (str(key),)
-            ).fetchone()
+            row = connection.execute("SELECT value FROM meta WHERE key = ?", (str(key),)).fetchone()
         return str(row["value"]) if row is not None else default
 
     def meta_set(self, key: str, value: str) -> None:

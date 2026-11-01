@@ -237,9 +237,7 @@ async def test_store_generic_http_ignores_folder(tmp_path, monkeypatch, caplog):
     assert "已忽略 folder" in caplog.text
 
 
-async def test_store_upload_failure_with_bad_folder_falls_back_to_local_root(
-    tmp_path, monkeypatch
-):
+async def test_store_upload_failure_with_bad_folder_falls_back_to_local_root(tmp_path, monkeypatch):
     source = _save_image(tmp_path / "src.jpg")
     client = _make_bed(
         {"mode": "generic_http", "api_url": "https://img.example.com/upload"},

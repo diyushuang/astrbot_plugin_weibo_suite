@@ -17,6 +17,33 @@
         "type": "bool",
         "default": true,
         "description": "是否包含转发帖"
+      },
+      "filter_keywords": {
+        "type": "list",
+        "default": [],
+        "description": "正文命中这些关键词的微博直接跳过"
+      },
+      "whitelist_keywords": {
+        "type": "list",
+        "default": [],
+        "description": "白名单关键词（命中则强制推送）"
+      },
+      "max_post_age_minutes": {
+        "type": "int",
+        "default": 0,
+        "description": "只推送最近 N 分钟内的微博（0=不限制）"
+      },
+      "proxy": {
+        "type": "string",
+        "default": "",
+        "description": "出网代理（http:// 或 https:// 开头）。代理地址可能含账号密码（http://user:pass@host），面板按密码框处理、不回显明文",
+        "secret": true
+      },
+      "custom_cookie": {
+        "type": "string",
+        "default": "",
+        "description": "自定义 Cookie（填写后跳过游客身份）",
+        "secret": true
       }
     }
   },
@@ -33,6 +60,126 @@
         "type": "string",
         "default": "📢 微博更新\\n【{name}】{time}\\n{weibo}\\n🔗 {link}",
         "description": "推送模板"
+      },
+      "push_sessions": {
+        "type": "list",
+        "default": [],
+        "description": "推送目标会话（由 微博绑定 写入）"
+      },
+      "push_delay_seconds": {
+        "type": "int",
+        "default": 2,
+        "description": "每轮推送条目之间的间隔（秒）"
+      },
+      "max_push_per_round": {
+        "type": "int",
+        "default": 0,
+        "description": "单轮最多推送条数（0=不限制）"
+      },
+      "max_pending_retries": {
+        "type": "int",
+        "default": 5,
+        "description": "待推送条目的最大重试次数"
+      },
+      "message_with_images": {
+        "type": "bool",
+        "default": true,
+        "description": "推送时附带图片"
+      },
+      "message_with_videos": {
+        "type": "bool",
+        "default": true,
+        "description": "推送时附带视频"
+      },
+      "max_videos_per_post": {
+        "type": "int",
+        "default": 2,
+        "description": "单条微博最多处理的视频数"
+      },
+      "message_send_timeout": {
+        "type": "int",
+        "default": 60,
+        "description": "单次发送超时（秒）"
+      },
+      "text_max_length": {
+        "type": "int",
+        "default": 100,
+        "description": "推送正文截断长度（字符）"
+      },
+      "show_full_weibo_text": {
+        "type": "bool",
+        "default": false,
+        "description": "长文是否推送全文"
+      },
+      "show_hashtags": {
+        "type": "bool",
+        "default": false,
+        "description": "正文是否保留话题标签"
+      },
+      "weibo_emoji_translate": {
+        "type": "bool",
+        "default": false,
+        "description": "是否把微博表情码翻译成 emoji"
+      },
+      "at_all_uids": {
+        "type": "list",
+        "default": [],
+        "description": "@全体生效的博主 uid 列表"
+      },
+      "at_all_keywords": {
+        "type": "list",
+        "default": [],
+        "description": "@全体生效的关键词（空=不限定）"
+      },
+      "at_all_daily_limit": {
+        "type": "int",
+        "default": 10,
+        "description": "24 小时内 @全体 次数上限（0=不限制）"
+      },
+      "at_all_check_permission": {
+        "type": "bool",
+        "default": true,
+        "description": "@全体发送前检查机器人权限"
+      },
+      "at_all_verify": {
+        "type": "bool",
+        "default": true,
+        "description": "@全体发送后回读确认"
+      },
+      "callback_api_base": {
+        "type": "string",
+        "default": "",
+        "description": "AstrBot 回调 API 基址（留空自动获取）"
+      },
+      "video_prefer_file": {
+        "type": "bool",
+        "default": true,
+        "description": "优先以文件方式发送视频"
+      },
+      "video_quality": {
+        "type": "string",
+        "default": "hd",
+        "description": "视频清晰度（hd/sd）"
+      },
+      "video_max_mb": {
+        "type": "int",
+        "default": 95,
+        "description": "单个视频体积上限（MB）"
+      },
+      "video_inline_max_mb": {
+        "type": "int",
+        "default": 30,
+        "description": "内联发送视频的体积上限（MB）"
+      },
+      "video_file_fallback": {
+        "type": "bool",
+        "default": true,
+        "description": "视频发送失败时回退为文件"
+      },
+      "video_file_temp": {
+        "type": "bool",
+        "default": true,
+        "description": "视频转文件发送后清理临时文件"
       }
     }
   },
@@ -42,8 +189,58 @@
     "items": {
       "album_enabled": {
         "type": "bool",
-        "default": false,
+        "default": true,
         "description": "启用群相册"
+      },
+      "album_rules": {
+        "type": "list",
+        "default": [],
+        "description": "群相册绑定规则（由 微博相册绑定 写入）"
+      },
+      "album_keyword_rules": {
+        "type": "list",
+        "default": [],
+        "description": "关键词相册路由规则"
+      },
+      "album_max_images": {
+        "type": "int",
+        "default": 18,
+        "description": "单条微博最多上传的图片数"
+      },
+      "album_live_gif": {
+        "type": "bool",
+        "default": true,
+        "description": "实况图转 GIF 上传"
+      },
+      "album_same_host": {
+        "type": "bool",
+        "default": false,
+        "description": "相册文件走与协议端相同的 host"
+      },
+      "album_notify": {
+        "type": "bool",
+        "default": false,
+        "description": "相册上传完成后在群里提示"
+      },
+      "album_download_concurrency": {
+        "type": "int",
+        "default": 5,
+        "description": "相册图片下载并发"
+      },
+      "album_upload_concurrency": {
+        "type": "int",
+        "default": 3,
+        "description": "相册上传并发"
+      },
+      "album_upload_interval": {
+        "type": "float",
+        "default": 0.5,
+        "description": "相册上传间隔（秒）"
+      },
+      "album_upload_payload_mb": {
+        "type": "float",
+        "default": 32.0,
+        "description": "单次上传的 base64 载荷预算（MB）"
       }
     }
   },
@@ -103,10 +300,11 @@
         "description": "文件名模板"
       },
       "categories": {
-        "type": "string",
-        "default": "",
-        "description": "博主→分类目录映射（JSON，如 {\"示例博主A\": \"12、日常分享\"}；键可用 uid 或昵称）",
-        "hint": "留空则全部落到「未分类」目录；键写成 uid 时优先按 uid 匹配"
+        "type": "dict",
+        "default": {},
+        "items": {},
+        "description": "博主→分类目录映射（键可用 uid 或昵称，如 {\"示例博主\": \"12、日常分享\"}）",
+        "hint": "留空则全部落到「未分类」目录；键写成 uid 时优先按 uid 匹配。面板按对象保存，旧版 JSON 字符串仍兼容读取。"
       },
       "enabled_uids": {
         "type": "list",
@@ -469,7 +667,7 @@
         "condition": {
           "mode": "cloudflare_imgbed"
         },
-        "hint": "站点启用登录校验时也可用上传鉴权码（upload 请求的 authCode 查询参数）上传，与 API Token 二选一或同时配置。"
+        "hint": "站点启用登录校验时也可用上传鉴权码上传，与 API Token 二选一或同时配置。鉴权码默认放在 X-Auth-Code 请求头（不进 URL，避免随访问日志/异常栈外泄）；站点若只认 ?authCode= 查询参数，被 401/403 拒绝后会自动回落一次并告警。"
       },
       "cfi_upload_channel": {
         "description": "【imgbed 选填】存储渠道 uploadChannel",
@@ -664,7 +862,7 @@
         "description": "【选填】图床内网直连地址",
         "type": "string",
         "default": "",
-        "hint": "图床与 AstrBot 同内网时的直连地址（如 http://172.16.0.1:7658），取图不走公网；该主机加入 SSRF 白名单。留空则用上方地址。"
+        "hint": "图床与 AstrBot 同内网时的直连地址（如 http://127.0.0.1:7658），取图不走公网；该主机加入 SSRF 白名单。留空则用上方地址。"
       },
       "api_endpoint": {
         "description": "【选填】随机图接口路径",
@@ -738,7 +936,7 @@
         ],
         "default": "quote",
         "obvious_hint": true,
-        "hint": "quote=随机图 + 随机语句（现有行为）；weibo=随机取一条微博文案及其图库对应图片，卡片显示博主与发博日期、不显示链接。文案放 data/plugin_data/astrbot_plugin_image_trace/weibo/（CSV 或 MD），或用 /签到文案导入 上传；精确配图由 scripts/build_weibo_map.py 生成 weibo_post_map.json，签到只读本地表不请求微博。"
+        "hint": "quote=随机图 + 随机语句（现有行为）；weibo=随机取一条微博文案及其图库对应图片，卡片显示博主与发博日期、不显示链接。文案直接读归档库 archive.db（先进 weibo/archive 归档，/微博文案清洗 补齐清洗结果）；归档未启用时回退 data/plugin_data/astrbot_plugin_image_trace/weibo/ 下的 CSV/MD。签到只读本地库，不请求微博。"
       },
       "render_mode": {
         "description": "【选填】图文呈现方式",
@@ -1126,5 +1324,376 @@
     },
     "hint": "记录配置已迁移到哪一版布局，避免重复迁移。",
     "invisible": true
-  }
+  },
+  "poll_interval": {
+    "type": "int",
+    "default": 120,
+    "description": "（旧布局迁移用，请勿修改）轮询间隔（秒）"
+  },
+  "monitored_uids": {
+    "type": "list",
+    "default": [],
+    "description": "（旧布局迁移用，请勿修改）监控 UID 列表"
+  },
+  "include_retweets": {
+    "type": "bool",
+    "default": true,
+    "description": "（旧布局迁移用，请勿修改）是否包含转发帖"
+  },
+  "filter_keywords": {
+    "type": "list",
+    "default": [],
+    "description": "（旧布局迁移用，请勿修改）正文命中这些关键词的微博直接跳过"
+  },
+  "whitelist_keywords": {
+    "type": "list",
+    "default": [],
+    "description": "（旧布局迁移用，请勿修改）白名单关键词（命中则强制推送）"
+  },
+  "max_post_age_minutes": {
+    "type": "int",
+    "default": 0,
+    "description": "（旧布局迁移用，请勿修改）只推送最近 N 分钟内的微博（0=不限制）"
+  },
+  "proxy": {
+    "type": "string",
+    "default": "",
+    "description": "（旧布局迁移用，请勿修改）出网代理（http:// 或 https:// 开头）",
+    "secret": true
+  },
+  "custom_cookie": {
+    "type": "string",
+    "default": "",
+    "description": "（旧布局迁移用，请勿修改）自定义 Cookie（填写后跳过游客身份）",
+    "secret": true
+  },
+  "at_all": {
+    "type": "bool",
+    "default": false,
+    "description": "（旧布局迁移用，请勿修改）@全体总开关"
+  },
+  "message_format": {
+    "type": "string",
+    "default": "📢 微博更新\\n【{name}】{time}\\n{weibo}\\n🔗 {link}",
+    "description": "（旧布局迁移用，请勿修改）推送模板"
+  },
+  "push_sessions": {
+    "type": "list",
+    "default": [],
+    "description": "（旧布局迁移用，请勿修改）推送目标会话（由 微博绑定 写入）"
+  },
+  "push_delay_seconds": {
+    "type": "int",
+    "default": 2,
+    "description": "（旧布局迁移用，请勿修改）每轮推送条目之间的间隔（秒）"
+  },
+  "max_push_per_round": {
+    "type": "int",
+    "default": 0,
+    "description": "（旧布局迁移用，请勿修改）单轮最多推送条数（0=不限制）"
+  },
+  "max_pending_retries": {
+    "type": "int",
+    "default": 5,
+    "description": "（旧布局迁移用，请勿修改）待推送条目的最大重试次数"
+  },
+  "message_with_images": {
+    "type": "bool",
+    "default": true,
+    "description": "（旧布局迁移用，请勿修改）推送时附带图片"
+  },
+  "message_with_videos": {
+    "type": "bool",
+    "default": true,
+    "description": "（旧布局迁移用，请勿修改）推送时附带视频"
+  },
+  "max_videos_per_post": {
+    "type": "int",
+    "default": 2,
+    "description": "（旧布局迁移用，请勿修改）单条微博最多处理的视频数"
+  },
+  "message_send_timeout": {
+    "type": "int",
+    "default": 60,
+    "description": "（旧布局迁移用，请勿修改）单次发送超时（秒）"
+  },
+  "text_max_length": {
+    "type": "int",
+    "default": 100,
+    "description": "（旧布局迁移用，请勿修改）推送正文截断长度（字符）"
+  },
+  "show_full_weibo_text": {
+    "type": "bool",
+    "default": false,
+    "description": "（旧布局迁移用，请勿修改）长文是否推送全文"
+  },
+  "show_hashtags": {
+    "type": "bool",
+    "default": false,
+    "description": "（旧布局迁移用，请勿修改）正文是否保留话题标签"
+  },
+  "weibo_emoji_translate": {
+    "type": "bool",
+    "default": false,
+    "description": "（旧布局迁移用，请勿修改）是否把微博表情码翻译成 emoji"
+  },
+  "at_all_uids": {
+    "type": "list",
+    "default": [],
+    "description": "（旧布局迁移用，请勿修改）@全体生效的博主 uid 列表"
+  },
+  "at_all_keywords": {
+    "type": "list",
+    "default": [],
+    "description": "（旧布局迁移用，请勿修改）@全体生效的关键词（空=不限定）"
+  },
+  "at_all_daily_limit": {
+    "type": "int",
+    "default": 10,
+    "description": "（旧布局迁移用，请勿修改）24 小时内 @全体 次数上限（0=不限制）"
+  },
+  "at_all_check_permission": {
+    "type": "bool",
+    "default": true,
+    "description": "（旧布局迁移用，请勿修改）@全体发送前检查机器人权限"
+  },
+  "at_all_verify": {
+    "type": "bool",
+    "default": true,
+    "description": "（旧布局迁移用，请勿修改）@全体发送后回读确认"
+  },
+  "callback_api_base": {
+    "type": "string",
+    "default": "",
+    "description": "（旧布局迁移用，请勿修改）AstrBot 回调 API 基址（留空自动获取）"
+  },
+  "video_prefer_file": {
+    "type": "bool",
+    "default": true,
+    "description": "（旧布局迁移用，请勿修改）优先以文件方式发送视频"
+  },
+  "video_quality": {
+    "type": "string",
+    "default": "hd",
+    "description": "（旧布局迁移用，请勿修改）视频清晰度（hd/sd）"
+  },
+  "video_max_mb": {
+    "type": "int",
+    "default": 95,
+    "description": "（旧布局迁移用，请勿修改）单个视频体积上限（MB）"
+  },
+  "video_inline_max_mb": {
+    "type": "int",
+    "default": 30,
+    "description": "（旧布局迁移用，请勿修改）内联发送视频的体积上限（MB）"
+  },
+  "video_file_fallback": {
+    "type": "bool",
+    "default": true,
+    "description": "（旧布局迁移用，请勿修改）视频发送失败时回退为文件"
+  },
+  "video_file_temp": {
+    "type": "bool",
+    "default": true,
+    "description": "（旧布局迁移用，请勿修改）视频转文件发送后清理临时文件"
+  },
+  "album_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "（旧布局迁移用，请勿修改）启用群相册"
+  },
+  "album_rules": {
+    "type": "list",
+    "default": [],
+    "description": "（旧布局迁移用，请勿修改）群相册绑定规则（由 微博相册绑定 写入）"
+  },
+  "album_keyword_rules": {
+    "type": "list",
+    "default": [],
+    "description": "（旧布局迁移用，请勿修改）关键词相册路由规则"
+  },
+  "album_max_images": {
+    "type": "int",
+    "default": 18,
+    "description": "（旧布局迁移用，请勿修改）单条微博最多上传的图片数"
+  },
+  "album_live_gif": {
+    "type": "bool",
+    "default": true,
+    "description": "（旧布局迁移用，请勿修改）实况图转 GIF 上传"
+  },
+  "album_same_host": {
+    "type": "bool",
+    "default": false,
+    "description": "（旧布局迁移用，请勿修改）相册文件走与协议端相同的 host"
+  },
+  "album_notify": {
+    "type": "bool",
+    "default": false,
+    "description": "（旧布局迁移用，请勿修改）相册上传完成后在群里提示"
+  },
+  "album_download_concurrency": {
+    "type": "int",
+    "default": 5,
+    "description": "（旧布局迁移用，请勿修改）相册图片下载并发"
+  },
+  "album_upload_concurrency": {
+    "type": "int",
+    "default": 3,
+    "description": "（旧布局迁移用，请勿修改）相册上传并发"
+  },
+  "album_upload_interval": {
+    "type": "float",
+    "default": 0.5,
+    "description": "（旧布局迁移用，请勿修改）相册上传间隔（秒）"
+  },
+  "album_upload_payload_mb": {
+    "type": "float",
+    "default": 32.0,
+    "description": "（旧布局迁移用，请勿修改）单次上传的 base64 载荷预算（MB）"
+  },
+    "sns": {
+      "type": "object",
+      "description": "多平台订阅推送（抖音 / 小红书 / Instagram）",
+      "items": {
+        "enabled": {
+          "type": "bool",
+          "default": true,
+          "description": "启用多平台订阅（关闭后不轮询、不推送）"
+        },
+        "fetch_mode": {
+          "type": "string",
+          "default": "browser",
+          "description": "取数方式：browser=复用本机浏览器（推荐）｜http=自备 Cookie 走 HTTP｜rss=订阅 RSS 源"
+        },
+        "browser_headed": {
+          "type": "bool",
+          "default": true,
+          "description": "浏览器显示窗口（关闭则无头运行，登录时需要临时打开）"
+        },
+        "browser_profile_dir": {
+          "type": "string",
+          "default": "",
+          "description": "浏览器持久化目录（留空=插件数据目录下 sns/browser）"
+        },
+        "aggressive": {
+          "type": "bool",
+          "default": false,
+          "description": "激进档位：间隔降到 180/180/600 秒（被风控概率显著上升）"
+        },
+        "base_interval_douyin": {
+          "type": "int",
+          "default": 300,
+          "description": "抖音基础轮询间隔（秒，最小 300）"
+        },
+        "base_interval_xhs": {
+          "type": "int",
+          "default": 300,
+          "description": "小红书基础轮询间隔（秒，最小 300）"
+        },
+        "base_interval_instagram": {
+          "type": "int",
+          "default": 900,
+          "description": "Instagram 基础轮询间隔（秒，最小 900）"
+        },
+        "jitter_ratio": {
+          "type": "float",
+          "default": 0.0,
+          "description": "额外抖动比例（0=用平台内置比例，只向长的一侧抖）"
+        },
+        "platform_concurrency": {
+          "type": "int",
+          "default": 0,
+          "description": "平台并发上限（0=用内置值：抖音 2 / 小红书 1 / IG 1）"
+        },
+        "cooldown_base_seconds": {
+          "type": "int",
+          "default": 600,
+          "description": "风控冷却基数（秒）"
+        },
+        "cooldown_cap_seconds": {
+          "type": "int",
+          "default": 3600,
+          "description": "风控冷却上限（秒）"
+        },
+        "health_pause_threshold": {
+          "type": "float",
+          "default": 0.2,
+          "description": "健康度低于该值自动暂停账号"
+        },
+        "health_degrade_threshold": {
+          "type": "float",
+          "default": 0.4,
+          "description": "健康度低于该值间隔翻 1.5 倍"
+        },
+        "warmup_minutes": {
+          "type": "int",
+          "default": 30,
+          "description": "新订阅热身期（分钟，间隔翻倍）"
+        },
+        "protect_mode_hours": {
+          "type": "int",
+          "default": 24,
+          "description": "保号期（小时，间隔翻倍）"
+        },
+        "night_slowdown": {
+          "type": "bool",
+          "default": true,
+          "description": "夜间（0-8 点）间隔翻倍"
+        },
+        "push_sessions": {
+          "type": "list",
+          "default": [],
+          "description": "推送目标会话（留空则沿用微博的推送目标）"
+        },
+        "message_format": {
+          "type": "string",
+          "default": "📢 {platform}更新\n【{name}】{time}\n{text}\n🔗 {link}",
+          "description": "推送文案模板（可用 {platform} {name} {time} {text} {link}）"
+        },
+        "message_with_images": {
+          "type": "bool",
+          "default": true,
+          "description": "推送时附带图片"
+        },
+        "max_images": {
+          "type": "int",
+          "default": 9,
+          "description": "每条推送最多带几张图"
+        },
+        "text_max_length": {
+          "type": "int",
+          "default": 300,
+          "description": "正文截断长度"
+        },
+        "at_all": {
+          "type": "bool",
+          "default": false,
+          "description": "推送时 @全体成员（需机器人在群里是管理员）"
+        },
+        "at_all_keywords": {
+          "type": "list",
+          "default": [],
+          "description": "@全体关键词（留空=不过滤）"
+        },
+        "douyin_cookie": {
+          "type": "string",
+          "default": "",
+          "description": "抖音 Cookie（http 模式必填，含 UIFID/ttwid）",
+          "secret": true
+        },
+        "xhs_cookie": {
+          "type": "string",
+          "default": "",
+          "description": "小红书 Cookie（http 模式必填，含 a1/web_session）",
+          "secret": true
+        },
+        "instagram_cookie": {
+          "type": "string",
+          "default": "",
+          "description": "Instagram Cookie（http 模式必填，含 sessionid）",
+          "secret": true
+        }
+      }
+    }
 }

@@ -33,14 +33,8 @@ from urllib.parse import unquote, urlparse, urlsplit
 import aiohttp
 import astrbot.api.message_components as Comp
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.star import Context, Star
-
-# 说明：获取 AstrBot data 目录目前官方仅有 astrbot.core.utils.astrbot_path 这一条途径
-# （astrbot.api / Context 均未暴露等价 API）。StarTools.get_data_dir() 路径等价
-# （data/plugin_data/<name>），但要求较新的 AstrBot 版本，与 metadata.yaml 声明的
-# astrbot_version ">=4.0.0" 兼容范围冲突，故保留此导入（AstrBot 官方插件生态通用做法）。
-from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+from astrbot.api.event import AstrMessageEvent
+from astrbot.api.star import Context, Star, StarTools
 
 from ..shared.errorlog import install_error_log, remove_error_log
 
@@ -85,7 +79,7 @@ try:
         phash_hex_len,
     )
     from .hash_index import REMOTE_HASH_PAYLOAD_KEYS, HashIndex
-    from .image_bed import MODE_CFB, ImageBedClient
+    from .image_bed import MODE_CFB, ImageBedClient, redact_url
     from .image_delivery import (
         CompressionEvidence,
         DeliveryTarget,
@@ -137,6 +131,7 @@ try:
         load_posts_from_dir,
         map_is_stale,
         parse_weibo_text,
+        posts_from_archive_rows,
     )
 except ImportError:  # 兼容插件以独立模块方式加载
     from checkin_card import DEFAULT_QUOTES, QuoteLibrary, compose_poster  # type: ignore[no-redef]
@@ -153,7 +148,7 @@ except ImportError:  # 兼容插件以独立模块方式加载
         phash_hex_len,
     )
     from hash_index import REMOTE_HASH_PAYLOAD_KEYS, HashIndex  # type: ignore[no-redef]
-    from image_bed import MODE_CFB, ImageBedClient  # type: ignore[no-redef]
+    from image_bed import MODE_CFB, ImageBedClient, redact_url  # type: ignore[no-redef]
     from image_delivery import (  # type: ignore[no-redef]
         CompressionEvidence,
         DeliveryTarget,
@@ -205,6 +200,7 @@ except ImportError:  # 兼容插件以独立模块方式加载
         load_posts_from_dir,
         map_is_stale,
         parse_weibo_text,
+        posts_from_archive_rows,
     )
 
     from astrbot_plugin_weibo_suite.shared.common import (  # type: ignore[no-redef]
@@ -260,6 +256,8 @@ IMAGE_EXTS = (
 QQ_IMAGE_FILE_TYPE = 1
 # 假格式转码前的像素上限：与 features / 签到卡片同一量级，防解压炸弹
 QQ_TRANSCODE_MAX_PIXELS = 50_000_000
+# OneBot 直发的回执超时：协议端卡住时不能让事件协程永久挂起
+ONEBOT_SEND_TIMEOUT = 30.0
 
 # ----------------------------------------------------------------------
 # 配置布局（1.7.14）：同类项合并进 basic / delivery / limits 三个组。
@@ -387,7 +385,7 @@ class ImageTracePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-        self.data_dir = os.path.join(get_astrbot_data_path(), "plugin_data", PLUGIN_NAME)
+        self.data_dir = str(StarTools.get_data_dir(PLUGIN_NAME))
         self.tmp_dir = os.path.join(self.data_dir, "tmp")
         self._errlog = None
         self._errlog_target = None
@@ -430,8 +428,12 @@ class ImageTracePlugin(Star):
             expected_phash_hex_len=phash_hex_len(hash_size),
         )
         self._remote_hash_task: asyncio.Task | None = None
+        # 刷新失败/空结果的退避截止时间：否则每次 /溯源 都会重翻全量 Qdrant
+        self._remote_hash_backoff_until = 0.0
         # 回传过的原图直链的历史（供 /原图 找回）；随机图客户端惰性构造
         self.history = MediaHistory()
+        # QQ 官方被动回复的 msg_seq：同一 msg_id 内必须唯一，用自增而非随机
+        self._qq_msg_seq = 0
         self._random_media_client: RandomMediaClient | None = None
         # 每日签到：独立 SQLite 记录（按用户全局一天一次）与语句库（首次取句时构造）。
         # 签到是附属功能：DB 打不开时降级为「签到不可用」，不能拖垮整个插件加载。
@@ -449,6 +451,10 @@ class ImageTracePlugin(Star):
             os.makedirs(self.weibo_thumb_dir, exist_ok=True)
         except OSError as exc:
             logger.warning(f"微博文案目录创建失败，微博签到将回退随机语句: {exc}")
+        # 外部文案源（P5）：入口 main.py 注入 (指纹, 行列表) 供应器，来源是 archive.db。
+        # 溯源域不 import 文案域，只认这个窄端口；未注入时回退 weibo/ 下的 CSV/MD。
+        self._weibo_external_source = None
+        self._weibo_external_cache: tuple[str, list[dict]] = ("", [])
         self._weibo_posts_cache: list[WeiboPost] | None = None
         self._weibo_meta_cache: dict = {}
         self._weibo_signature: tuple | None = None
@@ -521,6 +527,8 @@ class ImageTracePlugin(Star):
         """
         if not self.remote_hash_on() or self._remote_hash_cache_fresh():
             return
+        if time.time() < self._remote_hash_backoff_until:
+            return
         self.start_remote_hash_refresh()
 
     async def _refresh_remote_hash(self) -> None:
@@ -535,6 +543,12 @@ class ImageTracePlugin(Star):
                 max_points=self._remote_hash_max_points(),
             )
             count = await asyncio.to_thread(self.remote_hash.build, points)
+            if count > 0:
+                self._remote_hash_backoff_until = 0.0
+            else:
+                # 成功但 0 条（hash_size 变更后旧点全被跳过等）：也要退避，
+                # 否则每次 /溯源 都会再翻一遍全量。
+                self._remote_hash_backoff_until = time.time() + min(self._remote_hash_ttl(), 600.0)
             logger.info(
                 f"图床哈希索引已刷新：{count} 条可用"
                 f"（远端点位 {len(points) if isinstance(points, list) else 0}），"
@@ -543,6 +557,7 @@ class ImageTracePlugin(Star):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            self._remote_hash_backoff_until = time.time() + min(self._remote_hash_ttl(), 600.0)
             logger.warning(f"图床哈希索引刷新失败（沿用已有缓存）: {exc}")
 
     def start_remote_hash_refresh(self) -> None:
@@ -931,9 +946,16 @@ class ImageTracePlugin(Star):
         return max(1, self._int_cfg("max_download_mb", 20)) * 1024 * 1024
 
     @staticmethod
-    def _download_timeout() -> aiohttp.ClientTimeout:
-        """兜底下载/格式体检统一的出网超时。"""
-        return aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT)
+    def _download_timeout(limit: int = 0) -> aiohttp.ClientTimeout:
+        """兜底下载/格式体检统一的出网超时。
+
+        固定 30s 对分片通道的 100MB 原图必然超时；按最低 512KB/s 的保守带宽
+        估算总时限（上限 10 分钟），小文件仍是原来的 30s。
+        """
+        total = DOWNLOAD_TIMEOUT
+        if limit > 0:
+            total = max(total, min(600.0, limit / (512 * 1024)))
+        return aiohttp.ClientTimeout(total=total)
 
     async def _stream_response_to_temp(self, resp, limit: int) -> str:
         """把已打开的响应流式写入临时文件，返回路径；超限或失败即删文件。
@@ -942,15 +964,23 @@ class ImageTracePlugin(Star):
         按内容判断，与扩展名无关。
         """
         path = os.path.join(self.tmp_dir, f"q_{secrets.token_hex(8)}.jpg")
+        part_path = path + ".part"
         try:
             received = 0
-            with open(path, "wb") as file:
+            with open(part_path, "wb") as file:
                 async for chunk in resp.content.iter_chunked(DOWNLOAD_CHUNK_SIZE):
                     received += len(chunk)
                     if received > limit:
                         raise ValueError("图片超过大小上限")
                     file.write(chunk)
-        except Exception:
+                # 先落盘再改名：下载中途被取消/网络中断时只会留下 .part，
+                # 不会留下一个"看着像完整图片"的截断文件被下游发出去
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(part_path, path)
+        except BaseException:
+            # CancelledError 也要清掉半成品，否则重启后残留被当缓存命中
+            self._remove_quiet(part_path)
             self._remove_quiet(path)
             raise
         return path
@@ -974,7 +1004,7 @@ class ImageTracePlugin(Star):
             # prepare 契约为三参（url, method, cross_origin），签名不符
             # 会在请求发出前就 TypeError
             prepare=self._image_download_headers,
-            timeout=self._download_timeout(),
+            timeout=self._download_timeout(limit),
         ) as resp:
             resp.raise_for_status()
             declared = resp.headers.get("Content-Length", "")
@@ -986,21 +1016,32 @@ class ImageTracePlugin(Star):
         """下载到内存；声明体积超过内存阈值时退回落盘读回。
 
         回退交付只需要字节（压缩、发送都在内存里完成）。内存占用由两道闸门
-        控制：声明长度超过 MEMORY_DOWNLOAD_MAX_BYTES 时改走落盘；声明长度未知
-        （分块传输）时仍读内存，但受 max_download_mb 上限约束——阈值取 8MB 而非
-        上限值，正是为了让「未知长度」这种情况也留在可控范围内（并发上限 3，
-        最坏约 24MB）。大图分支直接复用当前已打开的响应落盘，不再发第二次 GET。
+        控制：声明长度超过 MEMORY_DOWNLOAD_MAX_BYTES、或长度未知（分块传输）
+        时一律落盘后读回——未知长度无法在读取前判阈值，留在内存等于按
+        max_download_mb（默认 20MB）撑爆并发上限 3 的预算。落盘分支复用当前
+        已打开的响应，不再发第二次 GET。
         """
         client = await self._get_http()
         size_limit = self._download_limit_bytes()
         async with await client.request(
-            "GET", url, prepare=self._image_download_headers, timeout=self._download_timeout()
+            "GET",
+            url,
+            prepare=self._image_download_headers,
+            timeout=self._download_timeout(size_limit),
         ) as resp:
             resp.raise_for_status()
             declared = resp.headers.get("Content-Length", "")
             if declared.isdigit() and int(declared) > size_limit:
                 raise ValueError("图片超过大小上限")
-            if declared.isdigit() and int(declared) > MEMORY_DOWNLOAD_MAX_BYTES:
+            if not declared.isdigit():
+                # 分块传输没有声明长度，无法在读取前判断是否超过内存阈值：
+                # 直接落盘再读回，避免未知长度按 20MB 上限塞满内存。
+                path = await self._stream_response_to_temp(resp, size_limit)
+                try:
+                    return await asyncio.to_thread(read_bytes, path)
+                finally:
+                    self._remove_quiet(path)
+            if int(declared) > MEMORY_DOWNLOAD_MAX_BYTES:
                 # 大图不冒险占内存：复用当前响应落盘后读回
                 path = await self._stream_response_to_temp(resp, size_limit)
                 try:
@@ -1543,7 +1584,10 @@ class ImageTracePlugin(Star):
 
         image_count = sum(1 for seg in message if seg["type"] == "image")
         try:
-            await event.bot.call_action(action, **params)
+            # 协议端不回执时不能让事件协程永久挂起：超时按 UNKNOWN 处理（不重发）
+            await asyncio.wait_for(
+                event.bot.call_action(action, **params), timeout=ONEBOT_SEND_TIMEOUT
+            )
         except Exception as exc:
             outcome = classify_send_error(exc)
             # 日志按成因给结论：不再只写「结果未知」，而是讲清「请求已发出、
@@ -2052,7 +2096,6 @@ class ImageTracePlugin(Star):
     # 指令：溯源
     # ------------------------------------------------------------------
 
-    @filter.command("溯源", alias={"找原图"})
     async def trace(self, event: AstrMessageEvent):
         """发送或引用一张图片，按当前引擎（hash/vector/auto）找出相似的原图并回传"""
         self._maybe_start_remote_hash_refresh()  # 缓存过期才兜底刷新（幂等）
@@ -2534,7 +2577,6 @@ class ImageTracePlugin(Star):
     # 指令：登记原图
     # ------------------------------------------------------------------
 
-    @filter.command("登记原图", alias={"原图登记"})
     async def register_image(self, event: AstrMessageEvent):
         """将消息或引用中的图片作为原图登记入库（默认仅管理员）"""
         if self._bool_cfg("register_admin_only", True) and not event.is_admin():
@@ -2669,7 +2711,6 @@ class ImageTracePlugin(Star):
     # 指令：状态 / 重扫 / 删除 / 帮助
     # ------------------------------------------------------------------
 
-    @filter.command("溯源状态")
     async def status(self, event: AstrMessageEvent):
         """查看图库统计与插件配置摘要"""
         stats = self.library.stats()
@@ -2757,8 +2798,6 @@ class ImageTracePlugin(Star):
                 ok_dirs.append(d)
         return files, ok_dirs
 
-    @filter.command("溯源重扫")
-    @filter.permission_type(filter.PermissionType.ADMIN)
     async def rescan(self, event: AstrMessageEvent):
         """扫描配置的本地图库目录，建立/更新索引（管理员）"""
         try:
@@ -2776,19 +2815,16 @@ class ImageTracePlugin(Star):
             files, scanned_dirs = await asyncio.to_thread(self._collect_image_files, valid_dirs)
             if force:
                 await asyncio.to_thread(self.library.delete_by_source, "scan")
-            known_paths = {
-                os.path.normcase(os.path.abspath(p))
-                for p in self.library.get_paths_for_source("scan")
-            }
+            # 这两次都是全表扫描，同步跑会卡住事件循环（大库上是秒级）
+            scan_paths = await asyncio.to_thread(self.library.get_paths_for_source, "scan")
+            known_paths = {os.path.normcase(os.path.abspath(p)) for p in scan_paths}
             # 一次性取回全部 pHash，在内存里去重，避免逐张查库；
             # 即便跨任务并发重扫漏判，phash 唯一索引 + INSERT OR IGNORE 也能兜底
-            known_phashes = self.library.get_all_phash_hashes()
+            known_phashes = await asyncio.to_thread(self.library.get_all_phash_hashes)
             pending: list = []
             added = skipped = failed = 0
             total = len(files)
-            await event.send(
-                event.plain_result(f"开始扫描 {len(valid_dirs)} 个目录，共 {total} 张图片…")
-            )
+            yield event.plain_result(f"开始扫描 {len(valid_dirs)} 个目录，共 {total} 张图片…")
             concurrency = max(1, SCAN_CONCURRENCY)
             processed = 0
             next_report = RESCAN_PROGRESS_EVERY
@@ -2850,11 +2886,9 @@ class ImageTracePlugin(Star):
                         )
                 processed += len(batch_paths)
                 if processed >= next_report:
-                    await event.send(
-                        event.plain_result(
-                            f"进度：{processed}/{total}，新增 {added + len(pending)}，"
-                            f"跳过 {skipped}，失败 {failed}"
-                        )
+                    yield event.plain_result(
+                        f"进度：{processed}/{total}，新增 {added + len(pending)}，"
+                        f"跳过 {skipped}，失败 {failed}"
                     )
                     next_report = processed + RESCAN_PROGRESS_EVERY
             if pending:
@@ -2882,8 +2916,6 @@ class ImageTracePlugin(Star):
             logger.error(f"重扫失败: {e}", exc_info=True)
             yield event.plain_result("⚠️ 重扫失败，详情请查看机器人日志。")
 
-    @filter.command("溯源删除")
-    @filter.permission_type(filter.PermissionType.ADMIN)
     async def delete_entry(self, event: AstrMessageEvent, entry_id: int):
         """按编号删除图库条目（管理员）"""
         try:
@@ -2957,7 +2989,6 @@ class ImageTracePlugin(Star):
             except Exception as e:
                 logger.warning(f"补偿删除本地副本失败: {e}")
 
-    @filter.command("溯源帮助")
     async def trace_help(self, event: AstrMessageEvent):
         """图片溯源插件使用帮助"""
         yield event.plain_result(self._usage())
@@ -2989,7 +3020,6 @@ class ImageTracePlugin(Star):
     # 指令：随机图 / 随机视频 / 原图（CloudFlare-ImgBed 随机图接口）
     # ------------------------------------------------------------------
 
-    @filter.command("随机图", alias={"随机图片"})
     async def random_image(self, event: AstrMessageEvent):
         """从图床随机取一张图片并回传（可带目录，如 /随机图 风景）"""
         settings = self._random_settings()
@@ -2999,7 +3029,6 @@ class ImageTracePlugin(Star):
         ):
             yield result
 
-    @filter.command("随机视频")
     async def random_video(self, event: AstrMessageEvent):
         """从图床随机取一个视频并回传（可带目录，如 /随机视频 风景）"""
         settings = self._random_settings()
@@ -3009,7 +3038,6 @@ class ImageTracePlugin(Star):
         ):
             yield result
 
-    @filter.command("签到", alias={"打卡"})
     async def checkin(self, event: AstrMessageEvent):
         """每日签到，领取一张带边框与随机语句的随机缩略图"""
         async for result in self._checkin_flow(event):
@@ -3031,7 +3059,6 @@ class ImageTracePlugin(Star):
                         return sub
         return None
 
-    @filter.command("签到文案导入", alias={"签到文案上传"})
     async def checkin_import(self, event: AstrMessageEvent):
         """管理员：导入微博文案 CSV/MD 到插件数据目录。"""
         if not event.is_admin():
@@ -3293,7 +3320,7 @@ class ImageTracePlugin(Star):
         必须的，不是优化：图床的 `/file/{path}` 只认**完整对象键**（含各级目录），
         裸文件名拼上去**必然 404**。线上报的
 
-            图床里没有找到「【微博@潮流合伙人】20200207-04：示例博主A海报.jpg」
+            图床里没有找到「【微博@示例博主】20240101-04：示例海报.jpg」
 
         就是这个：原图实际在 `/file/7、综艺节目/爱奇艺《潮流合伙人》/《潮流合伙人》
         图集/` 下面，而插件拼的是 `/file/【微博@潮流合伙人】…jpg`。实测 A/B：
@@ -3327,7 +3354,8 @@ class ImageTracePlugin(Star):
             original_name, original_url = await self._original_from_thumbnail(quoted or name)
             if original_url:
                 logger.info(
-                    f"/原图 直查命中缩略图，已反查回原图: {quoted or name} -> {original_url}"
+                    f"/原图 直查命中缩略图，已反查回原图: {quoted or name} -> "
+                    f"{redact_url(original_url)}"
                 )
                 return original_name, original_url, ""
             return (
@@ -3346,7 +3374,7 @@ class ImageTracePlugin(Star):
         found = await self._original_by_name(name)
         if found[1]:
             original_name, original_url = found
-            logger.info(f"/原图 按名反查命中原图: {name} -> {original_url}")
+            logger.info(f"/原图 按名反查命中原图: {name} -> {redact_url(original_url)}")
             return original_name, original_url, ""
         # ①.5 名字本身是「缩略图被改名后的文件名」时，按缩略图名反查原图。
         #     这一段要放在 ② 之前：这类名字（`1789…_【微博_…】.jpg`）在图床里
@@ -3367,7 +3395,7 @@ class ImageTracePlugin(Star):
             thumb_hit = await self._original_from_thumb_name(name)
         if thumb_hit[1]:
             original_name, original_url = thumb_hit
-            logger.info(f"/原图 按缩略图名反查回原图: {name} -> {original_url}")
+            logger.info(f"/原图 按缩略图名反查回原图: {name} -> {redact_url(original_url)}")
             return original_name, original_url, ""
         # ② 反查未命中（未进索引 / 同名多份 / 向量检索关闭）→ 退回裸名拼 URL + 探测，
         #    对根目录文件与「用户直接给完整相对路径」两种情形仍然管用
@@ -3394,9 +3422,10 @@ class ImageTracePlugin(Star):
                     f"/原图 目录名/{name}）。",
                 )
             # 失败文案只带路径、不带主机：图床地址可能配置成内网 IP/内网域名，
-            # 群聊里不应出现；完整直链留在日志，便于管理员核对。
+            # 群聊里不应出现；日志里保留 scheme+host+path 便于管理员核对，但查询
+            # 串（可能含签名/下载凭据）一律脱敏
             candidate_path = unquote(urlsplit(candidate).path)
-            logger.info(f"/原图 图床直查未命中: {name} -> {candidate}")
+            logger.info(f"/原图 图床直查未命中: {name} -> {redact_url(candidate)}")
             return "", "", f"图床里没有找到「{name}」，已尝试路径：{candidate_path}"
         return name, candidate, ""
 
@@ -3442,7 +3471,6 @@ class ImageTracePlugin(Star):
             return "", ""
         return display or query, url
 
-    @filter.command("原图修复")
     async def original_repair(self, event: AstrMessageEvent):
         """清理会话历史里带配文前缀/装饰的脏键（1.6.1 前的旧数据）。
 
@@ -3482,7 +3510,6 @@ class ImageTracePlugin(Star):
         """
         return self.history.repair_keys(clean_display_name)
 
-    @filter.command("原图")
     async def original_image(self, event: AstrMessageEvent):
         """重发最近回传过的图片的原图；也可直接按文件名到图床取（/原图 风景.jpg）"""
         session = self._session_key(event)
@@ -3542,7 +3569,10 @@ class ImageTracePlugin(Star):
                 self._bed_file_id(url) or name
             )
             if original_url:
-                logger.info(f"/原图 历史命中缩略图，已反查回原图: {url} -> {original_url}")
+                logger.info(
+                    f"/原图 历史命中缩略图，已反查回原图: {redact_url(url)} -> "
+                    f"{redact_url(original_url)}"
+                )
                 name, url = original_name, original_url
                 source = "history-thumb-reverse"
             else:
@@ -3558,13 +3588,13 @@ class ImageTracePlugin(Star):
         # 但只要最终直链仍指向缩略图目录，就绝不能发出去——静默发出一张 720px
         # 小图，用户只会觉得「/原图 又没生效」，比明确报错难排查得多。
         if is_thumbnail_url(final_url):
-            logger.warning(f"/原图 最终直链仍是缩略图，已拒绝发送: {final_url}")
+            logger.warning(f"/原图 最终直链仍是缩略图，已拒绝发送: {redact_url(final_url)}")
             yield event.plain_result(
                 f"取到的「{name}」仍是图床里的缩略图直链，已中止发送；"
                 "请改用原图文件名，或先 /溯源 命中该图后再发 /原图。"
             )
             return
-        logger.info(f"/原图 发出（来源={source}）: {name} <- {final_url}")
+        logger.info(f"/原图 发出（来源={source}）: {name} <- {redact_url(final_url)}")
         block = {"url": final_url, "file_name": name}
         async for result in self._yield_delivery(
             event,
@@ -3705,7 +3735,9 @@ class ImageTracePlugin(Star):
                     hint = "向量引擎缺 embed 配置（反查仍可用，仅以图搜图不可用）"
                 else:
                     hint = "原因见 DEBUG 日志"
-                logger.warning(f"随机图命中的是缩略图且反查不到原图（{hint}）: {media_url}")
+                logger.warning(
+                    f"随机图命中的是缩略图且反查不到原图（{hint}）: {redact_url(media_url)}"
+                )
         send_url = await self._random_send_url(original_url, settings)
         return send_url, original_url, original_name
 
@@ -3767,8 +3799,34 @@ class ImageTracePlugin(Star):
     def _weibo_map_path(self) -> str:
         return os.path.join(self.weibo_dir, "weibo_post_map.json")
 
+    def _weibo_external_snapshot(self) -> tuple[str, list[dict]]:
+        """取外部文案源快照（archive.db → (指纹, 行列表)）。
+
+        端口由入口 main.py 注入；未注入或读失败时返回空，调用方回退 weibo/ 目录。
+        结果缓存在实例上：同一轮 _weibo_posts 的签名与加载共用一次读库。
+        """
+        source = getattr(self, "_weibo_external_source", None)
+        if not callable(source):
+            return "", []
+        try:
+            signature, rows = source()
+        except Exception as exc:
+            logger.warning(f"外部文案源读取失败，回退 weibo/ 目录: {exc}")
+            self._weibo_external_cache = ("", [])
+            return "", []
+        signature = str(signature or "")
+        rows = [row for row in (rows or []) if isinstance(row, dict)]
+        if not signature or not rows:
+            self._weibo_external_cache = ("", [])
+            return "", []
+        self._weibo_external_cache = (signature, rows)
+        return signature, rows
+
     def _weibo_signature_sync(self) -> tuple:
-        """映射表 + 源文件 mtime 组合；任一方变化即触发重新加载。"""
+        """外部文案源优先；没有时用映射表 + 源文件 mtime（任一方变化即重载）。"""
+        signature, _rows = self._weibo_external_snapshot()
+        if signature:
+            return ("archive", signature)
         try:
             map_mtime = os.path.getmtime(self._weibo_map_path())
         except OSError:
@@ -3795,6 +3853,22 @@ class ImageTracePlugin(Star):
         映射表优先（带图），源文件只用来补新帖子：映射过期时把源文件里有、
         映射里没有的帖子追加进来，这些帖子的 image 为 None，签到走回退。
         """
+        signature, rows = self._weibo_external_cache
+        if not signature:
+            signature, rows = self._weibo_external_snapshot()
+        if signature and rows:
+            posts = posts_from_archive_rows(rows)
+            meta = {
+                "count": len(posts),
+                "matched_count": sum(1 for post in posts if post.image is not None),
+                "map_count": len(posts),
+                "map_generated_at": "",
+                "map_stale": False,
+                "source_files": [],
+                "errors": [],
+                "map_meta": {"source": "archive", "signature": signature},
+            }
+            return posts, meta
         map_path = self._weibo_map_path()
         posts, generated_at, map_meta = load_post_map(map_path)
         stale = map_is_stale(map_path, self.weibo_dir)
@@ -3860,8 +3934,11 @@ class ImageTracePlugin(Star):
         if not posts:
             return "· 签到模式：weibo（未找到文案/映射，/签到 将回退随机语句）"
         matched = int(meta.get("matched_count") or 0)
-        suffix = "，源文件比映射新" if meta.get("map_stale") else ""
-        if not meta.get("map_count"):
+        from_archive = (meta.get("map_meta") or {}).get("source") == "archive"
+        suffix = "，来源 archive.db" if from_archive else ""
+        if meta.get("map_stale"):
+            suffix += "，源文件比映射新"
+        if not from_archive and not meta.get("map_count"):
             suffix += "，映射表未生成"
         return f"· 签到模式：weibo（文案 {len(posts)} 条，可配对 {matched} 条{suffix}）"
 
@@ -4221,6 +4298,7 @@ class ImageTracePlugin(Star):
         except ImportError:
             logger.warning("PIL 不可用，无法转码非标准格式图片，按原样交付")
             return None
+        path = ""
         try:
             with Image.open(io.BytesIO(data)) as image:
                 if image.width * image.height > QQ_TRANSCODE_MAX_PIXELS:
@@ -4234,6 +4312,8 @@ class ImageTracePlugin(Star):
             logger.info(f"qq_official 图片格式体检：已转码为 JPEG 交付 {path}")
             return path
         except Exception as exc:
+            if path:
+                self._remove_quiet(path)  # 半截临时文件不能留给 24h TTL 兜底
             logger.warning(f"图片转码失败，按原样交付: {exc}")
             return None
 
@@ -4554,13 +4634,18 @@ class ImageTracePlugin(Star):
             srv_send_msg=False,
         )
 
+    def _next_qq_seq(self) -> int:
+        """QQ 被动回复的 msg_seq：同一 msg_id 内自增，避免随机撞号被判重复。"""
+        self._qq_msg_seq = self._qq_msg_seq % 60000 + 1
+        return self._qq_msg_seq
+
     async def _qq_post_media(
         self, event: AstrMessageEvent, target: tuple[str, str], content: str, media
     ) -> None:
         """自己发一条 media 消息（msg_type=7）。
 
         不走 event.send：那条路会把图片重新解析成 base64 交给 file_data 直传，
-        正是本次要绕开的 5MB 限制。msg_seq 每条随机——被动回复中 (msg_id,
+        正是本次要绕开的 5MB 限制。msg_seq 必须自增——被动回复中 (msg_id,
         msg_seq) 组合重复会被平台判失败。
         """
         api = event.bot.api
@@ -4572,7 +4657,7 @@ class ImageTracePlugin(Star):
             "media": media,
             "content": content or None,
             "msg_id": message_id or None,
-            "msg_seq": random.randint(1, 10000),
+            "msg_seq": self._next_qq_seq(),
         }
         kind, session_id = target
         if kind == "group":
@@ -4591,7 +4676,7 @@ class ImageTracePlugin(Star):
                 "msg_type": 0,
                 "content": text,
                 "msg_id": message_id or None,
-                "msg_seq": random.randint(1, 10000),
+                "msg_seq": self._next_qq_seq(),
             }
             kind, session_id = target
             if kind == "group":
@@ -4657,7 +4742,6 @@ class ImageTracePlugin(Star):
         icon = "🖼️" if kind == "image" else "🎬"
         return f"{icon} {filename}"
 
-    @filter.llm_tool(name="sendRandomMedia")
     async def send_random_media(
         self,
         event: AstrMessageEvent,

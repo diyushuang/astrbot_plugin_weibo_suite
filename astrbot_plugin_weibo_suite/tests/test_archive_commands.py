@@ -19,7 +19,6 @@ from astrbot_plugin_weibo_suite.weibo.constants import (
     PLUGIN_VERSION,
     USAGE,
 )
-from astrbot_plugin_weibo_suite.weibo.plugin import WeiboMonitorPlugin
 
 UID = "1234567890"
 
@@ -137,25 +136,25 @@ def test_usage_lists_six_archive_commands():
 # ---------------------------------------------------------------- 指令注册
 
 
-def test_six_archive_commands_registered_under_weibo_group(make_weibo_plugin):
-    plugin = make_weibo_plugin()
+def test_six_archive_commands_registered_under_weibo_group():
+    # 指令注册统一在入口 main.py（AstrBot 只按入口模块绑定 handler）
+    from astrbot_plugin_weibo_suite.main import WeiboSuitePlugin
+
     for method, (name, admin) in NEW_COMMANDS.items():
-        func = getattr(plugin, method)
+        func = getattr(WeiboSuitePlugin, method)
         assert func.command_name == name, method
         assert func.command_group_name == "微博", method
-        assert getattr(func, "permission_required", None) == (
-            "admin" if admin else None
-        ), method
+        assert getattr(func, "permission_required", None) == ("admin" if admin else None), method
 
 
 def test_command_surface_grows_without_losing_legacy_commands():
+    from astrbot_plugin_weibo_suite.main import WeiboSuitePlugin
     from astrbot_plugin_weibo_suite.tests import test_weibo_migration as legacy
 
     found = {
         node
-        for node in dir(WeiboMonitorPlugin)
-        if node.startswith("weibo_")
-        and hasattr(getattr(WeiboMonitorPlugin, node), "command_name")
+        for node in dir(WeiboSuitePlugin)
+        if node.startswith("weibo_") and hasattr(getattr(WeiboSuitePlugin, node), "command_name")
     }
     assert found >= set(NEW_COMMANDS)
     assert len(found) >= 23
@@ -382,9 +381,7 @@ async def test_archive_reconcile_passes_uid_and_formats(make_weibo_plugin, make_
 
     monkeypatch.setattr(plugin, "archive_reconcile", fake_reconcile)
     monkeypatch.setattr(plugin, "format_reconcile", lambda report: f"对账（{report['uid']}）")
-    text = _texts(
-        await _collect(plugin.weibo_archive_reconcile(make_event(f"微博对账 {UID}")))
-    )
+    text = _texts(await _collect(plugin.weibo_archive_reconcile(make_event(f"微博对账 {UID}"))))
     assert seen == [UID]
     assert f"对账（{UID}）" in text
 

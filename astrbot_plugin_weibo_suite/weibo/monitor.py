@@ -28,7 +28,9 @@ class MonitorMixin:
         created_raw = str(mb.get("created_at") or "")
 
         own_text = _clean_text(str(mb.get("text") or ""), limit)
+        own_raw = str(mb.get("text") or "")
         orig_name, orig_text, orig_id = "", "", ""
+        orig_raw = ""
         orig_is_long = False
         is_retweet = "retweeted_status" in mb
         rt_mb: dict[str, Any] | None = None
@@ -36,7 +38,8 @@ class MonitorMixin:
             rt_mb = mb.get("retweeted_status") or {}
             rt_user = rt_mb.get("user") or {}
             orig_name = str(rt_user.get("screen_name") or "")
-            orig_text = _clean_text(str(rt_mb.get("text") or ""), limit)
+            orig_raw = str(rt_mb.get("text") or "")
+            orig_text = _clean_text(orig_raw, limit)
             orig_id = str(rt_mb.get("id") or rt_mb.get("mid") or "")
             orig_is_long = bool(rt_mb.get("isLongText"))
         # 视频帖标志（实测 m.weibo.cn：纯视频微博 page_info.type == "video" 且无
@@ -67,9 +70,13 @@ class MonitorMixin:
             "time": _format_time(created_raw),
             "created_ts": _parse_created_epoch(created_raw),
             "text": own_text,
+            # 清洗前的接口原文：归档库的 `text_raw` 列与"原文重清洗"都要它，
+            # 只存清洗后的 `text` 会让这两条链路永久拿不到数据源。
+            "raw_text": own_raw,
             "is_retweet": is_retweet,
             "orig_name": orig_name,
             "orig_text": orig_text,
+            "orig_raw_text": orig_raw,
             "orig_id": orig_id,
             "orig_is_long": orig_is_long,
             # 本条是否超长（全文按需拉取时用，见 _apply_full_text）
@@ -235,8 +242,16 @@ class MonitorMixin:
         # 图片数上限：消息带图与相册上传共用（0/异常值回退默认）
         max_imgs = self._int_cfg("album_max_images", DEFAULT_MAX_IMAGES) or DEFAULT_MAX_IMAGES
         for post in reversed(new_posts):  # 旧→新依次入队
+            if len(self.pending) >= PENDING_HARD_LIMIT:
+                # 队列满时停下，别把剩余新微博标成已见：留到下一轮再处理。
+                # （以前是标记后丢弃最新一条，积压时反而永久漏掉最新微博。）
+                logger.warning("待推送队列已满，本轮停止检查，剩余微博留到下一轮")
+                break
             seen.add(post["id"])
             seen_list.append(post["id"])
+            # 每标记一条就写回 info：取消/异常打断时 terminate 落盘的 seen_ids
+            # 必须包含已经入队的条目，否则重启后同一条会被再推一遍。
+            info["seen_ids"] = seen_list[-SEEN_IDS_LIMIT:]
             if self._is_expired(post.get("created_ts", 0.0)):
                 continue
             if post["is_retweet"] and not include_rt:
@@ -248,9 +263,6 @@ class MonitorMixin:
             hit = self._keyword_hit(post)
             if hit:
                 logger.info(f"微博 {post['id']} {hit}，已跳过推送")
-                continue
-            if len(self.pending) >= PENDING_HARD_LIMIT:
-                logger.warning("待推送队列已满，丢弃更早的新微博")
                 continue
             # 超 9 图识别补全与视频详情按需拉取：都放在过滤之后，被过滤
             # 掉的帖子不花这些请求；补全在前，_apply_video 能复用它拉到的详情

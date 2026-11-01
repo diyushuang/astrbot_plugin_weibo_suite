@@ -28,9 +28,7 @@ _WHITESPACE_RE = re.compile(r"\s+")
 _PLACEHOLDER_RE = re.compile(r"\{([a-z_]+)\}")
 _LEADING_HASHTAG_RE = re.compile(r"^#[^#\n]{1,50}#\s*")
 _LEADING_MENTION_RE = re.compile(r"^@[\w·-]{1,30}\s*")
-_IMAGE_EXTS = frozenset(
-    {"jpg", "jpeg", "png", "webp", "gif", "heic", "heif", "bmp", "tif", "tiff"}
-)
+_IMAGE_EXTS = frozenset({"jpg", "jpeg", "png", "webp", "gif", "heic", "heif", "bmp", "tif", "tiff"})
 
 
 @dataclass(frozen=True)
@@ -40,7 +38,7 @@ class NamingContext:
     frozen：同一个上下文会被同帖多张图复用，渲染过程绝不允许改它。
     """
 
-    account: str  # 博主昵称，如 "示例博主A"
+    account: str  # 博主昵称，如 "示例博主"
     category: str  # 分类目录名，如 "12、日常分享"
     date: str  # "YYYY-MM-DD"
     index: int  # 该帖内第几张，1 起
@@ -102,9 +100,7 @@ def resolve_category(mapping: dict[str, str], *, uid: str, account: str) -> str:
     return DEFAULT_CATEGORY
 
 
-def sanitize_segment(
-    text: str, *, fallback: str = "未命名", limit: int = MAX_SEGMENT_LEN
-) -> str:
+def sanitize_segment(text: str, *, fallback: str = "未命名", limit: int = MAX_SEGMENT_LEN) -> str:
     """把任意文本清洗成一个可用的路径段（目录名或文件名）。
 
     反斜杠、正斜杠、``: * ? " < > |`` 与全部控制字符（含换行、制表符、NUL）
@@ -238,9 +234,7 @@ def _render(template, ctx: NamingContext) -> str:
         "title": sanitize_segment(ctx.title),
         "ext": _normalize_ext(ctx.ext),
     }
-    return _PLACEHOLDER_RE.sub(
-        lambda match: values.get(match.group(1), match.group(0)), template
-    )
+    return _PLACEHOLDER_RE.sub(lambda match: values.get(match.group(1), match.group(0)), template)
 
 
 def _ensure_ext(name: str, ext: str) -> str:

@@ -154,7 +154,7 @@ def _write_weibo_map(weibo_dir, *, with_image: bool) -> None:
         "account": "示例博主A",
         "published_at": "2026-10-19 10:10",
         "date": "20261019",
-        "text": "先锋无可替代\n我有我的答案",
+        "text": "今天的天气很适合出门\n路上顺手拍了几张照片",
         "image": (
             {
                 "file_name": "【微博@示例博主A】20261019-01：秋日.jpg",
@@ -196,7 +196,7 @@ async def test_checkin_weibo_mode_uses_map_copy_and_image(
 
     assert len(results) == 1
     text = "".join(getattr(segment, "text", "") for segment in results[0].chain)
-    assert "先锋无可替代" in text
+    assert "今天的天气很适合出门" in text
     assert "微博@示例博主A" in text
     assert "2026-10-19" in text
     assert "weibo.com" not in text
@@ -251,7 +251,7 @@ async def test_checkin_import_writes_file(make_plugin, make_event, data_dir, tmp
     source = tmp_path / "微博原创文案.csv"
     source.write_text(
         "序号,发布时间,来源,文案,微博链接\n"
-        '1,"2026-10-19 10:10","微博@示例博主A","先锋无可替代","https://weibo.com/1000000001/RnmlWjQgw"\n',
+        '1,"2026-10-19 10:10","微博@示例博主A","今天的天气很适合出门","https://weibo.com/1000000001/RnmlWjQgw"\n',
         encoding="utf-8",
     )
     plugin = make_plugin()

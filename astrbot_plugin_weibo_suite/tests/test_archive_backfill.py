@@ -231,9 +231,7 @@ async def test_backfill_full_mode_enriches_every_post(fake):
 
 async def test_archive_enrich_only_when_needed(fake):
     fake.full_text = "更长" * 300
-    truncated = make_post(
-        "701", text="截断" * 80, is_long=True, pics=[make_pic("p1")], pic_total=3
-    )
+    truncated = make_post("701", text="截断" * 80, is_long=True, pics=[make_pic("p1")], pic_total=3)
 
     out = await fake.archive_enrich(truncated)
 

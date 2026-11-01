@@ -148,8 +148,7 @@ def add_post(
         }
     )
     items = [
-        {"pid": f"{mid}-{i}", "idx": i, "url": f"https://wx.example/{mid}/{i}.jpg",
-         "ext": "jpg"}
+        {"pid": f"{mid}-{i}", "idx": i, "url": f"https://wx.example/{mid}/{i}.jpg", "ext": "jpg"}
         for i in range(count)
     ]
     store.upsert_media(mid, items)
@@ -262,6 +261,42 @@ async def test_cfb_mode_downloads_missing_originals_once(tmp_path):
     assert result["skipped"] == 2
     assert host.downloads == [MID]
     assert services.bed.calls == []
+
+
+async def test_retry_after_bed_does_not_reupload_original(tmp_path):
+    """已到 bed 的图补跑只补缩略图，避免图床出现重复对象。"""
+    store = make_store(tmp_path)
+    add_post(store, tmp_path, state="bed")
+    bed, vector, library = FakeBed(), FakeVector(), FakeLibrary()
+    host = make_host(tmp_path, store, services=make_services(bed, vector, library))
+
+    result = await host.pipeline_run_post(MID)
+
+    assert result["uploaded"] == 0
+    assert result["thumbed"] == 2
+    assert len(bed.calls) == 2
+    assert all(folder == "thumbnails/" for _path, folder in bed.calls)
+    assert all(row["state"] == "vector" for row in store.list_media(MID))
+
+
+async def test_retry_after_thumb_only_resumes_vector(tmp_path):
+    """缩略图已上传、向量失败：补跑不再碰图床，只重建向量。"""
+    store = make_store(tmp_path)
+    add_post(store, tmp_path, state="thumb")
+    for index, row in enumerate(store.list_media(MID)):
+        store.mark_media(
+            MID, row["pid"], "thumb", thumb_url=f"https://cdn.example/thumb/{index}.jpg"
+        )
+    bed, vector, library = FakeBed(), FakeVector(), FakeLibrary()
+    host = make_host(tmp_path, store, services=make_services(bed, vector, library))
+
+    result = await host.pipeline_run_post(MID)
+
+    assert result["uploaded"] == 0
+    assert result["thumbed"] == 0
+    assert result["vectored"] == 2
+    assert bed.calls == []
+    assert len(vector.batches) == 1
 
 
 async def test_plugin_mode_runs_full_flow(tmp_path):

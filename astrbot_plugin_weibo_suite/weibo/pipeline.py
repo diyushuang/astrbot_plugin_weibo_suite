@@ -146,6 +146,16 @@ def _pipeline_date(timestamp: Any) -> str:
     return datetime.now(_WEIBO_TZ).strftime("%Y-%m-%d")
 
 
+def _pipeline_write_thumb(path: Path, data: bytes) -> None:
+    """把缩略图字节写到 path（含建目录）。
+
+    抽成模块级纯函数是为了能整体丢进 ``asyncio.to_thread``：缩略图虽然小，
+    但成批写入时的 fsync/元数据开销仍会占住事件循环。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+
+
 def _pipeline_compute_features(
     path: str, hash_size: int, *, max_side: int, quality: int
 ) -> tuple[Any, str, bytes]:
@@ -311,13 +321,22 @@ class PipelineMixin:
         if mid in pending:
             return False
         queue = self._pipeline_queue_ref()
-        if queue.full():
-            return False
         pending.add(mid)
         try:
             queue.put_nowait(mid)
         except asyncio.QueueFull:
             pending.discard(mid)
+            # 队列满＝这条微博的图彻底进不了管线。以前直接 return False，
+            # 调用方（archive 的同步回调）不看返回值，于是整帖永久停在
+            # "只有归档、没有图床/向量"的状态，只能靠人工对账才发现。
+            # 这里至少留一条可诊断的 warning，并把计数暴露给面板。
+            self._pipeline_dropped = int(getattr(self, "_pipeline_dropped", 0) or 0) + 1
+            self._pipeline_last_error = f"管线队列已满，丢弃 mid={mid}"
+            logger.warning(
+                "图床管线队列已满，已丢弃 mid=%s（累计丢弃 %d 条，worker 可能卡住）",
+                mid,
+                self._pipeline_dropped,
+            )
             return False
         return True
 
@@ -482,6 +501,8 @@ class PipelineMixin:
         entries: list[Any] = []
         planned: list[dict[str, Any]] = []
         staging = self._pipeline_stage_dir(mid)
+        _bed_rank = _MEDIA_STATES.index("bed") if "bed" in _MEDIA_STATES else 3
+        _thumb_rank = _MEDIA_STATES.index("thumb") if "thumb" in _MEDIA_STATES else 4
         try:
             for position, row in enumerate(pending_rows, start=1):
                 pid = str(_row_get(row, "pid", ""))
@@ -489,6 +510,15 @@ class PipelineMixin:
                     local = self._pipeline_local_path(store, mid, row)
                     if local is None:
                         raise RuntimeError("原图缺失")
+                    # 分步幂等：上一次可能已经传完原图/缩略图才失败，补跑时
+                    # 按 state_rank 跳过已完成步骤，避免图床出现重复对象。
+                    rank = _media_rank(row)
+                    existing_url = str(
+                        _row_get(row, "image_url", "") or _row_get(row, "url", "") or ""
+                    ).strip()
+                    existing_thumb = str(_row_get(row, "thumb_url", "") or "").strip()
+                    need_original = rank < _bed_rank or not existing_url
+                    need_thumb = rank < _thumb_rank or not existing_thumb
                     features, mime, thumb_bytes = await asyncio.to_thread(
                         _pipeline_compute_features,
                         str(local),
@@ -498,7 +528,8 @@ class PipelineMixin:
                     )
                     phash = str(getattr(features, "phash", "") or "")
                     if phash and services.library is not None:
-                        hit = services.library.find_by_phash(phash)
+                        # find_by_phash 会同步扫库，直接调会卡住事件循环
+                        hit = await asyncio.to_thread(services.library.find_by_phash, phash)
                         if hit is not None and str(_row_get(hit, "image_url", "") or "").strip():
                             await asyncio.to_thread(store.mark_media, mid, pid, "vector")
                             stats["skipped"] += 1
@@ -514,25 +545,42 @@ class PipelineMixin:
                     )
                     directory = render_directory(dir_template, context)
                     filename = render_filename(file_template, context)
-                    staged = self._pipeline_stage_original(staging, local, filename)
-                    result = await services.bed.store(str(staged), folder=directory)
-                    original_url = str(getattr(result, "url", "") or "")
-                    if not getattr(result, "ok", False) or not original_url:
-                        raise RuntimeError(str(getattr(result, "message", "") or "图床返回失败"))
-                    await asyncio.to_thread(store.mark_media, mid, pid, "bed")
-                    stats["uploaded"] += 1
-                    thumb_path = staging / thumbnail_name(filename)
-                    thumb_path.write_bytes(thumb_bytes)
-                    thumb_result = await services.bed.store(
-                        str(thumb_path), folder=thumbnail_folder()
-                    )
-                    thumb_url = str(getattr(thumb_result, "url", "") or "")
-                    if not getattr(thumb_result, "ok", False):
-                        raise RuntimeError(
-                            str(getattr(thumb_result, "message", "") or "缩略图上传失败")
+                    # 每张图独立子目录：同帖多图/自定义模板可能渲染出同名文件，
+                    # 直接写 staging 根目录会与硬链接的原图 inode 同名，copy2
+                    # 回落会截断上一张的归档原图（不可逆数据损坏）。
+                    item_dir = staging / f"img{position:02d}"
+                    original_url = existing_url
+                    if need_original:
+                        # 硬链接/copy2 都是同步文件系统操作，大图会阻塞数毫秒到数十毫秒
+                        staged = await asyncio.to_thread(
+                            self._pipeline_stage_original, item_dir, local, filename
                         )
-                    await asyncio.to_thread(store.mark_media, mid, pid, "thumb")
-                    stats["thumbed"] += 1
+                        result = await services.bed.store(str(staged), folder=directory)
+                        original_url = str(getattr(result, "url", "") or "")
+                        if not getattr(result, "ok", False) or not original_url:
+                            raise RuntimeError(
+                                str(getattr(result, "message", "") or "图床返回失败")
+                            )
+                        await asyncio.to_thread(store.mark_media, mid, pid, "bed")
+                        stats["uploaded"] += 1
+                    # 缩略图与原图分开目录，同名也只会落在自己的子目录里；
+                    # 文件名保持不变，图床 thumbnails/ 的命名约定不受影响。
+                    thumb_url = existing_thumb
+                    if need_thumb:
+                        thumb_path = item_dir / "thumb" / thumbnail_name(filename)
+                        await asyncio.to_thread(_pipeline_write_thumb, thumb_path, thumb_bytes)
+                        thumb_result = await services.bed.store(
+                            str(thumb_path), folder=thumbnail_folder()
+                        )
+                        thumb_url = str(getattr(thumb_result, "url", "") or "")
+                        if not getattr(thumb_result, "ok", False):
+                            raise RuntimeError(
+                                str(getattr(thumb_result, "message", "") or "缩略图上传失败")
+                            )
+                        await asyncio.to_thread(
+                            store.mark_media, mid, pid, "thumb", thumb_url=thumb_url
+                        )
+                        stats["thumbed"] += 1
                     file_size = self._pipeline_file_size(local)
                     width = _pipeline_int(getattr(features, "width", 0), 0)
                     height = _pipeline_int(getattr(features, "height", 0), 0)

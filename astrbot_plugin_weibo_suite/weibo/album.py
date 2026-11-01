@@ -7,7 +7,10 @@ from .runtime import *
 
 class AlbumMixin:
     def _album_tmp_root(self) -> Path:
-        assert self._data_dir is not None
+        # 不能用 assert：python -O 会把它整条剥掉，_data_dir 为 None 时
+        # 后面就是 Path(None) 的 TypeError，报错点离现场很远。
+        if self._data_dir is None:
+            raise RuntimeError(f"{PLUGIN_NAME} 数据目录尚未就绪，无法准备相册临时目录")
         return self._data_dir / ALBUM_TMP_DIR
 
     def _wipe_album_tmp(self):
@@ -98,8 +101,22 @@ class AlbumMixin:
         target = self._keyword_album_target(item)
         if target:
             gid, album = target
-            platform = self._parse_umo(sent_sessions[0])[0] if sent_sessions else ""
-            # session 仅作完成通知的落点；platform 未知时通知发不出去，上传不受影响
+            # 完成通知的落点必须和 gid 属于同一平台：以前直接取 sent_sessions[0]
+            # 的平台，多平台（如 qq 群 + 其它适配器群）同时在线时会拼出
+            # "qq:GroupMessage:<别的平台的群号>" 这种根本不存在的会话，
+            # 通知发不出去。这里优先找 sid 恰好等于 gid 的那条会话。
+            platform = ""
+            for candidate in sent_sessions:
+                cand_platform, cand_type, cand_sid = self._parse_umo(candidate)
+                if cand_type == "GroupMessage" and cand_sid == gid and cand_platform:
+                    platform = cand_platform
+                    break
+            if not platform:
+                # 没有现成会话（关键词路由可能指向本轮没被推送的群）：只有当所有
+                # 已推送会话都属于同一平台时才敢复用该平台；多平台并存时留空，
+                # 宁可少发一条完成通知，也不拼一个不存在的会话去误发给别的群。
+                platforms = {self._parse_umo(s)[0] for s in sent_sessions if self._parse_umo(s)[0]}
+                platform = platforms.pop() if len(platforms) == 1 else ""
             session = f"{platform}:GroupMessage:{gid}" if platform else ""
             task = asyncio.create_task(
                 self._album_upload_task(session, platform, gid, dict(item), album)
@@ -283,6 +300,26 @@ class AlbumMixin:
             self._dl_conc = conc
         return self._dl_sem
 
+    async def _media_pace(self) -> None:
+        """媒体请求的轻量限速（见 constants.MEDIA_REQUEST_GAP）。
+
+        这里**故意**不走 `_pace()`：那是 m.weibo.cn 接口侧的 2~5s 风控间隔，
+        媒体在独立 CDN 上，按接口间隔串行会把一批图拖到分钟级。CONTRIBUTING
+        的"所有微博请求都过 `_pace`"指的是接口请求；媒体侧用这个更宽松的
+        削峰间隔，两条限速各自独立、都不允许旁路。新增媒体下载入口时也必须
+        调本方法（`_stream_to_file` 已在入口处调用）。
+        """
+        lock = getattr(self, "_media_pace_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._media_pace_lock = lock
+            self._media_pace_last = 0.0
+        async with lock:
+            wait = self._media_pace_last + MEDIA_REQUEST_GAP - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._media_pace_last = time.monotonic()
+
     async def _validate_media_url(self, url: str):
         """媒体下载前校验：仅 http(s)、host 限微博系 CDN、DNS 不解析到内网/保留地址。"""
         parsed = urlparse(url)
@@ -324,6 +361,11 @@ class AlbumMixin:
         ``_download_pic``（图片，只需兜住的 ``WeiboFetchError`` 一族）。
         """
         assert self._http is not None
+        # 媒体下载同样受 IP 级风控冷却约束：冷却期间每张图继续出网只会加重风控
+        if time.time() < getattr(self, "_blocked_until", 0.0):
+            raise WeiboFetchError("微博风控冷却中，暂停媒体下载")
+        # 媒体也限速，但用 MEDIA_REQUEST_GAP 而不是接口侧的 2~5s：见 _media_pace
+        await self._media_pace()
         headers = {
             "User-Agent": self._ua or UA_POOL[0],
             # 微博媒体 CDN 校验 Referer（视频 CDN 无此头直接 403）
@@ -331,33 +373,51 @@ class AlbumMixin:
         }
         timeout = aiohttp.ClientTimeout(total=timeout_total)
         got = 0
-        async with self._http.get(url, headers=headers, timeout=timeout, proxy=self._proxy) as resp:
-            resp.raise_for_status()
-            ctype = str(resp.headers.get("Content-Type", "")).lower()
-            if "text/html" in ctype:
-                # 风控页与错误页照样回 200，体积也常常过 1KB：只按大小判成功的话，
-                # HTML 会被存成 .jpg 一路传进相册，问题要到很远的地方才爆
-                raise WeiboFetchError(f"拿到的是 HTML 页面（多半被风控拦了）: {url}")
-            declared = _header_int(resp.headers.get("Content-Length"))
-            if declared and declared > max_bytes:
-                raise MediaTooLarge(
-                    f"单个媒体 {declared / 1048576:g}MB 超过 {max_bytes / 1048576:g}MB 上限",
-                    declared,
-                )
-            with dest.open("wb") as fh:
-                async for chunk in resp.content.iter_chunked(65536):
-                    got += len(chunk)
-                    if got > max_bytes:
-                        limit_mb = (
-                            int(max_bytes // 1048576)
-                            if isinstance(max_bytes, int)
-                            else max_bytes / 1048576
-                        )
-                        raise MediaTooLarge(f"单个媒体超过 {limit_mb:g}MB 上限", got)
-                    fh.write(chunk)
-            if declared and got < declared:
-                raise WeiboFetchError(f"下载被截断：收到 {got}B / 应有 {declared}B")
-        return got
+        current = url
+        # 重定向必须自己跟：`_validate_media_url` 只在出网前校验一次，交给 aiohttp
+        # 自动跟随的话，302 目标既不过白名单也不复查私网地址，整条 SSRF 防线就绕开了。
+        for _hop in range(4):
+            async with self._http.get(
+                current,
+                headers=headers,
+                timeout=timeout,
+                proxy=self._proxy,
+                allow_redirects=False,
+            ) as resp:
+                if resp.status in (301, 302, 303, 307, 308):
+                    location = str(resp.headers.get("Location") or "")
+                    if not location:
+                        raise WeiboFetchError(f"媒体重定向缺少 Location: {current}")
+                    current = urljoin(current, location)
+                    await self._validate_media_url(current)
+                    continue
+                resp.raise_for_status()
+                ctype = str(resp.headers.get("Content-Type", "")).lower()
+                if "text/html" in ctype:
+                    # 风控页与错误页照样回 200，体积也常常过 1KB：只按大小判成功的话，
+                    # HTML 会被存成 .jpg 一路传进相册，问题要到很远的地方才爆
+                    raise WeiboFetchError(f"拿到的是 HTML 页面（多半被风控拦了）: {current}")
+                declared = header_int(resp.headers.get("Content-Length"))
+                if declared and declared > max_bytes:
+                    raise MediaTooLarge(
+                        f"单个媒体 {declared / 1048576:g}MB 超过 {max_bytes / 1048576:g}MB 上限",
+                        declared,
+                    )
+                with dest.open("wb") as fh:
+                    async for chunk in resp.content.iter_chunked(65536):
+                        got += len(chunk)
+                        if got > max_bytes:
+                            limit_mb = (
+                                int(max_bytes // 1048576)
+                                if isinstance(max_bytes, int)
+                                else max_bytes / 1048576
+                            )
+                            raise MediaTooLarge(f"单个媒体超过 {limit_mb:g}MB 上限", got)
+                        fh.write(chunk)
+                if declared and got < declared:
+                    raise WeiboFetchError(f"下载被截断：收到 {got}B / 应有 {declared}B")
+                return got
+        raise WeiboFetchError(f"媒体重定向次数过多: {url}")
 
     async def _download_pic(self, pic: dict[str, str], dest: Path) -> Path:
         """下载一张微博图：先取 /large/ 原图，失败退回接口给的原始地址。

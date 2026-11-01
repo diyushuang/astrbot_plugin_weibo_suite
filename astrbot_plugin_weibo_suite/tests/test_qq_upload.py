@@ -167,9 +167,9 @@ def test_auto_unknown_size_never_direct():
         "https://img.example.com/file/a.jpg",
         "http://1.2.3.4/a.jpg",
         "https://[2001:4860:4860::8888]/a.jpg",
-        # 本部署的内网直连地址其实是**公网段** IP（RFC1918 只有 10/8、172.16/12、
+        # 有些部署会把公网段 IP 当作内网直连地址使用（RFC1918 只有 10/8、172.16/12、
         # 192.168/16），句法层面判不出来——内网判定交给 _public_media_url 按配置比对
-        "http://192.0.2.10:7658/file/a.jpg",
+        "http://93.184.216.34:7658/file/a.jpg",
     ],
 )
 def test_public_url_accepted(url):

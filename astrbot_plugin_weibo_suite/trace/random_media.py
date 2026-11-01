@@ -16,6 +16,7 @@ import asyncio
 import json
 import random
 import re
+from asyncio import wait_for as _wait_for
 from collections.abc import Awaitable, Callable
 from urllib.parse import unquote, urlencode, urljoin, urlsplit, urlunsplit
 
@@ -43,6 +44,10 @@ CONTENT_TYPES = frozenset({"image", "video"})
 # 单次响应体读取上限：随机接口只回一行 JSON/文本，1 MiB 足够；避免异常或
 # 被劫持的端点用超大响应体耗尽内存（与 url_guard 的默认上限同量级）
 MAX_RESPONSE_BYTES = 1024 * 1024
+# 一次 /随机图 的总预算（秒）。单次请求各有 timeout，但重试叠加指数退避后
+# 最坏能到十几分钟，期间用户看到的是机器人卡死；超过预算按“图床无响应”
+# 直接失败（用 asyncio.wait_for 而非 asyncio.timeout，兼容 3.10）。
+TOTAL_FETCH_TIMEOUT = 45.0
 
 # URL 扩展名 → 媒体类型：/random 未显式声明类型时按扩展名兜底判断。
 # 取值自 suijitu 插件迁移，覆盖常见图片/视频容器格式。
@@ -62,8 +67,8 @@ THUMBNAIL_DIR = "thumbnails"
 
 # 缩略图被图床改名后，文件名上带的时间戳前缀形如 `1789658616018_`。
 # 实测依据（图床 DB 的 id 与 file_name 两列逐条比对，23,932 条缩略图）：
-#   id 末段      : 1789658622627_【微博_示例博主A】20200228-01：《重生》剧照.jpg
-#   file_name 列 : 【微博@示例博主A】20200228-01：《重生》剧照.jpg
+#   id 末段      : 1789658622627_【微博_示例博主】20240101-01：示例配图.jpg
+#   file_name 列 : 【微博@示例博主】20240101-01：示例配图.jpg
 # 即图床改名规则 = 前置 `{毫秒时间戳}_` + 把文件名里的 `@` 换成 `_`。
 # 这是唯一可靠的特征：`@`→`_` 的替换**不可逆**（无法从改名后的串还原出 `@`），
 # 所以清洗只能做「去掉时间戳前缀」这一步，`@` 只能靠 URL 里的原图直链取回。
@@ -73,7 +78,7 @@ THUMBNAIL_PREFIX_PATTERN = re.compile(r"^\d{10,}_")
 # 之所以要剥离：配文会被下游（引用消息回的、转发回图片的）重新当作「文件名」
 # 解析回来，前缀一旦进到解析入口就会被当成名字的一部分去拼 URL。
 # 反例（线上实测，报错回显的直链里带着 `%F0%9F%96%BC%EF%B8%8F%20`）：
-#   /原图 的引用图分支取到文件名 `🖼️ 【抖音@示例博主A工作室】…【live】.jpeg`
+#   /原图 的引用图分支取到文件名 `🖼️ 【抖音@示例账号】…【live】.jpeg`
 #   → build_imgbed_file_url 拼出 /file/🖼️%20【抖音…】  → 必然 404
 # 注意这是个**循环**：越清洗不掉，越会把带前缀的名字记回历史、再被解析一次。
 #
@@ -525,62 +530,78 @@ class RandomMediaClient:
         retry_count = int(self.settings.get("retry_count") or 0)
         client = await self._http_getter()
         last_error = "获取随机媒体失败"
-        for attempt in range(retry_count + 1):
-            try:
-                async with await client.request(
-                    "GET", api_url, prepare=prepare, timeout=timeout
-                ) as resp:
-                    if resp.status == 403:
-                        # 403 有两种成因，提示必须能区分，否则用户会照着错的方向修：
-                        # ①图床没开随机图功能；②目录不在图床的 allowedDir 白名单里
-                        # （CloudFlare-ImgBed 只回 {"error":"Directory not allowed"}）。
-                        detail = ""
-                        try:
-                            detail = (await self._read_body(resp)).strip()
-                        except Exception:  # 读体失败不影响判定，退回通用提示
+
+        async def _attempt() -> str:
+            nonlocal last_error
+            for attempt in range(retry_count + 1):
+                try:
+                    async with await client.request(
+                        "GET", api_url, prepare=prepare, timeout=timeout
+                    ) as resp:
+                        if resp.status == 403:
+                            # 403 有两种成因，提示必须能区分，否则用户会照着错的方向修：
+                            # ①图床没开随机图功能；②目录不在图床的 allowedDir 白名单里
+                            # （CloudFlare-ImgBed 只回 {"error":"Directory not allowed"}）。
                             detail = ""
-                        if "Directory not allowed" in detail:
-                            hint = (
-                                f"图床返回 403：目录「{api_dir or '(未指定)'}」不在图床允许的"
-                                "目录内。请在图床「系统设置→其他设置→随机图 API」的"
-                                "允许目录中加上该目录，或把插件配置 random_media.default_dir "
-                                "改成已允许的目录"
+                            try:
+                                detail = (await self._read_body(resp)).strip()
+                            except Exception:  # 读体失败不影响判定，退回通用提示
+                                detail = ""
+                            if "Directory not allowed" in detail:
+                                hint = (
+                                    f"图床返回 403：目录「{api_dir or '(未指定)'}」不在图床允许的"
+                                    "目录内。请在图床「系统设置→其他设置→随机图 API」的"
+                                    "允许目录中加上该目录，或把插件配置 random_media.default_dir "
+                                    "改成已允许的目录"
+                                )
+                            elif "Random is disabled" in detail:
+                                hint = (
+                                    "图床返回 403：站点未开启随机图功能，请先在图床后台开启后再试"
+                                )
+                            else:
+                                snippet = f"，图床回应：{detail[:120]}" if detail else ""
+                                hint = f"图床返回 403：站点拒绝了本次请求{snippet}"
+                            logger.warning(
+                                f"随机图接口返回 403（dir={api_dir or '(未指定)'}）：{detail[:200]}"
                             )
-                        elif "Random is disabled" in detail:
-                            hint = "图床返回 403：站点未开启随机图功能，请先在图床后台开启后再试"
+                            raise RandomMediaError(hint)
+                        if not 200 <= resp.status < 300:
+                            last_error = f"图床返回 HTTP {resp.status}"
+                            logger.warning(f"随机图请求失败: {last_error}")
                         else:
-                            snippet = f"，图床回应：{detail[:120]}" if detail else ""
-                            hint = f"图床返回 403：站点拒绝了本次请求{snippet}"
-                        logger.warning(
-                            f"随机图接口返回 403（dir={api_dir or '(未指定)'}）：{detail[:200]}"
-                        )
-                        raise RandomMediaError(hint)
-                    if not 200 <= resp.status < 300:
-                        last_error = f"图床返回 HTTP {resp.status}"
-                        logger.warning(f"随机图请求失败: {last_error}")
-                    else:
-                        body_text = await self._read_body(resp)
-                        media_url = parse_random_response(
-                            body_text,
-                            str(resp.url),
-                            resp.headers.get("Content-Type", ""),
-                        )
-                        if media_url:
-                            return media_url
-                        last_error = "图床未返回有效的媒体地址"
-                        logger.warning(f"随机图请求失败: {last_error}")
-                        logger.debug(f"随机图响应解析失败，响应体（前300字）: {body_text[:300]!r}")
-            except RandomMediaError:
-                raise
-            except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
-                last_error = f"请求失败: {exc}"
-                logger.warning(f"随机图第 {attempt + 1} 次请求失败: {exc}")
-            except Exception as exc:  # 读取响应等未预期错误：记日志后决定是否重试
-                last_error = f"处理响应失败: {exc}"
-                logger.warning(f"随机图第 {attempt + 1} 次请求异常: {exc}")
-            if attempt < retry_count:
-                await asyncio.sleep(min(2**attempt, 8))
-        raise RandomMediaError(last_error)
+                            body_text = await self._read_body(resp)
+                            media_url = parse_random_response(
+                                body_text,
+                                str(resp.url),
+                                resp.headers.get("Content-Type", ""),
+                            )
+                            if media_url:
+                                return media_url
+                            last_error = "图床未返回有效的媒体地址"
+                            logger.warning(f"随机图请求失败: {last_error}")
+                            logger.debug(
+                                f"随机图响应解析失败，响应体（前300字）: {body_text[:300]!r}"
+                            )
+                except RandomMediaError:
+                    raise
+                except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+                    last_error = f"请求失败: {exc}"
+                    logger.warning(f"随机图第 {attempt + 1} 次请求失败: {exc}")
+                except Exception as exc:  # 读取响应等未预期错误：记日志后决定是否重试
+                    last_error = f"处理响应失败: {exc}"
+                    logger.warning(f"随机图第 {attempt + 1} 次请求异常: {exc}")
+                if attempt < retry_count:
+                    await asyncio.sleep(min(2**attempt, 8))
+            raise RandomMediaError(last_error)
+
+        try:
+            # 直接引用 wait_for（而非 asyncio.wait_for）：本模块的 asyncio 可能被
+            # 单测整体替换成只实现 sleep/TimeoutError 的替身
+            return await _wait_for(_attempt(), timeout=TOTAL_FETCH_TIMEOUT)
+        except asyncio.TimeoutError:
+            raise RandomMediaError(
+                f"图床无响应（超过 {TOTAL_FETCH_TIMEOUT:.0f} 秒），请稍后重试"
+            ) from None
 
     @staticmethod
     async def _read_body(resp) -> str:

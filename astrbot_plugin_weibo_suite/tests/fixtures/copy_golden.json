@@ -1,0 +1,727 @@
+{
+  "source": "reference/weibo-copy/output/微博原创文案_{uid}.csv（Node 版 build_weibo_copy.js 的「文案」列；样例正文已替换为脱敏占位文案）",
+  "generated_at": "2026-10-31",
+  "note": "expected 逐字符等于 CSV 文案列，即 Node 版 clean(x.t)；raw 是列表接口截断文本，long_text 非空表示需补回全文。",
+  "cases": [
+    {
+      "uid": "1000000001",
+      "mid": "ArSMRzrjD",
+      "raw": "电视剧《示例剧集1》片段#示例媒体2新春话题# （分享自 @示例媒体1） http://t.cn/A6demoLink01  ​​​",
+      "long_text": "",
+      "expected": "电视剧《示例剧集1》片段",
+      "note": "flag:digits flag:link flag:mid-text-topic flag:paired-topic flag:share-boilerplate"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "Bp9c5gaQV",
+      "raw": "祝我生日快乐～[害羞] http://t.cn/A6demoLink02 ​​​",
+      "long_text": "",
+      "expected": "祝我生日快乐～☺️",
+      "note": "emoji:[害羞] flag:link"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "Bph6facQm",
+      "raw": "谢谢今天为示例博主A送上祝福的所有好朋友们！愿大家都有个快乐、幸福的童年，愿你们每天都进步，一起加油吧～[爱你][马到成功] http://t.cn/A6demoLink03 ​​​",
+      "long_text": "",
+      "expected": "谢谢今天为示例博主A送上祝福的所有好朋友们！愿大家都有个快乐、幸福的童年，愿你们每天都进步，一起加油吧～🥰🏇",
+      "note": "emoji:[爱你] emoji:[马到成功] flag:digits flag:link"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "C4Wqro6k8",
+      "raw": "羊年到了，祝福所有的好朋友们新年进步、开心快乐，示例博主A给大家拜年啦！[大红灯笼][爱红包][爱你] http://t.cn/A6demoLink04 ​​​",
+      "long_text": "",
+      "expected": "羊年到了，祝福所有的好朋友们新年进步、开心快乐，示例博主A给大家拜年啦！🏮🧧🥰",
+      "note": "emoji:[大红灯笼] emoji:[爱你] emoji:[爱红包] flag:digits flag:link"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "CDIYYAAfZ",
+      "raw": "“二”的平方～将犯二儿进行到底[哈哈][哈哈]收工快乐！👧👦✌@演员示例同僚1  ​​​",
+      "long_text": "",
+      "expected": "“二”的平方～将犯二儿进行到底😆😆收工快乐！👧👦✌️@演员示例同僚1",
+      "note": "emoji:[哈哈]"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "D7xelAXme",
+      "raw": "杀青快乐！[耶][蛋糕]感谢导演和每一位合作的老师，使我学习和收获了太多；感谢剧组每一位工作人员，令我倍感温暖和关爱。暂时的“别离”[飞机]，预祝@电视剧示例剧集2 收视长虹，期待下一次合作～[音乐][太阳][微风]  ​​​",
+      "long_text": "",
+      "expected": "杀青快乐！✌️🎂感谢导演和每一位合作的老师，使我学习和收获了太多；感谢剧组每一位工作人员，令我倍感温暖和关爱。暂时的“别离”✈️，预祝@电视剧示例剧集2 收视长虹，期待下一次合作～🎵🌞🍃",
+      "note": "emoji:[太阳] emoji:[微风] emoji:[耶] emoji:[蛋糕] emoji:[音乐] emoji:[飞机]"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "DsgQFkjX3",
+      "raw": "新剧启航，开机大吉！[赞啊] 继续奔跑在理想的路上～✊☀@示例剧组2官微  ​​​",
+      "long_text": "",
+      "expected": "新剧启航，开机大吉！👏 继续奔跑在理想的路上～✊☀️@示例剧组2官微",
+      "note": "emoji:[赞啊]"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "E0jNpdQqy",
+      "raw": "@示例剧组2官微 顺利杀青。完成的同时也会留下遗憾，人生总是需要不断地总结和进取，感念我的恩师和挚友[心]我为自己加油！[拳头][拳头][拳头][太阳][月亮][音乐] ​​​",
+      "long_text": "",
+      "expected": "@示例剧组2官微 顺利杀青。完成的同时也会留下遗憾，人生总是需要不断地总结和进取，感念我的恩师和挚友❤️我为自己加油！✊✊✊🌞🌙🎵",
+      "note": "emoji:[太阳] emoji:[心] emoji:[拳头] emoji:[月亮] emoji:[音乐]"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "G2ugJBUcN",
+      "raw": "厉害不 快夸夸我[偷笑][酷] ​​​",
+      "long_text": "",
+      "expected": "厉害不 快夸夸我🤭😎",
+      "note": "emoji:[偷笑] emoji:[酷]"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "G8GWO8maA",
+      "raw": "做一朵棉花糖，甜甜的～[浮云] ​​​",
+      "long_text": "",
+      "expected": "做一朵棉花糖，甜甜的～☁️",
+      "note": "emoji:[浮云]"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "GgJCHpz1L",
+      "raw": "《示例节目2》@示例同僚2 @示例同僚3 时隔两年我们终于又见面了！[亲亲][亲亲][亲亲]在“示例剧集4”的拍摄现场，“小马瑙”和妹妹特意带着好吃和好玩的礼物🎁来探班🤗[太开心]示例小朋友长大了，更加懂事了！[心]相聚的时光总是短暂的，我们一起期待着和“小后妈”的重聚[抱抱][爱你][抱抱] ​​​",
+      "long_text": "",
+      "expected": "《示例节目2》@示例同僚2 @示例同僚3 时隔两年我们终于又见面了！😘😘😘在“示例剧集4”的拍摄现场，“小马瑙”和妹妹特意带着好吃和好玩的礼物🎁来探班🤗😄示例小朋友长大了，更加懂事了！❤️相聚的时光总是短暂的，我们一起期待着和“小后妈”的重聚🤗🥰🤗",
+      "note": "emoji:[亲亲] emoji:[太开心] emoji:[心] emoji:[抱抱] emoji:[爱你]"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "H0PNTvpD1",
+      "raw": "分享一枚吃货😋[猪头] ​​​",
+      "long_text": "",
+      "expected": "分享一枚吃货😋🐷",
+      "note": "emoji:[猪头]"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "HAgflcu03",
+      "raw": "今日任务：骂示例角色2。\n每一份职业都值得被尊重，该骂[怒骂]\n最难听的话伤害了最亲的人，该打[顶]\n生气😡生气😡生气😡\n#电视剧示例剧集4# ​​​",
+      "long_text": "",
+      "expected": "今日任务：骂示例角色2。\n每一份职业都值得被尊重，该骂🤬\n最难听的话伤害了最亲的人，该打🔝\n生气😡生气😡生气😡",
+      "note": "emoji:[怒骂] emoji:[顶] flag:mid-text-topic flag:multiline flag:paired-topic"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "HBbF82ykU",
+      "raw": "现在的示例角色2：学习，我的心里只有学习！[给力][给力][耶][加油][加油][加油][加油][加油][加油]冲鸭示例角色2！#idoltube##电视剧示例剧集4# http://t.cn/A6demoLink05 ​​​",
+      "long_text": "",
+      "expected": "现在的示例角色2：学习，我的心里只有学习！👍👍✌️💪💪💪💪💪💪冲鸭示例角色2！",
+      "note": "emoji:[加油] emoji:[给力] emoji:[耶] flag:digits flag:link flag:mid-text-topic flag:paired-topic"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "HyL0ymNmz",
+      "raw": "#idoltube##示例剧集4#\n示例角色2吓到大家了，我替她给大家赔罪哈～～\n所以......\n下一期走进广播站是啥时候？？[嘘] http://t.cn/A6demoLink06 ​​​",
+      "long_text": "",
+      "expected": "示例角色2吓到大家了，我替她给大家赔罪哈～～\n所以......\n下一期走进广播站是啥时候？？🤫",
+      "note": "emoji:[嘘] flag:digits flag:link flag:mid-text-topic flag:multiline flag:paired-topic"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "IpRI0dU7p",
+      "raw": "#示例博主A最新CP超嫩# 我带着@示例品牌2 又来啦！先看书还是先喝示例品牌2呢？点击视频，一睹为快[挤眼] 新一代示例品牌2纯牛奶，好营养，嫩活喝得到！还有趣味H5，新年带你嫩回童年，与示例品牌2一起#2020嫩一下#吧！快戳链接，嫩活迎小年！ 👉 http://t.cn/A6demoLink07 http://t.cn/A6demoLink08 ​​​",
+      "long_text": "",
+      "expected": "我带着@示例品牌2 又来啦！先看书还是先喝示例品牌2呢？点击视频，一睹为快😉 新一代示例品牌2纯牛奶，好营养，嫩活喝得到！还有趣味H5，新年带你嫩回童年，与示例品牌2一起吧！快戳链接，嫩活迎小年！",
+      "note": "emoji:[挤眼] flag:digits flag:link flag:mid-text-topic flag:paired-topic flag:pointer"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "JFs9Htp8A",
+      "raw": "让我看看是谁还没有看示例剧集7[熊猫]#微博剧场# ​​​",
+      "long_text": "",
+      "expected": "让我看看是谁还没有看示例剧集7🐼",
+      "note": "emoji:[熊猫] flag:mid-text-topic flag:paired-topic"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "K0lH4eRgd",
+      "raw": "#示例剧集7##示例剧集7特效海报# 你相信光吗[星星] http://t.cn/A6demoLink09 ​​​",
+      "long_text": "",
+      "expected": "你相信光吗⭐",
+      "note": "emoji:[星星] flag:digits flag:link flag:mid-text-topic flag:paired-topic"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "K2OenEjHb",
+      "raw": "#电视剧示例剧集7# 鉴于近期总有人反复说示例剧集7是神主，导致示例剧集7自己都快要信了。[可怜]\n特此拆谎，她明明是一个可爱的小怪物！请停止蓄意进行错误引导。也请多多关注示例剧集7的作品《织火少女传》《点亮诚实之光》。[兔子] ​​​",
+      "long_text": "",
+      "expected": "鉴于近期总有人反复说示例剧集7是神主，导致示例剧集7自己都快要信了。🥺\n特此拆谎，她明明是一个可爱的小怪物！请停止蓄意进行错误引导。也请多多关注示例剧集7的作品《织火少女传》《点亮诚实之光》。🐰",
+      "note": "emoji:[兔子] emoji:[可怜] flag:multiline flag:paired-topic"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "K4vL3f9Zy",
+      "raw": "不好意思又让大家操心了[二哈] ​​​",
+      "long_text": "",
+      "expected": "不好意思又让大家操心了🐶",
+      "note": "emoji:[二哈]"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "KAsC5tGHs",
+      "raw": "啊 黑猫警长给我过生日[泪]\n好幸福呜呜 ​​​",
+      "long_text": "",
+      "expected": "啊 黑猫警长给我过生日😢\n好幸福呜呜",
+      "note": "emoji:[泪] flag:multiline"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "L8JfxsIMr",
+      "raw": "#示例剧集5全员不剧透协议# 我清楚我知道我了解但我不说，因为听说剧透会被抓进循环里[闭嘴]#示例剧集5定档0111# ​​​",
+      "long_text": "",
+      "expected": "我清楚我知道我了解但我不说，因为听说剧透会被抓进循环里🤐",
+      "note": "emoji:[闭嘴] flag:digits flag:mid-text-topic flag:paired-topic"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "LAj2cdksR",
+      "raw": "#示例综艺2露营演唱会# 划火柴还是滑铁卢[晕]#示例综艺2# ​​​",
+      "long_text": "",
+      "expected": "划火柴还是滑铁卢😵",
+      "note": "emoji:[晕] flag:mid-text-topic flag:paired-topic"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "LCqCCCD2F",
+      "raw": "#和示例综艺2一起浅拍一夏# 兼职剧照师的那些天[喵喵]#示例综艺2##示例手册# ​​​",
+      "long_text": "",
+      "expected": "兼职剧照师的那些天🐱",
+      "note": "emoji:[喵喵] flag:mid-text-topic flag:paired-topic"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "LDEcirguM",
+      "raw": "今晚剧情好热闹，在线吃示例角色2的瓜[吃瓜]#示例剧集4续##微博剧场# ​​​",
+      "long_text": "",
+      "expected": "今晚剧情好热闹，在线吃示例角色2的瓜🍉",
+      "note": "emoji:[吃瓜] flag:digits flag:mid-text-topic flag:paired-topic"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "LDurcsbuE",
+      "raw": "新手小司机上线[揣手] 我应该开往________？\n#示例综艺2##示例综艺2读书分享会# ​​​",
+      "long_text": "",
+      "expected": "新手小司机上线🤲 我应该开往________？",
+      "note": "emoji:[揣手] flag:mid-text-topic flag:multiline flag:paired-topic"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "LaAYyzp31",
+      "raw": "如果你遇到#电视剧示例剧集5#，你的专业能为示例角色1做什么？我只能替她演一遍了[笑cry] #示例博主A和示例角色1的循环记录##微博剧场# ​​​",
+      "long_text": "",
+      "expected": "如果你遇到，你的专业能为示例角色1做什么？我只能替她演一遍了😂",
+      "note": "emoji:[笑cry] flag:mid-text-topic flag:paired-topic"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "LaL4GySrW",
+      "raw": "巴啦啦大魔仙🧚‍♀️#明星剧好玩##电视剧示例剧集5##示例博主A和示例角色1的循环记录# ​​​",
+      "long_text": "",
+      "expected": "巴啦啦大魔仙🧚‍♀️",
+      "note": "flag:mid-text-topic flag:paired-topic flag:zwj"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "LbmA0wCIa",
+      "raw": "示例角色1终究是错付了[允悲]#idoltube##示例博主A和示例角色1的循环记录##电视剧示例剧集5# http://t.cn/A6demoLink10 ​​​",
+      "long_text": "",
+      "expected": "示例角色1终究是错付了😭",
+      "note": "emoji:[允悲] flag:digits flag:link flag:mid-text-topic flag:paired-topic"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "Lbw6QlJK1",
+      "raw": "示例角色1和我同款卡农后遗症[单身狗]#idoltube##示例博主A和示例角色1的循环记录# http://t.cn/A6demoLink11 ​​​",
+      "long_text": "",
+      "expected": "示例角色1和我同款卡农后遗症🐾",
+      "note": "emoji:[单身狗] flag:digits flag:link flag:mid-text-topic flag:paired-topic"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "Lvnx8z2LE",
+      "raw": "#示例剧集12隔空比舞# 这动作感觉可以一直循环[并不简单]#电视剧示例剧集12# http://t.cn/A6demoLink12 ​​​",
+      "long_text": "",
+      "expected": "这动作感觉可以一直循环🧐",
+      "note": "emoji:[并不简单] flag:digits flag:link flag:mid-text-topic flag:paired-topic"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "M80DGwR5L",
+      "raw": "#示例博主A[超话]#2⃣️0⃣️ ​​​",
+      "long_text": "",
+      "expected": "2⃣️0⃣️",
+      "note": "flag:digits flag:keycap flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "NFsVX9CBZ",
+      "raw": "[咖啡]@示例同僚4 #示例剧集9# ​​​",
+      "long_text": "",
+      "expected": "☕@示例同僚4",
+      "note": "emoji:[咖啡] flag:mid-text-topic flag:paired-topic"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "OkD0MmjoG",
+      "raw": "#示例剧集8全员To度# 示例角色7真正的心态王者，长公主代办“To度”先码住[哇]#示例剧集8##示例剧集8定档0626# ​​​",
+      "long_text": "",
+      "expected": "示例角色7真正的心态王者，长公主代办“To度”先码住😲",
+      "note": "emoji:[哇] flag:digits flag:mid-text-topic flag:paired-topic"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "OlrxLbE3J",
+      "raw": "[给你小心心]#示例剧集8##示例剧集8热度破万# ​​​",
+      "long_text": "",
+      "expected": "💕",
+      "note": "emoji:[给你小心心] flag:mid-text-topic flag:paired-topic"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "OnoXLygD8",
+      "raw": "#青环5影视投资大赛# 总能有蒙对的时候[思考]#示例综艺1# http://t.cn/A6demoLink13 ​​​",
+      "long_text": "",
+      "expected": "总能有蒙对的时候🤔",
+      "note": "emoji:[思考] flag:digits flag:link flag:mid-text-topic flag:paired-topic"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "P6NJEm0yP",
+      "raw": "#我心选的星光时刻# 和学生证来张合照！属于我的学生时代杀青了，那就继续翻开人生的下一页吧📚🚶‍♀️2025年1月4日，#示例平台1星光大赏# 示例地区见~~✨✨✨ ​​​",
+      "long_text": "",
+      "expected": "和学生证来张合照！属于我的学生时代杀青了，那就继续翻开人生的下一页吧📚🚶‍♀️2025年1月4日， 示例地区见~~✨✨✨",
+      "note": "flag:digits flag:mid-text-topic flag:paired-topic flag:zwj"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "PC8x71rDV",
+      "raw": "#电视剧示例剧集6[超话]# \n图一是上学路上还有点“起床气”的示例角色10。\n示例角色5成长观察2.0#电视剧示例剧集6# ​​​",
+      "long_text": "",
+      "expected": "图一是上学路上还有点“起床气”的示例角色10。\n示例角色5成长观察2.0",
+      "note": "flag:digits flag:mid-text-topic flag:multiline flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "PsQi2dADb",
+      "raw": "示例老师，一路走好，永远怀念您。[蜡烛][蜡烛] ​​​",
+      "long_text": "",
+      "expected": "示例老师，一路走好，永远怀念您。🕯️🕯️",
+      "note": "emoji:[蜡烛]"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "Q6M0ku8ql",
+      "raw": "#明星生日汇# 点击查收[耶][ok]的一些瞬间http://t.cn/A6demoLink14 ​​​",
+      "long_text": "",
+      "expected": "点击查收✌️👌的一些瞬间",
+      "note": "emoji:[ok] emoji:[耶] flag:digits flag:link flag:paired-topic"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "Qs5Iy9gBK",
+      "raw": "新春快乐[马上有福] 送大家电子烟花 ε(*･ω･)_/ﾟ:･🧨 ​​​",
+      "long_text": "",
+      "expected": "新春快乐🐎 送大家电子烟花 ε(*･ω･)_/ﾟ:･🧨",
+      "note": "emoji:[马上有福]"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "R4RayynnB",
+      "raw": "端午安康[粽子] ​​​",
+      "long_text": "",
+      "expected": "端午安康🍙",
+      "note": "emoji:[粽子]"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "Rc1WLALhv",
+      "raw": "[心][yeah]#奇遇一夏# ​​​",
+      "long_text": "",
+      "expected": "❤️🤟",
+      "note": "emoji:[yeah] emoji:[心] flag:mid-text-topic flag:paired-topic"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "Rf0aUhYY4",
+      "raw": "很开心成为示例品牌1全球品牌合伙人&咖啡首席推荐官。\n寻味之旅即将启航，跟我一起出发，探索全球风味灵感~🛳️⚓\n\n#示例品牌1咖啡#全球风味，稳在这一杯🌍\nhttp://t.cn/A6demoLink15\n\n#示例品牌1##示例博主A代言示例品牌1咖啡##示例博主A爱喝示例品牌1虎斑橘拿铁# ​​​",
+      "long_text": "",
+      "expected": "很开心成为示例品牌1全球品牌合伙人&咖啡首席推荐官。\n寻味之旅即将启航，跟我一起出发，探索全球风味灵感~🛳️⚓\n全球风味，稳在这一杯🌍",
+      "note": "flag:link flag:mid-text-topic flag:multiline flag:paired-topic flag:pure-link-line"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "Riy9gqX5X",
+      "raw": "@示例品牌3 大陆首家旗舰店正式揭幕。\n\n步入门店，复刻工厂存储方式的铝镁合金钢卷迎宾墙呈现出严谨的工业力量感；走进会客区，多款典藏古董箱与文物修缮类作品呈现品牌演进历程，诠释着“修复、传承与长久陪伴”的精神。\n\nPersonal 系列银色铝镁合金斜挎包，搭配 示例品牌3 × 示例品牌4 黑色飞行员框款防护镜，赋",
+      "long_text": "@示例品牌3 大陆首家旗舰店正式揭幕。\n\n步入门店，复刻工厂存储方式的铝镁合金钢卷迎宾墙呈现出严谨的工业力量感；走进会客区，多款典藏古董箱与文物修缮类作品呈现品牌演进历程，诠释着“修复、传承与长久陪伴”的精神。\n\nPersonal 系列银色铝镁合金斜挎包，搭配 示例品牌3 × 示例品牌4 黑色飞行员框款防护镜，赋予造型率性张力。\n\n前往 示例品牌3 示例商场旗舰店全新空间，共同解锁属于你的出行灵感。\n\n#示例品牌3##示例品牌3不止一生##日默瓦大陆首家旗舰店##日默瓦上海旗舰店开业##示例品牌3Personal#http://t.cn/A6demoLink16",
+      "expected": "@示例品牌3 大陆首家旗舰店正式揭幕。\n步入门店，复刻工厂存储方式的铝镁合金钢卷迎宾墙呈现出严谨的工业力量感；走进会客区，多款典藏古董箱与文物修缮类作品呈现品牌演进历程，诠释着“修复、传承与长久陪伴”的精神。\nPersonal 系列银色铝镁合金斜挎包，搭配 示例品牌3 × 示例品牌4 黑色飞行员框款防护镜，赋予造型率性张力。\n前往 示例品牌3 示例商场旗舰店全新空间，共同解锁属于你的出行灵感。",
+      "note": "flag:multiline flag:truncated"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "RkkQXBT3T",
+      "raw": "和去年一样的🎂愿望～🌊🏝️💫🏜️⛰️🌠🚶🏻‍♀️‍➡️👑🌄 ​​​",
+      "long_text": "",
+      "expected": "和去年一样的🎂愿望～🌊🏝️💫🏜️⛰️🌠🚶🏻‍♀️‍➡️👑🌄",
+      "note": "flag:pointer flag:zwj"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "Rn4FItU91",
+      "raw": "示例角色8，要和你说再见啦。\n\n很开心这段时间成为你，谢谢你来到我的面前，让我看见你向上生长的样子。\n也感谢大家和示例角色8一起，升级打怪，陪着示例角色8走到今天。\n\n愿我们既有勇往直前的底气，也拥有接纳不完美的勇气。\n愿大家都可以满分通关，都成为自己的「示例剧集13」💛\n\n#示例剧集13收官# #电视剧示例剧集13# #示例剧集13",
+      "long_text": "示例角色8，要和你说再见啦。\n\n很开心这段时间成为你，谢谢你来到我的面前，让我看见你向上生长的样子。\n也感谢大家和示例角色8一起，升级打怪，陪着示例角色8走到今天。\n\n愿我们既有勇往直前的底气，也拥有接纳不完美的勇气。\n愿大家都可以满分通关，都成为自己的「示例剧集13」💛\n\n#示例剧集13收官# #电视剧示例剧集13# #示例剧集13打卡时刻#",
+      "expected": "示例角色8，要和你说再见啦。\n很开心这段时间成为你，谢谢你来到我的面前，让我看见你向上生长的样子。\n也感谢大家和示例角色8一起，升级打怪，陪着示例角色8走到今天。\n愿我们既有勇往直前的底气，也拥有接纳不完美的勇气。\n愿大家都可以满分通关，都成为自己的「示例剧集13」💛",
+      "note": "flag:mid-text-topic flag:multiline flag:paired-topic flag:trailing-topic flag:truncated"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "IdKDIE1AC",
+      "raw": "#示例博主A[超话]# 就要出成绩了，你紧张吗？[doge]无奖竞猜，示例角色9的分数是___？今晚揭晓答案[馋嘴][馋嘴]#示例剧集14# ​​​",
+      "long_text": "",
+      "expected": "就要出成绩了，你紧张吗？🐕无奖竞猜，示例角色9的分数是___？今晚揭晓答案🤤🤤",
+      "note": "emoji:[doge] emoji:[馋嘴] flag:mid-text-topic flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "ImR7mmoUK",
+      "raw": "#示例博主A[超话]#Fourtry#示例综艺3# 分店限时营业，继rapstar后@示例博主A 又将解锁闪亮新身份[舔屏]锁定http://t.cn/A6demoLink17  #示例博主A招财小红帽# ​​​",
+      "long_text": "",
+      "expected": "Fourtry 分店限时营业，继rapstar后@示例博主A 又将解锁闪亮新身份🥵锁定",
+      "note": "emoji:[舔屏] flag:link flag:mid-text-topic flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "JglLUgghM",
+      "raw": "#示例博主A[超话]#雨过天晴，逛逛街啦[羞嗒嗒][耶] ​​​",
+      "long_text": "",
+      "expected": "雨过天晴，逛逛街啦😳✌️",
+      "note": "emoji:[羞嗒嗒] emoji:[耶] flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "Jkiiishvy",
+      "raw": "#示例博主A[超话]##你最期待的大学第一课# 解锁新身份🔓新生示例博主A来报道啦～学霸老师们组团开课，想想都好期待，好奇ing[Wow][Wow]http://t.cn/A6demoLink18  @示例平台1VIP，观看#大学第一课#直播，和@示例博主A 一起学习吧！ http://t.cn/A6demoLink19 ​​​",
+      "long_text": "",
+      "expected": "解锁新身份🔓新生示例博主A来报道啦～学霸老师们组团开课，想想都好期待，好奇ing😮😮 @示例平台1VIP，观看直播，和@示例博主A 一起学习吧！",
+      "note": "emoji:[Wow] flag:digits flag:link flag:mid-text-topic flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "K5INGbEY3",
+      "raw": "#示例博主A[超话]# 建议示例角色6愿望清单更新一下[握手]#示例剧集11# ​​​",
+      "long_text": "",
+      "expected": "建议示例角色6愿望清单更新一下🤝",
+      "note": "emoji:[握手] flag:mid-text-topic flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "K5fXY1V2y",
+      "raw": "#示例博主A[超话]# 示例角色6的经历提醒大家，做事不要冲动[跪了]#示例剧集11# ​​​",
+      "long_text": "",
+      "expected": "示例角色6的经历提醒大家，做事不要冲动🙇",
+      "note": "emoji:[跪了] flag:mid-text-topic flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "L4twExpqk",
+      "raw": "#示例博主A[超话]# 🧚🏼‍♀️开心小精灵@示例博主A 突然出现 ，当然要拍照记录啦~快乐无限制，周末愉快喔[玉兔] ​​​",
+      "long_text": "",
+      "expected": "🧚🏼‍♀️开心小精灵@示例博主A 突然出现 ，当然要拍照记录啦~快乐无限制，周末愉快喔🐇",
+      "note": "emoji:[玉兔] flag:paired-topic flag:zwj sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "LA5uu6oZB",
+      "raw": "#示例博主A[超话]# 本周#示例综艺2#超长加更，特别企划即将上线[666]@示例博主A 独家预告来袭～今日中午12：00起，持续锁定示例平台3、示例平台2，欢乐翻倍，精彩不停[憧憬]#示例手册# http://t.cn/A6demoLink20 ​​​",
+      "long_text": "",
+      "expected": "本周超长加更，特别企划即将上线🤙@示例博主A 独家预告来袭～今日中午12：00起，持续锁定示例平台3、示例平台2，欢乐翻倍，精彩不停😍",
+      "note": "emoji:[666] emoji:[憧憬] flag:digits flag:link flag:mid-text-topic flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "LAireoaVp",
+      "raw": "#示例博主A[超话]##示例综艺2#山顶露营进行中，虽然山雾缭绕，但热情不减[鼓掌]第三期正片更新在即，http://t.cn/A6demoLink21  嗨起来🤟 ​​​",
+      "long_text": "",
+      "expected": "山顶露营进行中，虽然山雾缭绕，但热情不减👏第三期正片更新在即， 嗨起来🤟",
+      "note": "emoji:[鼓掌] flag:digits flag:link flag:mid-text-topic flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "LBlV9B8tb",
+      "raw": "#示例博主A[超话]# ⛅️天气终于放晴啦，#示例综艺2#沙滩运动会速速安排上，一场热火朝天的湖边竞技即将开始[偷乐]和@示例博主A 一起冲呀[打call][打call][打call] #示例手册# ​​​",
+      "long_text": "",
+      "expected": "⛅️天气终于放晴啦，沙滩运动会速速安排上，一场热火朝天的湖边竞技即将开始🤭和@示例博主A 一起冲呀📣📣📣",
+      "note": "emoji:[偷乐] emoji:[打call] flag:mid-text-topic flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "LBluYrPcQ",
+      "raw": "#示例博主A[超话]##示例博主A的示例手账#@示例博主A 库存放送啦～[送花花]#以不变应万变# http://t.cn/A6demoLink22 ​​​",
+      "long_text": "",
+      "expected": "@示例博主A 库存放送啦～🌹",
+      "note": "emoji:[送花花] flag:digits flag:link flag:mid-text-topic flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "LEcGtohk7",
+      "raw": "#示例博主A[超话]##示例剧集4续#第五回【实习期天天熬夜 按时交片搞事业】示例角色2考勤表送达～没有困难的工作，只有勇敢的示例角色2@示例博主A [冲刺]#喵喵的隐藏彩蛋##示例博主A示例角色2# ​​​",
+      "long_text": "",
+      "expected": "第五回【实习期天天熬夜 按时交片搞事业】示例角色2考勤表送达～没有困难的工作，只有勇敢的示例角色2@示例博主A 🏃",
+      "note": "emoji:[冲刺] flag:digits flag:mid-text-topic flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "LEyd9cchU",
+      "raw": "#示例博主A[超话]##示例手册#小小的预告一下，本期#示例综艺2#不仅有飞拉达绳索攀爬，更有刺激值10000+的山间大摆荡[好喜欢]http://t.cn/A6demoLink23 ​​​",
+      "long_text": "",
+      "expected": "小小的预告一下，本期不仅有飞拉达绳索攀爬，更有刺激值10000+的山间大摆荡💖",
+      "note": "emoji:[好喜欢] flag:digits flag:link flag:mid-text-topic flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "LFChFu7iG",
+      "raw": "#示例博主A[超话]##示例手册# 寻找山野风情，玩转示例市集。http://t.cn/A6demoLink24  浪漫相聚#示例综艺2#篝火音乐会[桃花] ​​​",
+      "long_text": "",
+      "expected": "寻找山野风情，玩转示例市集。 浪漫相聚篝火音乐会🌸",
+      "note": "emoji:[桃花] flag:digits flag:link flag:mid-text-topic flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "LbEXFtnbR",
+      "raw": "#示例博主A[超话]##示例角色1循环回传影像# 示例角色1@示例博主A 进入待机的日子，想她[抱一抱]#示例博主A和示例角色1的循环记录# ​ ​​​",
+      "long_text": "",
+      "expected": "示例角色1@示例博主A 进入待机的日子，想她🫂",
+      "note": "emoji:[抱一抱] flag:mid-text-topic flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "MxGvVcNaM",
+      "raw": "#示例博主A[超话]# 大家下午好[笑哈哈]快来查收@示例博主A 寄来的车窗明信片[照相机] ​​​",
+      "long_text": "",
+      "expected": "大家下午好🤣快来查收@示例博主A 寄来的车窗明信片📷",
+      "note": "emoji:[照相机] emoji:[笑哈哈] flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "NB1BaDzXF",
+      "raw": "#示例博主A[超话]# 斑驳陆离，光影流动，是属于@示例博主A 的蓝调时刻[相爱]#示例博主A的示例手账# http://t.cn/A6demoLink25 ​​​",
+      "long_text": "",
+      "expected": "斑驳陆离，光影流动，是属于@示例博主A 的蓝调时刻💑",
+      "note": "emoji:[相爱] flag:digits flag:link flag:mid-text-topic flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "ND0OrzQrz",
+      "raw": "#示例博主A[超话]# 🍒#示例博主A示例角色4# \n静谧冰雪，旖旎梦境，送上一条@示例博主A 独家侧写[雪花] ​​​",
+      "long_text": "",
+      "expected": "🍒\n静谧冰雪，旖旎梦境，送上一条@示例博主A 独家侧写❄️",
+      "note": "emoji:[雪花] flag:mid-text-topic flag:multiline flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "NEGc6qbgC",
+      "raw": "#示例博主A[超话]#   🍬#示例博主A的果味补给站# 🍒#示例博主A示例角色4# \n冬日与果相伴[比耶]快来和示例角色4@示例博主A 微博评论互动，get惊喜特效吧~#示例剧集9# ​​​",
+      "long_text": "",
+      "expected": "🍬 🍒\n冬日与果相伴✌️快来和示例角色4@示例博主A 微博评论互动，get惊喜特效吧~",
+      "note": "emoji:[比耶] flag:mid-text-topic flag:multiline flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "NEpk25lev",
+      "raw": "#示例博主A[超话]# 🍒#示例博主A示例角色4# \n一月末。\n随机掉落两张@示例博主A  的工作花絮。\n#示例博主A的果味补给站# 即将上线，敬请关注[我来了] ​​​",
+      "long_text": "",
+      "expected": "🍒\n一月末。\n随机掉落两张@示例博主A 的工作花絮。\n 即将上线，敬请关注🙌",
+      "note": "emoji:[我来了] flag:mid-text-topic flag:multiline flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "NFUMPkS8z",
+      "raw": "#示例博主A[超话]# 带着示例角色4@示例博主A 给大家送来新春祝福[挂灯笼]\n新的一年愿大家可爱不减，事事顺意[送福] http://t.cn/A6demoLink26 ​​​",
+      "long_text": "",
+      "expected": "带着示例角色4@示例博主A 给大家送来新春祝福[挂灯笼]\n新的一年愿大家可爱不减，事事顺意🎁",
+      "note": "emoji:[送福] flag:digits flag:link flag:multiline flag:paired-topic sticker:[挂灯笼] sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "Nkz7AjrmS",
+      "raw": "#示例博主A[超话]##示例角色3的自习室#⏰早读卡，滴[困]@示例博主A #示例博主A示例角色3# ​​​",
+      "long_text": "",
+      "expected": "⏰早读卡，滴😪@示例博主A",
+      "note": "emoji:[困] flag:mid-text-topic flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "NlaIgfdju",
+      "raw": "#示例博主A[超话]##示例角色3的自习室#⏰早读卡，[彩虹屁]@示例博主A #示例博主A示例角色3# ​​​",
+      "long_text": "",
+      "expected": "⏰早读卡，🌈@示例博主A",
+      "note": "emoji:[彩虹屁] flag:mid-text-topic flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "NluYkv0V8",
+      "raw": "#示例博主A[超话]# 🌾#示例博主A0929生日快乐# 🚂呜呜呜~小火车已停靠到站，21岁的@示例博主A 你好呀，欢迎来到新一岁的检票点，准备好，我们要再次出发了噢！祝你生日快乐，中秋也快乐[赢牛奶] ​​​",
+      "long_text": "",
+      "expected": "🌾 🚂呜呜呜~小火车已停靠到站，21岁的@示例博主A 你好呀，欢迎来到新一岁的检票点，准备好，我们要再次出发了噢！祝你生日快乐，中秋也快乐[赢牛奶]",
+      "note": "flag:digits flag:mid-text-topic flag:paired-topic sticker:[赢牛奶] sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "NlvmSzL6M",
+      "raw": "#示例博主A[超话]##示例博主A0929生日快乐#今天天气很好，阳光和花儿也好，它们都在和你@示例博主A 说生日快乐[爱慕]那么希望你今天快乐，明天快乐，天天快乐~#示例博主A的示例手账# http://t.cn/A6demoLink27 ​​​",
+      "long_text": "",
+      "expected": "今天天气很好，阳光和花儿也好，它们都在和你@示例博主A 说生日快乐😻那么希望你今天快乐，明天快乐，天天快乐~",
+      "note": "emoji:[爱慕] flag:digits flag:link flag:mid-text-topic flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "NmGRIqBXq",
+      "raw": "#示例博主A[超话]##示例角色3的自习室#⏰早读卡，滴[睡]@示例博主A #示例博主A示例角色3# ​​​",
+      "long_text": "",
+      "expected": "⏰早读卡，滴😴@示例博主A",
+      "note": "emoji:[睡] flag:mid-text-topic flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "NmZSA3g4m",
+      "raw": "#示例博主A[超话]##示例角色3的自习室# ⏰打瞌睡的后果是[委屈]：时间紧迫，今天需要一次性背完stuv四个首字母开头的单词[抓狂]，坚持=不辜负自己！@示例博主A #示例博主A示例角色3# ​​​",
+      "long_text": "",
+      "expected": "⏰打瞌睡的后果是😔：时间紧迫，今天需要一次性背完stuv四个首字母开头的单词🤯，坚持=不辜负自己！@示例博主A",
+      "note": "emoji:[委屈] emoji:[抓狂] flag:mid-text-topic flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "NmeKujNui",
+      "raw": "#示例博主A[超话]##示例角色3的自习室#⏰早读卡，滴[嘻嘻]@示例博主A #示例博主A示例角色3# ​​​",
+      "long_text": "",
+      "expected": "⏰早读卡，滴😁@示例博主A",
+      "note": "emoji:[嘻嘻] flag:mid-text-topic flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "Nmgkad8Ax",
+      "raw": "#示例博主A[超话]##hello时装周# 灵感缪斯[鲜花]触碰浪漫，出发吧，现在。一则@示例博主A 惊喜花絮送达[打call]#示例博主A的示例手账# http://t.cn/A6demoLink28 ​​​",
+      "long_text": "",
+      "expected": "灵感缪斯💐触碰浪漫，出发吧，现在。一则@示例博主A 惊喜花絮送达📣",
+      "note": "emoji:[打call] emoji:[鲜花] flag:digits flag:link flag:mid-text-topic flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "NmhGNbQnP",
+      "raw": "#示例博主A[超话]##示例角色3青春日记# 成长，就是面对错误的事情，勇敢说不。嗨！示例角色3@示例博主A ，你已经成长为可以保护妹妹的大人了呢[赞]今晚20:00，一起来示例平台2#示例剧集10# 见证#示例博主A示例角色3# 的蜕变[打call] ​​​",
+      "long_text": "",
+      "expected": "成长，就是面对错误的事情，勇敢说不。嗨！示例角色3@示例博主A ，你已经成长为可以保护妹妹的大人了呢👍今晚20:00，一起来示例平台2 见证 的蜕变📣",
+      "note": "emoji:[打call] emoji:[赞] flag:digits flag:mid-text-topic flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "NmoelcpJH",
+      "raw": "#示例博主A[超话]##示例角色3的自习室#⏰早读卡，滴[举手]@示例博主A #示例博主A示例角色3# ​​​",
+      "long_text": "",
+      "expected": "⏰早读卡，滴🙋@示例博主A",
+      "note": "emoji:[举手] flag:mid-text-topic flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "NnefNzciY",
+      "raw": "#示例博主A[超话]# 青春本就是一场盛大的告别，所有的眼泪都是成长的洗礼，勇敢地向前走吧[努力]示例角色3@示例博主A 还有更美好的未来在等你。今晚20:00，一起相约#示例剧集10# 和#示例博主A示例角色3#一起告别她的青春时光[苦涩] http://t.cn/A6demoLink29 ​​​",
+      "long_text": "",
+      "expected": "青春本就是一场盛大的告别，所有的眼泪都是成长的洗礼，勇敢地向前走吧😤示例角色3@示例博主A 还有更美好的未来在等你。今晚20:00，一起相约 和一起告别她的青春时光😖",
+      "note": "emoji:[努力] emoji:[苦涩] flag:digits flag:link flag:mid-text-topic flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "NrUIgj5ct",
+      "raw": "#示例博主A[超话]# 📢“衬衫的价格为九磅十五便士”，今日份学姐@示例博主A 报道[你好]#示例博主A的示例手账# http://t.cn/A6demoLink30 ​​​",
+      "long_text": "",
+      "expected": "📢“衬衫的价格为九磅十五便士”，今日份学姐@示例博主A 报道👋",
+      "note": "emoji:[你好] flag:digits flag:link flag:mid-text-topic flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "O0SWmprXr",
+      "raw": "#示例博主A[超话]# 🍬#示例博主A的果味补给站# 🍒#示例博主A示例角色4# \n在片场是好学、喜欢研究新事物的示例角色4@示例博主A ，每天都有新的发现[求关注]\n#示例剧集9# http://t.cn/A6demoLink31 ​​​",
+      "long_text": "",
+      "expected": "🍬 🍒\n在片场是好学、喜欢研究新事物的示例角色4@示例博主A ，每天都有新的发现👀",
+      "note": "emoji:[求关注] flag:digits flag:link flag:mid-text-topic flag:multiline flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "OBbRGxkh4",
+      "raw": "#示例博主A[超话]#  [比心心]笃行致远，向新出发。\n2024#示例盛典# 正式开启！恭喜#示例剧集9#和#示例剧集8#入围。\n#示例盛典年度推荐# 感谢共同向新而行的你们，快来http://t.cn/A6demoLink32参与年度作品推荐，一起向新出发。 ​​​",
+      "long_text": "",
+      "expected": "💗笃行致远，向新出发。\n2024 正式开启！恭喜和入围。\n 感谢共同向新而行的你们，快来参与年度作品推荐，一起向新出发。",
+      "note": "emoji:[比心心] flag:digits flag:link flag:link-then-cjk flag:mid-text-topic flag:multiline flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "Oq84SsbsX",
+      "raw": "#示例博主A[超话]# 随一张[可爱]@示例博主A ​​​",
+      "long_text": "",
+      "expected": "随一张😊@示例博主A",
+      "note": "emoji:[可爱] flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "PBxyGcQvW",
+      "raw": "#示例博主A[超话]#  🍒#示例博主A示例角色5# \n示例角色10版听歌识曲已上线~和示例角色5@示例博主A 一起猜歌[话筒]你的童年我的童年好像都一样[坏笑]#示例博主A示例剧集6# #电视剧示例剧集6# http://t.cn/A6demoLink33 ​​​",
+      "long_text": "",
+      "expected": "🍒 \n示例角色10版听歌识曲已上线~和示例角色5@示例博主A 一起猜歌🎤你的童年我的童年好像都一样😏",
+      "note": "emoji:[坏笑] emoji:[话筒] flag:digits flag:link flag:mid-text-topic flag:multiline flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "PCBQNporu",
+      "raw": "#示例博主A[超话]#  🍒 #示例博主A示例角色5# \n记录一下示例角色5@示例博主A 的校园生活～速来和萌物贴贴叭[么么哒]\n#示例博主A示例剧集6##电视剧示例剧集6# http://t.cn/A6demoLink34 ​​​",
+      "long_text": "",
+      "expected": "🍒\n记录一下示例角色5@示例博主A 的校园生活～速来和萌物贴贴叭💋",
+      "note": "emoji:[么么哒] flag:digits flag:link flag:mid-text-topic flag:multiline flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "PqgDNl4wb",
+      "raw": "#示例博主A[超话]#  [纸飞机] #示例晚会# 镜头定格青春，校服掠过春风，一起撞响五四的钟声。\n\n今晚8点档，锁定示例频道1、示例频道3、示例频道15等平台，和@示例博主A 来《示例节目》赴约一场青春之旅。\n#来示例晚会感受青春力量##我难忘的青春记忆# ​​​",
+      "long_text": "",
+      "expected": "[纸飞机] 镜头定格青春，校服掠过春风，一起撞响五四的钟声。\n今晚8点档，锁定示例频道1、示例频道3、示例频道15等平台，和@示例博主A 来《示例节目》赴约一场青春之旅。",
+      "note": "flag:digits flag:mid-text-topic flag:multiline flag:paired-topic sticker:[纸飞机] sticker:[超话]"
+    },
+    {
+      "uid": "1000000002",
+      "mid": "QBwsHEgKF",
+      "raw": "#示例博主A[超话]# 今日加更掉落。\n\n- ̗̀ ෆ( ˶’ᵕ’˶)ෆ ̖́-\n大家周末愉快。@示例博主A ​​​",
+      "long_text": "",
+      "expected": "今日加更掉落。\n- ̗̀ ෆ( ˶’ᵕ’˶)ෆ ̖́-\n大家周末愉快。@示例博主A",
+      "note": "flag:md-line-start flag:multiline flag:paired-topic sticker:[超话]"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "RkkQXBT3T",
+      "raw": "和去年一样的🎂愿望～🌊🏝️💫🏜️⛰️🌠🚶🏻‍♀️‍➡️👑🌄 ​​​",
+      "long_text": "",
+      "expected": "和去年一样的🎂愿望～🌊🏝️💫🏜️⛰️🌠🚶🏻‍♀️‍➡️👑🌄",
+      "note": "flag:zwj flag:skin-tone"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "RmKnx6HGj",
+      "raw": "很高兴，和 @示例品牌5  一起，\n把柔软亲肤、洁净卫生和关爱她人的美好\n传递给更多的她\n每位女性都值得像公主一样被呵护\n示例品牌5，美好予她\n戳链接解锁：http://t.cn/A6demoLink35\n#示例博主A代言示例品牌5##示例品牌5第七代超净吸# http://t.cn/A6demoLink36 ​​​",
+      "long_text": "",
+      "expected": "很高兴，和 @示例品牌5 一起，\n把柔软亲肤、洁净卫生和关爱她人的美好\n传递给更多的她\n每位女性都值得像公主一样被呵护\n示例品牌5，美好予她",
+      "note": "flag:pointer flag:multiline"
+    },
+    {
+      "uid": "1000000001",
+      "mid": "Rn4FItU91",
+      "raw": "示例角色8，要和你说再见啦。\n\n很开心这段时间成为你，谢谢你来到我的面前，让我看见你向上生长的样子。\n也感谢大家和示例角色8一起，升级打怪，陪着示例角色8走到今天。\n\n愿我们既有勇往直前的底气，也拥有接纳不完美的勇气。\n愿大家都可以满分通关，都成为自己的「示例剧集13」💛\n\n#示例剧集13收官# #电视剧示例剧集13# #示例剧集13",
+      "long_text": "示例角色8，要和你说再见啦。\n\n很开心这段时间成为你，谢谢你来到我的面前，让我看见你向上生长的样子。\n也感谢大家和示例角色8一起，升级打怪，陪着示例角色8走到今天。\n\n愿我们既有勇往直前的底气，也拥有接纳不完美的勇气。\n愿大家都可以满分通关，都成为自己的「示例剧集13」💛\n\n#示例剧集13收官# #电视剧示例剧集13# #示例剧集13打卡时刻#",
+      "expected": "示例角色8，要和你说再见啦。\n很开心这段时间成为你，谢谢你来到我的面前，让我看见你向上生长的样子。\n也感谢大家和示例角色8一起，升级打怪，陪着示例角色8走到今天。\n愿我们既有勇往直前的底气，也拥有接纳不完美的勇气。\n愿大家都可以满分通关，都成为自己的「示例剧集13」💛",
+      "note": "flag:long-text flag:multiline"
+    }
+  ]
+}

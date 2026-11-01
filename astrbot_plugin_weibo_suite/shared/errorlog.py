@@ -6,15 +6,49 @@ import contextlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 from collections import deque
 from pathlib import Path
 from typing import Any
 
+from .common import sanitize_error_text
+
 ERRLOG_BUFFER = 2000
 ERRLOG_MAX_BYTES = 512 * 1024
 PLUGIN_THREAD_TAG = "weibo-suite"
+
+# 面板/日志回放的错误文本统一脱敏：采集侧存的是完整异常，常带图床 URL、
+# 带签名的查询串和代理凭据。URL 与裸 IP 复用 common.sanitize_error_text 的
+# 口径（同一个占位符），这里只补它没覆盖的几类。
+_QUERY_SECRET_RE = re.compile(
+    r"(?i)([?&](?:token|access_token|auth|authcode|sign|signature|key|secret|password|passwd)=)[^&\s'\"<>]+"
+)
+_PROXY_USERINFO_RE = re.compile(r"\b[\w.+-]+:[^\s@/'\"<>]+@[\w.-]+(?::\d+)?")
+_BARE_FILE_PATH_RE = re.compile(r"(?:^|(?<=[\s（(【]))/file/[^\s'\"<>，。；：、）】]+")
+# 面板每条错误最多展示这么多字符；完整原文仍在 errors.log 里
+ERRLOG_MSG_LIMIT = 1000
+
+
+def _redact_error_msg(value: Any, limit: int = ERRLOG_MSG_LIMIT) -> str:
+    """脱敏一条错误文本：隐藏地址、查询串里的凭据与代理账号。
+
+    地址类沿用 `sanitize_error_text` 的 `<地址已隐藏>`；凭据类用
+    `<凭据已隐藏>`。额外覆盖它没管的裸 `/file/...`、`?token=...&sign=...`
+    和 `user:pass@host` 三种形态。
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    # 先按既有口径隐藏 URL / IP。limit 给足长度：截断后再匹配会把 URL 剩半截
+    text = sanitize_error_text(raw, limit=max(len(raw), 1))
+    text = _QUERY_SECRET_RE.sub(r"\1<凭据已隐藏>", text)
+    text = _PROXY_USERINFO_RE.sub("<凭据已隐藏>", text)
+    text = _BARE_FILE_PATH_RE.sub("<地址已隐藏>", text)
+    if len(text) > limit:
+        text = text[:limit].rstrip() + "…"
+    return text
 
 
 class _ErrorLogStore(logging.Handler):
@@ -240,10 +274,17 @@ class _ErrorLogStore(logging.Handler):
         return n
 
     def snapshot(self, limit: int) -> list[dict[str, Any]]:
-        """最近 limit 条，最新在前（面板直接渲染）。"""
+        """最近 limit 条，最新在前（面板直接渲染）。
+
+        返回前逐条脱敏：留存的是完整异常，常带图床 URL、带签名的查询串和
+        代理凭据，面板会原样展示，不能直接交出去。字段名保持不变，调用方
+        拿到的结构不受影响，只清洗 msg。
+        """
         with self._lock:
             items = list(self._buf)
-        return list(reversed(items[-limit:]))
+        return [
+            {**item, "msg": _redact_error_msg(item.get("msg"))} for item in reversed(items[-limit:])
+        ]
 
     def clear(self) -> int:
         """清空缓冲并截断文件，返回清掉的条数。

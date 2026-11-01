@@ -105,6 +105,9 @@ class ImageLibrary:
             self._conn.commit()
             self._migrate()
         self._cache = ([], np.zeros((0, 0), dtype=np.uint8), 0, 0)
+        # 缓存"代"号：每次重建自增。并发重建时只有最后一代能落到 _cache，
+        # 防止一次慢重建把更新的快照盖回旧数据（见 _reload_cache）
+        self._cache_gen = 0
         self._reload_cache()
 
     # ---------- 内部工具 ----------
@@ -133,9 +136,18 @@ class ImageLibrary:
         self._conn.commit()
 
     def _reload_cache(self) -> None:
-        """从数据库重建内存哈希矩阵（整体替换，读侧取快照）。"""
+        """从数据库重建内存哈希矩阵（整体替换，读侧取快照）。
+
+        重建分两步：锁内取行并领一个"代号"，锁外做 numpy 解码（重活不能
+        占着锁），最后回到锁内确认自己仍是最新一代才赋值。旧实现只在锁内
+        做 SELECT、赋值却在锁外：两个线程并发重建时，先读到旧数据的线程
+        完全可能后完成，把新快照覆盖回去，检索随后一直命中旧矩阵——
+        表现为"刚入库的图查不到"，且无任何报错。
+        """
         with self._lock:
             rows = self._conn.execute("SELECT id, phash FROM images ORDER BY id").fetchall()
+            self._cache_gen += 1
+            gen = self._cache_gen
         ids: list = []
         raw_parts: list = []
         skipped = 0
@@ -156,7 +168,12 @@ class ImageLibrary:
             matrix = np.zeros((0, 0), dtype=np.uint8)
         bits = matrix.shape[1] * 8
         # 单个 tuple 一次赋值：读侧拿到的是完整一致的一代缓存
-        self._cache = (ids, matrix, bits, skipped)
+        with self._lock:
+            if gen != self._cache_gen:
+                # 期间已有更新的一代重建开始/完成，它拿到的行只会更新，
+                # 这份旧快照直接丢弃
+                return
+            self._cache = (ids, matrix, bits, skipped)
 
     @staticmethod
     def _hamming(cache: tuple, phash_hex: str) -> np.ndarray:

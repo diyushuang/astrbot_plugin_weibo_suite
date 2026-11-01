@@ -121,3 +121,39 @@ def test_scalar_paths_cover_every_moved_key(legacy, group, field):
     from astrbot_plugin_weibo_suite.trace.main import _SCALAR_PATHS
 
     assert _SCALAR_PATHS[legacy] == (group, field)
+
+
+def test_sns_schema_group_covers_every_runtime_key():
+    """面板可写的 sns 键与 schema 分组必须一一对应。
+
+    AstrBot 加载配置时会按 schema 删掉未声明的键：schema 少了，运行期写进去的
+    值下次启动就消失（表现为"改了没生效"）；schema 多了，面板/文档会暴露出
+    代码根本不读的假开关。所以两边必须严格对齐。
+    """
+    import json
+    from pathlib import Path
+
+    from astrbot_plugin_weibo_suite.sns import constants as C
+
+    schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+
+    assert "sns" in schema, "schema 里缺 sns 分组，运行期写入的订阅配置会被删掉"
+    declared = set(schema["sns"].get("items") or {})
+    assert declared == set(C.CFG_KEYS), (
+        f"schema 多出来的键：{sorted(declared - set(C.CFG_KEYS))}；"
+        f"schema 缺少的键：{sorted(set(C.CFG_KEYS) - declared)}"
+    )
+
+
+def test_sns_schema_secrets_are_marked_secret():
+    """Cookie 三项必须标 secret，避免面板/日志明文回显。"""
+    import json
+    from pathlib import Path
+
+    schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    items = schema["sns"]["items"]
+
+    for key in ("douyin_cookie", "xhs_cookie", "instagram_cookie"):
+        assert items[key].get("secret") is True, f"{key} 必须标注 secret"

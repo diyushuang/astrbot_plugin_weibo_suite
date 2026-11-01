@@ -47,12 +47,18 @@ try:
         read_limited_text,
     )
     from .features import image_mime
+    from .image_bed import redact_url
     from .random_media import strip_thumbnail_prefix
 except ImportError:  # 兼容插件以独立模块方式加载
     from features import image_mime  # type: ignore[no-redef]
+    from image_bed import redact_url  # type: ignore[no-redef]
     from random_media import strip_thumbnail_prefix  # type: ignore[no-redef]
 
-    from astrbot_plugin_weibo_suite.shared.common import as_float, as_int, read_bytes  # type: ignore[no-redef]
+    from astrbot_plugin_weibo_suite.shared.common import (  # type: ignore[no-redef]
+        as_float,
+        as_int,
+        read_bytes,
+    )
     from astrbot_plugin_weibo_suite.shared.http import (  # type: ignore[no-redef]
         HttpClientGetter,  # type: ignore[no-redef]
         ResponseTooLargeError,
@@ -116,13 +122,6 @@ def parse_embedding_response(text: str) -> list[float]:
     ):
         raise ValueError("embedding 结果含非数值或非有限数值元素")
     return [float(value) for value in embedding]
-
-
-def _invalid_json_context(text: str, exc: InvalidEmbeddingJSON) -> str:
-    position = exc.position if exc.position is not None else 0
-    start = max(0, position - 80)
-    end = min(len(text), position + 80)
-    return text[start:end]
 
 
 def _mime_for(path: str) -> str:
@@ -289,6 +288,7 @@ class VectorEngine:
         *,
         json_body: dict | None = None,
         headers: dict | None = None,
+        max_bytes: int | None = None,
     ):
         client = await self._http_getter()
 
@@ -302,7 +302,11 @@ class VectorEngine:
 
         try:
             async with await client.request(method, url, prepare=prepare) as resp:
-                text = await read_limited_text(resp)
+                text = (
+                    await read_limited_text(resp, max_bytes)
+                    if max_bytes
+                    else await read_limited_text(resp)
+                )
                 status = resp.status
         except VectorEngineError:
             raise
@@ -327,8 +331,11 @@ class VectorEngine:
         *,
         json_body: dict | None = None,
         headers: dict | None = None,
+        max_bytes: int | None = None,
     ) -> Any:
-        status, text = await self._request(method, url, json_body=json_body, headers=headers)
+        status, text = await self._request(
+            method, url, json_body=json_body, headers=headers, max_bytes=max_bytes
+        )
         if status != 200:
             raise HttpError(status, text)
         try:
@@ -446,25 +453,27 @@ class VectorEngine:
                             )
                         raise VectorEngineError(
                             f"向量服务 HTTP {resp.status}{hint}",
-                            detail=f"embedding HTTP {resp.status}: {text[:500]}",
+                            # 响应体可能回显图片 data URL / 内网地址：只留长度
+                            detail=f"embedding HTTP {resp.status}: 响应长度={len(text)}",
                         )
                     try:
                         emb = parse_embedding_response(text)
                     except InvalidEmbeddingJSON as exc:
-                        context = _invalid_json_context(text, exc)
+                        # 只记长度/状态/解析位置：响应片段可能含内网地址与
+                        # 请求体回显，进 errors.log 后会被 /errors 面板读出来
                         logger.error(
                             "embedding 响应无效 JSON: "
                             f"响应长度={len(text)}, "
                             f"Content-Length={resp.headers.get('Content-Length', '<missing>')}, "
                             f"Content-Type={resp.headers.get('Content-Type', '<missing>')}, "
-                            f"解析位置={exc.position}, 错误={exc}, 片段={context!r}"
+                            f"解析位置={exc.position}, 错误={exc}"
                         )
                         if attempt == 1:
                             await asyncio.sleep(2)
                             continue
                         raise VectorEngineError(
                             "向量服务返回无效 JSON（已重试一次）",
-                            detail=f"embedding JSON 解析失败: {exc}; 片段: {context}",
+                            detail=f"embedding JSON 解析失败: {exc}; 响应长度={len(text)}",
                         ) from exc
                 break
         except VectorEngineError:
@@ -479,7 +488,7 @@ class VectorEngine:
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
             raise VectorEngineError(
                 "embedding 请求失败（详情见日志）",
-                detail=f"embedding 请求失败: {url}: {e}",
+                detail=f"embedding 请求失败: {redact_url(url)}: {e}",
             ) from e
         except (KeyError, IndexError, ValueError) as e:
             raise VectorEngineError(
@@ -533,6 +542,11 @@ class VectorEngine:
         ):
             raise VectorEngineError("查询向量无效")
         effective_limit = self.top_k if limit is None else max(1, limit)
+        extra: dict = {}
+        if with_vector:
+            # with_vector=True 时响应里带 top_k 条完整向量（4096 维约 45KB/条），
+            # 1MiB 统一上限会在 top_k≥20 时误报"响应体过大"，按向量规模放宽。
+            extra["max_bytes"] = max(1_048_576, effective_limit * len(vector) * 8 + 262_144)
         try:
             obj = await self._request_json(
                 "POST",
@@ -544,6 +558,7 @@ class VectorEngine:
                     "with_vector": with_vector,
                 },
                 headers=self._qd_headers(),
+                **extra,
             )
             result = obj.get("result") or {}
             raw_hits = result.get("points", []) if isinstance(result, dict) else []
@@ -560,6 +575,7 @@ class VectorEngine:
                     "with_vector": with_vector,
                 },
                 headers=self._qd_headers(),
+                **extra,
             )
             raw_hits = obj.get("result") or []
         if not isinstance(raw_hits, list):
@@ -731,8 +747,8 @@ class VectorEngine:
         被图床改过（前置毫秒时间戳 + `@` 换 `_`），而 `@`→`_` 是**不可逆**的——
         光靠清洗缩略图名永远还原不出真正的文件名。同一个点的 payload 里
         `file_name` 存的正是**未经改名的原始文件名**（实测：
-        file_name = `【微博@示例博主A工作室official】20250716-02：林其乐剧照.jpg`
-        thumb_url = `…/thumbnails/1789658616018_【微博_示例博主A工作室official】….jpg`），
+        file_name = `【微博@示例账号official】20240101-01：示例剧照.jpg`
+        thumb_url = `…/thumbnails/1789658616018_【微博_示例账号official】….jpg`），
         所以展示名必须取自这里，而不是清洗缩略图名。
 
         file_name 可能缺失（图床侧 payload 约定不同），此时只返回 url，由调用方
@@ -771,7 +787,7 @@ class VectorEngine:
         - `clean_display_name()` 按设计只取末段（展示用），目录层级同样被丢掉。
 
         这两种情形手上只剩「图床给缩略图改过名的那个文件名」
-        （`1789658616018_【微博_示例博主A工作室official】….jpg`，`@` 已被换成 `_`）。
+        （`1789658616018_【微博_示例账号official】….jpg`，`@` 已被换成 `_`）。
         此时按 `file_name` 反查原图必然 0 命中（真名里是 `@`、且没有时间戳前缀），
         裸名拼 `/file/{name}` 又必然 404 —— 用户看到的就是「图床里没有找到」。
 
@@ -847,7 +863,7 @@ class VectorEngine:
 
         为什么必须有这个方法：图床的 `/file/{path}` **只认完整对象键**（含各级
         目录），把裸文件名拼上去**必然 404**。而 `/原图 <文件名>` 这条路径手上
-        只有名字，拼出来的就是 `/file/【微博@…】20200207-04：示例博主A海报.jpg`——
+        只有名字，拼出来的就是 `/file/【微博@…】20240101-04：示例海报.jpg`——
         图床里根本不存在这个对象，原图明明在
         `/file/7、综艺节目/爱奇艺《潮流合伙人》/《潮流合伙人》图集/` 下面。
         实测同一文件的 A/B 对照（线上 http://10.0.0.5:7658 与公网
@@ -1229,7 +1245,17 @@ class VectorEngine:
                 return await self.embed_file(entry.path)
 
         ordered = list(pending.items())
-        vectors = await asyncio.gather(*(embed_one(entry) for _, entry in ordered))
+        tasks = [asyncio.create_task(embed_one(entry)) for _, entry in ordered]
+        try:
+            vectors = await asyncio.gather(*tasks)
+        except BaseException:
+            # 一张图 embed 失败就取消其余在飞任务：既判定整批失败，又立即释放
+            # 唯一的那点并发配额，避免调用方重试时与旧任务叠加打满服务端。
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
         points = [
             {
                 "id": point_id,

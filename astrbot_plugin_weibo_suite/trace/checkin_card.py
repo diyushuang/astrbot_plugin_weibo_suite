@@ -34,7 +34,9 @@ try:
     from ..shared.http import read_limited_text
 except ImportError:  # 兼容插件以独立模块方式加载
     try:
-        from astrbot_plugin_weibo_suite.shared.http import read_limited_text  # type: ignore[no-redef]
+        from astrbot_plugin_weibo_suite.shared.http import (
+            read_limited_text,  # type: ignore[no-redef]
+        )
     except ImportError:  # 本地自测环境没有 url_guard 时退化为普通读取
 
         async def read_limited_text(resp, limit: int) -> str:  # type: ignore[no-redef]

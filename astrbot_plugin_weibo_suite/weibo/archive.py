@@ -20,9 +20,9 @@ MEDIA_STATES = tuple(
 )
 
 ARCHIVE_LONGTEXT_URL = "https://weibo.com/ajax/statuses/longtext"
-ARCHIVE_GAP_LIMIT = 20          # 对账明细最多 20 条（按类型分组后取前 N）
-ARCHIVE_GAP_KEEP = 40           # 单类型最多缓存多少条明细，避免全库扫描时吃内存
-ARCHIVE_SCAN_LIMIT = 5000       # 对账扫描帖子上限（防御性，避免一次命令扫几万条）
+ARCHIVE_GAP_LIMIT = 20  # 对账明细最多 20 条（按类型分组后取前 N）
+ARCHIVE_GAP_KEEP = 40  # 单类型最多缓存多少条明细，避免全库扫描时吃内存
+ARCHIVE_SCAN_LIMIT = 5000  # 对账扫描帖子上限（防御性，避免一次命令扫几万条）
 ARCHIVE_SCAN_PAGE = 200
 
 
@@ -44,6 +44,31 @@ def _archive_safe_ext(value) -> str:
     """扩展名只留字母数字，缺省 jpg。"""
     text = re.sub(r"[^0-9A-Za-z]", "", str(value or "")).lower()[:8]
     return text or "jpg"
+
+
+def _archive_free_bytes(path) -> int | None:
+    """目录所在磁盘的剩余字节数；目录还不存在时向上找到最近的已存在祖先。
+
+    归档目录是**按需创建**的（第一条原图落盘时才 mkdir），所以直接对
+    ``media_root`` 调 ``shutil.disk_usage`` 会在首次归档时抛 FileNotFoundError，
+    把整条下载链带崩。这里向上回溯到已存在的祖先再问余量；实在取不到就返回
+    None，由调用方决定"未知余量"怎么办——不能因为量不出来就误判成写满。
+    """
+    try:
+        candidate = Path(path)
+    except TypeError:
+        return None
+    for _ in range(16):
+        try:
+            if candidate.exists():
+                return int(shutil.disk_usage(str(candidate)).free)
+        except OSError:
+            pass
+        parent = candidate.parent
+        if parent == candidate:
+            return None
+        candidate = parent
+    return None
 
 
 def _archive_longtext_of(payload) -> str:
@@ -216,7 +241,13 @@ class ArchiveMixin:
             "is_long": 1 if post.get("is_long") else 0,
             "is_retweet": 1 if post.get("is_retweet") else 0,
             "orig_text": str(post.get("orig_text") or ""),
-            "pic_total": _archive_int(post.get("pic_total"), -1),
+            # 时间线卡片缺 pic_num 时解析侧给 0（不等于"自述 0 张"）。有图却
+            # 自述 0 与库内"未知=-1"哨兵冲突，会让对账把每张带图帖报成缺图。
+            "pic_total": (
+                -1
+                if _archive_int(post.get("pic_total"), -1) <= 0 and post.get("pics")
+                else _archive_int(post.get("pic_total"), -1)
+            ),
             "video_src": str(post.get("video_src") or ""),
             "raw_json": raw_json,
             "source": source,
@@ -227,6 +258,10 @@ class ArchiveMixin:
     # ------------------------------------------------------------------
     async def archive_post(self, post: dict, *, source: str = "monitor") -> bool:
         """同步落账一条帖（upsert posts + media），并按需入队原图；失败返回 False。"""
+        # 增量归档也要补全长文：推送侧的 text 默认截到 100 字，直接落账会让
+        # 文案库永久缺少全文（cleaned_at 一旦写入，后续清洗也不会再补）。
+        if isinstance(post, dict) and post.get("is_long"):
+            post = await self._archive_enrich_apply(post, force=False)
         ok, _queued = await self._archive_save_post(post, source)
         return ok
 
@@ -254,6 +289,18 @@ class ArchiveMixin:
                 # 上次没拿到图信息）才补一次 set_pics。
                 if existed and not (await asyncio.to_thread(store.get_post, mid) or {}).get("pics"):
                     await asyncio.to_thread(store.set_pics, mid, self._archive_pic_rows(pics))
+            # 文案清洗（P5）：清洗结果写 cleaned_text，archive.db 即文案库（F3）；
+            # 清洗失败只记日志，绝不影响归档与推送。copylib.auto_clean 关闭时
+            # 留空 cleaned_at，等 /微博文案清洗 再批量处理。
+            auto_clean = True
+            group = self.config.get("copylib") if hasattr(self.config, "get") else None
+            if isinstance(group, dict) and "auto_clean" in group:
+                auto_clean = bool(group.get("auto_clean"))
+            if auto_clean:
+                try:
+                    await asyncio.to_thread(self._archive_clean_post, store, mid, post)
+                except Exception as e:
+                    logger.warning(f"文案清洗失败（mid={mid}）: {e}")
             queued = False
             if pics and self._archive_bool("download_originals", True):
                 queued = self.archive_enqueue_download(mid)
@@ -273,6 +320,18 @@ class ArchiveMixin:
             logger.warning(f"归档落账失败（mid={mid}）: {e}")
             return False, False
 
+    @staticmethod
+    def _archive_clean_post(store: ArchiveStore, mid: str, post: dict) -> None:
+        """清洗一条帖子正文并落库（cleaned_text + cleaned_at）；纯图/纯链接帖记为已清洗。"""
+        try:
+            from .cleaner import clean_mblog_text
+        except ImportError:  # 清洗模块缺失（老包/裁剪包）时归档保持可用
+            logger.warning("文案清洗模块不可用，跳过 cleaned_text 落库")
+            return
+        text = str(post.get("text") or "")
+        cleaned = clean_mblog_text(text)
+        store.mark_post_cleaned(mid, cleaned)
+
     async def archive_enrich(self, post: dict) -> dict:
         """L2 补全：长文正文 / 图集 pic_ids；只在疑似需要时触发，失败原样返回。"""
         return await self._archive_enrich_apply(post, force=False)
@@ -283,11 +342,12 @@ class ArchiveMixin:
         mid = str(post.get("id") or post.get("mid") or "").strip()
         try:
             text = str(post.get("text") or "")
-            raw = str(post.get("raw_text") or "")
             pics = [p for p in (post.get("pics") or []) if isinstance(p, dict)]
             pic_total = _archive_int(post.get("pic_total"), -1)
             is_long = bool(post.get("is_long"))
-            need_text = is_long if force else (is_long and (len(text) >= 140 or "全文" in raw))
+            # 长文一律补全：text_max_length 默认 100，按">=140 或含全文"判定
+            # 永远不成立，归档库里就只剩摘要，清洗后也无法恢复全文。
+            need_text = bool(is_long)
             need_pics = pic_total > len(pics)
             if need_text and mid:
                 full = await self._archive_long_text(mid)
@@ -320,7 +380,13 @@ class ArchiveMixin:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.debug(f"归档长文首选接口不可用（{mid}）: {e}")
+                # 首选接口失效是可诊断故障（host 白名单、接口改版、风控），
+                # 不能像以前那样只打 debug —— 那等于把一条永久失效的链路
+                # 藏起来，只剩回落接口在默默兜底。同一次运行只告警一次，
+                # 避免每篇长文刷屏。
+                if not getattr(self, "_archive_longtext_warned", False):
+                    self._archive_longtext_warned = True
+                    logger.warning(f"归档长文首选接口不可用（后续静默，仍走回落接口）: {e}")
         fetch = getattr(self, "_fetch_long_text", None)
         if callable(fetch):
             try:
@@ -353,21 +419,64 @@ class ArchiveMixin:
             finally:
                 with contextlib.suppress(Exception):
                     queue.task_done()
+                # 队列腾出空位就把"满了被拒"的 mid 重投回来
+                with contextlib.suppress(Exception):
+                    self._archive_drain_retry(queue)
 
     def archive_enqueue_download(self, mid: str) -> bool:
-        """入队一个 mid 的原图下载；未就绪 / 队列满返回 False，不抛。"""
+        """入队一个 mid 的原图下载；未就绪 / 队列满返回 False，不抛。
+
+        队列满时不再只写一条 debug 就丢掉：被丢的帖 media 会永远停在
+        `pending`，只有跑对账才看得见。这里退回一个**有界待办集合**，
+        worker 空闲时重投，保证"满了"不等于"丢了"。
+        """
         if not self.archive_ready():
             return False
         try:
             queue = self._archive_queue()
-            if queue.full():
-                logger.debug("归档下载队列已满，跳过本次入队: %s", mid)
+            try:
+                queue.put_nowait(str(mid))
+                return True
+            except asyncio.QueueFull:
+                pending = self._archive_pending_retry()
+                if len(pending) >= ARCHIVE_PENDING_RETRY_MAX:
+                    pending.popitem(last=False)
+                pending[str(mid)] = None
+                logger.warning(
+                    "归档下载队列已满，已转入待办（当前 %d 条，mid=%s）",
+                    len(pending),
+                    mid,
+                )
                 return False
-            queue.put_nowait(str(mid))
-            return True
         except Exception as e:
             logger.warning(f"归档入队失败（mid={mid}）: {e}")
             return False
+
+    def _archive_pending_retry(self):
+        """队列满时暂存 mid 的有序集合（FIFO，满了丢最旧的）。"""
+        pending = getattr(self, "_archive_retry_mids", None)
+        if pending is None:
+            from collections import OrderedDict
+
+            pending = OrderedDict()
+            self._archive_retry_mids = pending
+        return pending
+
+    def _archive_drain_retry(self, queue: asyncio.Queue) -> int:
+        """把待办里的 mid 重投进队列，返回本次重投数（队列满就停）。"""
+        pending = self._archive_pending_retry()
+        moved = 0
+        while pending:
+            if queue.full():
+                break
+            mid, _ = pending.popitem(last=False)
+            try:
+                queue.put_nowait(mid)
+                moved += 1
+            except asyncio.QueueFull:
+                pending[mid] = None
+                break
+        return moved
 
     async def archive_download_post(self, mid: str) -> dict:
         """把一条帖里未落盘的图逐张下载到 archive/<uid>/<mid>/。"""
@@ -393,6 +502,24 @@ class ArchiveMixin:
             state = str(row.get("state") or "pending")
             if state != "pending" and local and Path(local).is_file():
                 continue
+            # 磁盘余量保护：单图上限 30MB、单帖最多 ~18 张、回填队列 500 个 mid，
+            # 一条回填链就能写到上百 GB。写满盘会连带 WAL/state.json/AstrBot 一起挂，
+            # 失败点离原因很远——所以在这里主动刹车（与相册链路同一套口径）。
+            free_bytes = await asyncio.to_thread(_archive_free_bytes, media_root)
+            if free_bytes is None:
+                # 量不到余量不等于写满了：放行，但不能假装自己检查过。
+                if not getattr(self, "_archive_disk_unknown_warned", False):
+                    self._archive_disk_unknown_warned = True
+                    logger.warning("取不到归档目录的磁盘余量，本轮跳过余量保护（mid=%s）", mid)
+            elif free_bytes < DISK_FLOOR_MB * 1048576:
+                logger.warning(
+                    "归档原图下载已暂停：磁盘仅剩 %dMB（下限 %dMB，mid=%s）",
+                    free_bytes // 1048576,
+                    DISK_FLOOR_MB,
+                    mid,
+                )
+                result["paused"] = "disk"
+                return result
             dest = folder / f"{_archive_safe_seg(pid, 'pic')}.{_archive_safe_ext(row.get('ext'))}"
             pic = {
                 "pid": pid,
@@ -409,8 +536,12 @@ class ArchiveMixin:
                     lambda p=saved: p.stat().st_size if p.is_file() else 0
                 )
                 await asyncio.to_thread(
-                    store.mark_media, mid, pid, "downloaded",
-                    local_path=str(saved or dest), size=size,
+                    store.mark_media,
+                    mid,
+                    pid,
+                    "downloaded",
+                    local_path=str(saved or dest),
+                    size=size,
                 )
                 result["downloaded"] += 1
             except asyncio.CancelledError:
@@ -435,6 +566,12 @@ class ArchiveMixin:
     # 全量回填
     # ------------------------------------------------------------------
     def _archive_since_ts(self, since: str) -> int:
+        """把 `since` 解析成时间戳；非法输入**不**回落"全量"。
+
+        曾经解析失败会 warning 后返回 0，于是 `--since 2024` 这种少写一位的输入
+        会静默变成 1000 页、每页 3s 的全量回填，跑几小时并触发风控——用户通常
+        还不知道是自己打错了。这里抛 `ValueError`，由指令层回显错误。
+        """
         raw = str(since or "").strip()
         if not raw:
             raw = str(self._archive_group().get("since") or "").strip()
@@ -443,9 +580,8 @@ class ArchiveMixin:
         try:
             day = datetime.strptime(raw[:10], "%Y-%m-%d")
             return int(day.replace(tzinfo=_TZ_CN).timestamp())
-        except (TypeError, ValueError):
-            logger.warning(f"since 参数无法解析，按全量处理: {raw}")
-            return 0
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"since 需形如 YYYY-MM-DD（收到 {raw!r}）") from e
 
     def archive_backfill_stop(self) -> None:
         """请求停止：当前页处理完后退出。"""
@@ -483,7 +619,10 @@ class ArchiveMixin:
             "status": "error",
             "elapsed": 0.0,
         }
-        since_ts = self._archive_since_ts(since)
+        try:
+            since_ts = self._archive_since_ts(since)
+        except ValueError as e:
+            return {"error": str(e), "status": "error"}
         delay = max(0.0, self._archive_float("page_delay", 3.0))
         page_limit = max(1, _archive_int(BACKFILL_SAFETY_MAX_PAGES, 1000))
         self._backfill_stop = False
@@ -496,7 +635,9 @@ class ArchiveMixin:
         stats["next_page"] = page
         try:
             cursor = await asyncio.to_thread(store.get_cursor, uid)
-            if cursor and str(cursor.get("status") or "") == "running":
+            # running / paused / error 都保留断点：风控暂停与抓取失败后重跑必须
+            # 从失败页继续，否则每页都要重抓，反而更容易再次触发风控。
+            if cursor and str(cursor.get("status") or "") not in ("", "done"):
                 page = max(1, _archive_int(cursor.get("next_page"), 1))
                 oldest = _archive_int(cursor.get("oldest_created_at"), 0)
                 stats["next_page"] = page
@@ -576,11 +717,15 @@ class ArchiveMixin:
             if getattr(self, "_backfill_task", None) is current:
                 self._backfill_task = None
             stats["elapsed"] = round(time.monotonic() - started, 2)
-            stats["next_page"] = page
+            # next_page 保留循环里最后一次写入的"下一页"，不要用当前页覆盖
             self._backfill_last_stats = dict(stats)
             logger.info(
                 "回填结束 uid=%s pages=%s inserted=%s existing=%s stopped=%s",
-                uid, stats["pages"], stats["inserted"], stats["existing"], stats["stopped"],
+                uid,
+                stats["pages"],
+                stats["inserted"],
+                stats["existing"],
+                stats["stopped"],
             )
         return stats
 
@@ -588,20 +733,42 @@ class ArchiveMixin:
     # JSON 种子导入
     # ------------------------------------------------------------------
     def _archive_find_file(self, path):
+        """把用户给的路径解析成一个可读的种子文件，越界一律拒绝。
+
+        这是管理员命令的入参，但"管理员"不等于"可以指着机器任意文件让 bot
+        读进来归档"。允许的范围收敛为：数据目录内、插件目录内、以及当前
+        工作目录（相对路径的老用法），其余绝对路径直接拒绝。
+        """
         raw = str(path or "").strip()
         if not raw:
             return None
-        candidate = Path(raw)
-        if candidate.is_absolute():
-            return candidate if candidate.is_file() else None
-        options = [candidate]
+        candidate = Path(raw).expanduser()
+        roots: list[Path] = []
         base = getattr(self, "_data_dir", None)
         if base:
-            options.append(Path(base) / raw)
-        options.append(Path.cwd() / raw)
-        for option in options:
-            if option.is_file():
-                return option
+            roots.append(Path(base))
+        roots.append(Path(__file__).resolve().parent.parent)
+        roots.append(Path.cwd())
+
+        def _inside(target: Path) -> Path | None:
+            try:
+                resolved = target.resolve()
+            except OSError:
+                return None
+            for root in roots:
+                try:
+                    resolved.relative_to(root.resolve())
+                except (OSError, ValueError):
+                    continue
+                return resolved if resolved.is_file() else None
+            return None
+
+        if candidate.is_absolute():
+            return _inside(candidate)
+        for root in roots:
+            found = _inside(root / raw)
+            if found is not None:
+                return found
         return None
 
     @staticmethod
@@ -639,13 +806,15 @@ class ArchiveMixin:
         if file is None:
             return {"error": f"文件不存在: {path}"}
         try:
-            data = json.loads(file.read_text(encoding="utf-8-sig"))
+            # 64MB 种子的读盘与 JSON 解析都放到线程，避免卡住轮询与推送
+            text = await asyncio.to_thread(file.read_text, encoding="utf-8-sig")
+            data = await asyncio.to_thread(json.loads, text)
         except (OSError, ValueError) as e:
             return {"error": f"读取失败: {e}"}
         entries = self._archive_import_entries(data)
         if entries is None:
             return {"error": "顶层不是列表，也没有 posts/data/weibo 列表"}
-        meta = self._archive_import_meta(file)
+        meta = await asyncio.to_thread(self._archive_import_meta, file)
         uid = ""
         if isinstance(data, dict):
             uid = str(data.get("uid") or "").strip()
@@ -685,7 +854,11 @@ class ArchiveMixin:
                 stats["skipped"] += 1
         logger.info(
             "归档 JSON 导入完成 file=%s uid=%s total=%s inserted=%s updated=%s",
-            file.name, uid, stats["total"], stats["inserted"], stats["updated"],
+            file.name,
+            uid,
+            stats["total"],
+            stats["inserted"],
+            stats["updated"],
         )
         return stats
 
@@ -742,9 +915,12 @@ class ArchiveMixin:
         try:
             limit = max(1, min(50, _archive_int(limit, 10)))
             offset = max(0, _archive_int(offset, 0))
-            return await asyncio.to_thread(
-                store.list_posts, str(uid or "").strip() or None, limit=limit, offset=offset
-            ) or []
+            return (
+                await asyncio.to_thread(
+                    store.list_posts, str(uid or "").strip() or None, limit=limit, offset=offset
+                )
+                or []
+            )
         except Exception as e:
             logger.warning(f"归档查询失败: {e}")
             return []
@@ -768,11 +944,24 @@ class ArchiveMixin:
         gap_counts = dict.fromkeys(gap_keys, 0)
         buckets = {key: [] for key in gap_keys}
         seen = {"posts": 0, "posts_with_text": 0, "posts_with_media": 0}
-        offset = 0
-        while offset < ARCHIVE_SCAN_LIMIT:
-            batch = store.list_posts(uid, limit=ARCHIVE_SCAN_PAGE, offset=offset) or []
+        scanned = 0
+        anchor: tuple[int, str] | None = None
+        # 键集分页而不是 OFFSET：监控侧一直在插入新帖，OFFSET 会让整页后移、
+        # 漏扫若干行，gap_counts 偏小从而给出"全部通过"的假结论。
+        keyset = getattr(store, "iter_posts_keyset", None)
+        while scanned < ARCHIVE_SCAN_LIMIT:
+            if callable(keyset):
+                batch = keyset(uid, after=anchor, limit=ARCHIVE_SCAN_PAGE) or []
+            else:  # 兼容旧存储实现（测试替身等）
+                batch = store.list_posts(uid, limit=ARCHIVE_SCAN_PAGE, offset=scanned) or []
             if not batch:
                 break
+            scanned += len(batch)
+            with_anchor = batch[-1]
+            anchor = (
+                _archive_int(with_anchor.get("created_at"), 0),
+                str(with_anchor.get("mid") or ""),
+            )
             for post in batch:
                 seen["posts"] += 1
                 mid = str(post.get("mid") or "")
@@ -812,7 +1001,6 @@ class ArchiveMixin:
                                 "detail": "原图未落盘",
                             }
                         )
-            offset += len(batch)
             if len(batch) < ARCHIVE_SCAN_PAGE:
                 break
         merged = [
@@ -823,9 +1011,9 @@ class ArchiveMixin:
         gaps = merged[:ARCHIVE_GAP_LIMIT]
         posts = _archive_int(counts.get("posts"), seen["posts"])
         posts_with_text = _archive_int(counts.get("posts_with_text"), seen["posts_with_text"])
-        posts_without_text = _archive_int(
-            counts.get("posts_without_text"), 0
-        ) or max(0, posts - posts_with_text)
+        posts_without_text = _archive_int(counts.get("posts_without_text"), 0) or max(
+            0, posts - posts_with_text
+        )
         report = {
             "uid": str(uid or ""),
             "posts": posts,
@@ -850,7 +1038,13 @@ class ArchiveMixin:
             "vector": _archive_int(counts.get("vector"), _archive_int(mstats.get("vector"), 0)),
             "gaps": gaps,
             "gap_counts": gap_counts,
-            "ok": not any(gap_counts.values()),
+            # 对账只扫前 ARCHIVE_SCAN_LIMIT 帖；超出时必须显式标注，不能把
+            # "没扫到"当成"没有缺口"报告全绿。
+            "scanned": seen["posts"],
+            "partial": scanned >= ARCHIVE_SCAN_LIMIT,
+            "ok": not any(gap_counts.values()) and not (scanned >= ARCHIVE_SCAN_LIMIT),
+            # 同一页内容判断用满扫描上限：键集分页下 scanned 是已扫行数
+            "scan_limit": ARCHIVE_SCAN_LIMIT,
         }
         report["uploaded_bed"] = _archive_int(counts.get("uploaded_bed"), report["bed"])
         report["thumbnail"] = _archive_int(counts.get("thumbnail"), report["thumb"])
@@ -879,10 +1073,15 @@ class ArchiveMixin:
             f"缺直链 {_archive_int(report.get('media_missing_url'), 0)}",
             f"进度：已落盘 {_archive_int(report.get('downloaded'), 0)} / "
             f"群相册 {_archive_int(report.get('album'), 0)} / "
-            f"图床 {_archive_int(report.get('uploaded_bed'), 0)} / "
-            f"缩略图 {_archive_int(report.get('thumbnail'), 0)} / "
-            f"向量 {_archive_int(report.get('vectorized'), 0)}",
+            f"图床 {_archive_int(report.get('bed'), 0)} / "
+            f"缩略图 {_archive_int(report.get('thumb'), 0)} / "
+            f"向量 {_archive_int(report.get('vector'), 0)}",
         ]
+        if report.get("partial"):
+            lines.append(
+                f"注意：本次仅扫描前 {_archive_int(report.get('scanned'), 0)} 帖，"
+                "更大范围的缺口未覆盖"
+            )
         labels = {
             "post_no_text": "缺正文",
             "pic_count_mismatch": "图数不符",

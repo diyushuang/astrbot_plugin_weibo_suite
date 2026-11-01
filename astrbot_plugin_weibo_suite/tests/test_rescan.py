@@ -60,4 +60,6 @@ async def test_rescan_runs_bounded_concurrency_and_dedupes_phash(
     assert "失败 0" in text
     assert plugin.library.count() == 3
     assert state["peak"] >= 2, "重扫应在批次内并发解码"
-    assert event.sent, "应通过 event.send 汇报开始/进度"
+    # 进度必须走 yield（event.send 只接受 MessageChain，不能传 MessageEventResult）
+    assert any("开始扫描" in item.text for item in results), "应 yield 开始进度"
+    assert not event.sent

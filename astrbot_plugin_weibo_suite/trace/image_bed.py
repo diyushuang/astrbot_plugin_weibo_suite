@@ -14,7 +14,7 @@ mode=oracle_oci   : 甲骨文 OCI Object Storage（官方 Amazon S3 兼容 API�
                     公开直链支持公共存储桶原生 URL 或自定义地址（如
                     带前缀的预认证请求 PAR 地址）。
 mode=cloudflare_imgbed: CloudFlare-ImgBed 自建图床（官方 REST API）：
-                    POST /upload 上传（API Token 或上传鉴权码 authCode），
+                    POST /upload 上传（API Token 或上传鉴权码，均走请求头），
                     /溯源删除 时按 POST /api/manage/delete/batch 同步
                     删除远端文件（Token 需含 delete 权限）。
 
@@ -45,7 +45,12 @@ try:
 except ImportError:  # 兼容插件以独立模块方式加载
     from s3_store import S3CompatClient  # type: ignore[no-redef]
 
-    from astrbot_plugin_weibo_suite.shared.common import USER_AGENT, as_int, read_bytes, truthy  # type: ignore[no-redef]
+    from astrbot_plugin_weibo_suite.shared.common import (  # type: ignore[no-redef]
+        USER_AGENT,
+        as_int,
+        read_bytes,
+        truthy,
+    )
     from astrbot_plugin_weibo_suite.shared.http import (
         GuardedHttpClient,  # type: ignore[no-redef]
         read_limited_text,  # type: ignore[no-redef]
@@ -99,6 +104,24 @@ def _public_url(base: str, key: str) -> str:
     return f"{base.rstrip('/')}/{quote(key)}"
 
 
+def redact_url(url: str) -> str:
+    """把带签名的直链收敛成可安全写日志的形态。
+
+    对象存储/图床的直链常带 `?...sign=...&token=...` 这类一次性凭据：
+    整条写进日志后，任何能看日志或 /errors 面板的人都拿到了可直接使用的
+    下载权限。这里只保留 scheme://host/path，查询串一律换成 `?***`。
+    """
+    text = str(url or "").strip()
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        return "<地址已隐藏>"
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return text
+    redacted = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+    return f"{redacted}?***" if parsed.query else redacted
+
+
 def _host_port(parsed) -> tuple[str, int | None]:
     """URL 的归一化 (主机名小写, 端口)，端口缺省按协议补全。"""
     try:
@@ -141,6 +164,9 @@ class ImageBedClient:
         self._http_getter = http_getter
         # S3 兼容客户端按模式缓存复用；HTTP 会话由共享客户端统一释放
         self._s3_clients: dict = {}
+        # 上传失败只告警一次：重试/批处理里每条都打 warning 会刷屏，
+        # 还会把真正的原因（第一条）埋掉
+        self._upload_warned = False
 
     # ---------- 对外接口 ----------
 
@@ -175,7 +201,15 @@ class ImageBedClient:
                     url = await upload(src_path)
                 return StoreResult(ok=True, url=url, message=ok_message)
             except Exception as e:
-                logger.warning(f"{failure}: {e}", exc_info=True)
+                # 第三方响应体可能很长、还可能回显内部地址：只留前 200 字符；
+                # traceback 一律不记（栈帧局部变量里带直链与凭据）；同一次运行
+                # 只发一次 warning，后续同类失败降为 debug
+                detail = str(e)[:200]
+                if self._upload_warned:
+                    logger.debug(f"{failure}（本次运行已记过告警）: {detail}")
+                else:
+                    self._upload_warned = True
+                    logger.warning(f"{failure}: {detail}", exc_info=False)
                 try:
                     local = await self._copy_local(src_path, raw_folder)
                 except ValueError:
@@ -264,8 +298,9 @@ class ImageBedClient:
                 await client.delete_object(bucket, key)
                 return True
         except Exception as e:
-            # 不吞异常原因：删除失败（token 权限不足、签名错误、网络故障）需要可诊断
-            logger.warning(f"删除远端对象失败 [{self.mode}] {image_url}: {e}")
+            # 不吞异常原因：删除失败（token 权限不足、签名错误、网络故障）需要可诊断。
+            # 直链本身可能带签名查询串，写日志前先脱敏
+            logger.warning(f"删除远端对象失败 [{self.mode}] {redact_url(image_url)}: {e}")
             return False
         return False
 
@@ -345,13 +380,16 @@ class ImageBedClient:
         """图床 HTTP 请求的统一超时（配置缺失或非法时取 30 秒）。"""
         return aiohttp.ClientTimeout(total=max(5, as_int(self.config.get("timeout"), 30)))
 
-    async def _upload_file(self, src_path: str) -> tuple[bytes, str, str]:
-        """读取待上传文件并生成 (字节, 文件名, Content-Type)，供两种上传共用。"""
+    def _upload_meta(self, src_path: str) -> tuple[str, str]:
+        """生成上传用的 (文件名, Content-Type)，供两种上传共用。
+
+        不再把文件整读进内存：调用方把文件对象直接交给 aiohttp 流式发送，
+        避免「先 read_bytes 再 add_field」让峰值内存达到文件大小的 2~3 倍。
+        """
         ext = os.path.splitext(src_path)[1].lower() or ".jpg"
         filename = f"trace_{time.strftime('%Y%m%d')}_{secrets.token_hex(8)}{ext}"
         content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-        file_bytes = await asyncio.to_thread(read_bytes, src_path)
-        return file_bytes, filename, content_type
+        return filename, content_type
 
     async def _upload(self, src_path: str, folder: str = "") -> str:
         """按配置调用通用 HTTP 上传接口，成功返回图片直链。
@@ -376,7 +414,7 @@ class ImageBedClient:
         if auth_header and token:
             auth_value = f"{self.config.get('auth_prefix') or ''}{token}"
 
-        file_bytes, filename, content_type = await self._upload_file(src_path)
+        filename, content_type = self._upload_meta(src_path)
 
         def prepare(_url: str, method: str, cross_origin: bool = False) -> dict:
             headers = {"User-Agent": USER_AGENT}
@@ -385,20 +423,24 @@ class ImageBedClient:
                 headers[auth_header] = auth_value
             if method != "POST":
                 return {"headers": headers}
-            # FormData 不可复用，每次请求（含重定向后的重发）都需重新构建
+            # FormData 不可复用，每次请求（含重定向后的重发）都需重新构建；
+            # 复用同一个文件句柄，重发前把读指针复位
+            file_handle.seek(0)
             form = aiohttp.FormData()
             for key, value in extra_fields.items():
                 form.add_field(str(key), str(value))
-            form.add_field(field, file_bytes, filename=filename, content_type=content_type)
+            form.add_field(field, file_handle, filename=filename, content_type=content_type)
             return {"data": form, "headers": headers}
 
         client = await self._http_getter()
-        async with await client.request(
-            "POST", api_url, prepare=prepare, timeout=self._timeout()
-        ) as resp:
-            body = await read_limited_text(resp)
-            if not 200 <= resp.status < 300:
-                raise RuntimeError(f"图床返回 HTTP {resp.status}: {body[:500]}")
+        # 句柄必须活到请求体发完，所以把 request 包在 with open 里面（流式上传）
+        with open(src_path, "rb") as file_handle:
+            async with await client.request(
+                "POST", api_url, prepare=prepare, timeout=self._timeout()
+            ) as resp:
+                body = await read_limited_text(resp)
+                if not 200 <= resp.status < 300:
+                    raise RuntimeError(f"图床返回 HTTP {resp.status}: {body[:500]}")
 
         try:
             payload = json.loads(body)
@@ -426,9 +468,11 @@ class ImageBedClient:
 
         鉴权二选一（可同时配置）：cfi_token 以 Authorization: Bearer
         请求头发送（Token 需 upload 权限，官方推荐格式）；cfi_auth_code
-        以 authCode 查询参数发送。两者均未配置且站点未开启登录校验时
-        无需鉴权。uploadChannel / channelName / uploadFolder 为官方
-        可选查询参数。
+        默认以 X-Auth-Code 请求头发送（不进查询串：查询串会随 URL 进日志、
+        异常和面板，等价于把上传鉴权码明文外泄）。老版本站点只认
+        `?authCode=` 查询参数，被 401/403 拒绝时自动回落一次。两者均未
+        配置且站点未开启登录校验时无需鉴权。uploadChannel / channelName /
+        uploadFolder 为官方可选查询参数。
 
         响应为非空数组 [{"src": "/file/xxx.jpg", "publicUrl": "..."}]。
         直链优先取站点地址 + src（忽略 publicUrl），保证落库的链接与
@@ -439,8 +483,6 @@ class ImageBedClient:
         auth_code = str(self.config.get("cfi_auth_code") or "").strip()
 
         params: dict = {}
-        if auth_code:
-            params["authCode"] = auth_code
         upload_channel = str(self.config.get("cfi_upload_channel") or "").strip()
         if upload_channel:
             params["uploadChannel"] = upload_channel
@@ -457,27 +499,61 @@ class ImageBedClient:
         api_url = f"{base}/upload"
         if params:
             api_url = f"{api_url}?{urlencode(params)}"
+        # 老版本 CloudFlare-ImgBed 只认 `?authCode=` 查询参数，版本较新的还认
+        # `X-Auth-Code` 请求头。默认走请求头——查询串会随 URL 进日志、异常栈和
+        # 面板（等价于把上传鉴权码明文外泄）；只有站点明确拒绝时才回落到查询串，
+        # 且只回落一次、只告警一次，保证老站点不会静默上传失败。
+        fallback_url = ""
+        if auth_code:
+            fallback_url = f"{base}/upload?{urlencode({**params, 'authCode': auth_code})}"
+        use_query_auth = {"on": False}
 
-        file_bytes, filename, content_type = await self._upload_file(src_path)
+        filename, content_type = self._upload_meta(src_path)
 
         def prepare(_url: str, method: str, cross_origin: bool = False) -> dict:
             headers = {"User-Agent": USER_AGENT}
             if token and not cross_origin:
                 headers["Authorization"] = f"Bearer {token}"
+            # 上传鉴权码优先走请求头，不拼进 URL：查询串会原样出现在异常/日志里
+            if auth_code and not cross_origin and not use_query_auth["on"]:
+                headers["X-Auth-Code"] = auth_code
             if method != "POST":
                 return {"headers": headers}
-            # FormData 不可复用，每次请求（含重定向后的重发）都需重新构建
+            # FormData 不可复用，每次请求（含重定向后的重发）都需重新构建；
+            # 复用同一个文件句柄，重发前把读指针复位
+            file_handle.seek(0)
             form = aiohttp.FormData()
-            form.add_field("file", file_bytes, filename=filename, content_type=content_type)
+            form.add_field("file", file_handle, filename=filename, content_type=content_type)
             return {"data": form, "headers": headers}
 
         client = await self._http_getter()
-        async with await client.request(
-            "POST", api_url, prepare=prepare, timeout=self._timeout()
-        ) as resp:
-            body = await read_limited_text(resp)
-            if not 200 <= resp.status < 300:
-                raise RuntimeError(f"CloudFlare-ImgBed 返回 HTTP {resp.status}: {body[:500]}")
+        status = 0
+        body = ""
+        # 句柄必须活到请求体发完，所以把 request 包在 with open 里面（流式上传）
+        with open(src_path, "rb") as file_handle:
+            targets = [api_url]
+            if fallback_url:
+                targets.append(fallback_url)
+            for index, target in enumerate(targets):
+                async with await client.request(
+                    "POST", target, prepare=prepare, timeout=self._timeout()
+                ) as resp:
+                    body = await read_limited_text(resp)
+                    status = resp.status
+                if 200 <= status < 300:
+                    break
+                # 只有"鉴权被拒 + 还有查询串这条路"才值得重试一次；
+                # 5xx/网络层错误回落毫无意义，只会把真正的原因冲掉。
+                if not (index == 0 and fallback_url and status in (401, 403)):
+                    raise RuntimeError(f"CloudFlare-ImgBed 返回 HTTP {status}: {body[:500]}")
+                use_query_auth["on"] = True
+                if not getattr(self, "_cf_authcode_query_warned", False):
+                    self._cf_authcode_query_warned = True
+                    logger.warning(
+                        "图床不认 X-Auth-Code 请求头，已回落到 ?authCode= 查询串上传"
+                        "（站点版本较旧；建议升级站点或改用 API Token，"
+                        "鉴权码出现在 URL 里会进访问日志）"
+                    )
 
         try:
             payload = json.loads(body)

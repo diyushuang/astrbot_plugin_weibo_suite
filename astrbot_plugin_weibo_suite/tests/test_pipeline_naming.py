@@ -140,7 +140,7 @@ def test_resolve_category_ignores_blank_keys_and_values():
 
 
 def test_sanitize_segment_replaces_illegal_and_control_chars():
-    dirty = 'a<b>c:d"e|f?g*h' "\\" "i/j" "\x00k\r\n\tl"
+    dirty = 'a<b>c:d"e|f?g*h\\i/j\x00k\r\n\tl'
     assert sanitize_segment(dirty) == "a b c d e f g h i j k l"
 
 
@@ -197,15 +197,13 @@ def test_title_from_text_truncates_and_falls_back():
 
 def test_render_directory_default_template():
     assert (
-        render_directory(DEFAULT_DIR_TEMPLATE, make_ctx())
-        == "12、日常分享/【微博图集@示例博主A】"
+        render_directory(DEFAULT_DIR_TEMPLATE, make_ctx()) == "12、日常分享/【微博图集@示例博主A】"
     )
 
 
 def test_render_directory_keeps_unknown_placeholder():
     assert (
-        render_directory("{category}/{foo}/{account}", make_ctx())
-        == "12、日常分享/{foo}/示例博主A"
+        render_directory("{category}/{foo}/{account}", make_ctx()) == "12、日常分享/{foo}/示例博主A"
     )
 
 

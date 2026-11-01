@@ -23,6 +23,11 @@ from pathlib import Path
 
 from ..shared.napcat import b64_payload as _b64_payload
 
+# 单次 OneBot action 的硬超时（秒）。NapCat 自己的反向 WS 等待是 180s，这里
+# 取得比它短：宁可判失败让 /补传 补，也不能让一次挂死把群相册的串行锁占住
+# 十几分钟。上传分支即使超时也不会盲目重传（见 call() 的幂等处理）。
+ACTION_TIMEOUT = 120.0
+
 ALBUM_LIST_ITEM_ID_KEYS = ("album_id", "albumId", "albumIdB64", "id", "bmpno")
 ALBUM_LIST_ITEM_NAME_KEYS = ("album_name", "albumName", "name", "title")
 # 相册条目的"名字"字段：QQ 相册里显示的文件名就来自这里，去重要靠它。
@@ -268,7 +273,25 @@ class NapCatAlbum:
         for attempt in range(self.retries + 1):
             more = attempt < self.retries
             try:
-                res = await self.caller(action, dict(body))
+                # 逐次调用加硬超时：反向 WS 断链时 bot.call_action 可能一直挂着，
+                # 而调用方（相册上传任务）持有 _group_lock(gid)，一次挂死就是整个
+                # 群的相册链路全部停摆。重试 2 次时以前最坏要等 3×180s。
+                res = await asyncio.wait_for(
+                    self.caller(action, dict(body)), timeout=ACTION_TIMEOUT
+                )
+            except asyncio.TimeoutError as e:
+                # 超时＝没拿到 NapCat 的任何响应：与"连响应都没有"同类处理，
+                # 上传这种非幂等动作绝不能盲重试（会传重）。
+                last = f"{action} 超时（{ACTION_TIMEOUT:.0f}s 无响应）"
+                if more and idempotent:
+                    await self._backoff(attempt)
+                    continue
+                note = (
+                    ""
+                    if idempotent
+                    else "NapCat 未在超时内响应，这张可能其实已经传上去了，重传前先在相册里确认"
+                )
+                raise _fail(action, last, 0, note) from e
             except Exception as e:  # aiocqhttp ActionFailed / HttpFailed / NetworkError
                 info = _payload(e)
                 code = info.get("retcode", 0) or 0

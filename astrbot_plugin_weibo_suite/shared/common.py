@@ -159,9 +159,14 @@ def sanitize_error_text(value: Any, limit: int = 200) -> str:
 
 def redact_proxy(url: str) -> str:
     """Hide credentials in a proxy URL before it reaches logs or the UI."""
-    parsed = urlparse(url)
+    text = str(url or "")
+    parsed = urlparse(text)
     if not (parsed.username or parsed.password):
-        return url
+        # 没有 scheme 的 `user:pass@host` 会被 urlparse 整串塞进 path，
+        # 这里按最后一个 @ 兜底脱敏，避免代理密码进日志/错误面板。
+        if "@" in text:
+            return f"***@{text.rsplit('@', 1)[-1]}"
+        return text
     host = parsed.netloc.rsplit("@", 1)[-1]
     return urlunparse(parsed._replace(netloc=f"***@{host}"))
 

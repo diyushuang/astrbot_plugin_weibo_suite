@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>微博全链路助手 · 控制面板</title>
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<main class="page-shell">
+
+  <header class="page-header">
+    <div class="page-title">
+      <div class="eyebrow">微博全链路助手</div>
+      <h1>控制面板 <span id="version-chip" class="chip" hidden></span></h1>
+      <p class="subtitle">监控转发 · 整帖归档 · 图床向量 · 签到文案 · 图片溯源</p>
+    </div>
+    <div class="header-actions">
+      <button id="btn-check" class="btn primary" type="button">立即检查</button>
+      <button id="btn-refresh" class="btn" type="button">刷新</button>
+    </div>
+  </header>
+
+  <div id="status" class="status-line" hidden></div>
+
+  <nav class="tab-nav" id="tab-nav" aria-label="面板分区">
+    <button class="tab-btn active" type="button" data-tab="overview">总览</button>
+    <button class="tab-btn" type="button" data-tab="monitor">微博监控</button>
+    <button class="tab-btn" type="button" data-tab="archive">归档与图床</button>
+    <button class="tab-btn" type="button" data-tab="copylib">文案库</button>
+    <button class="tab-btn" type="button" data-tab="trace">溯源与签到</button>
+    <button class="tab-btn" type="button" data-tab="sns">多平台订阅</button>
+    <button class="tab-btn" type="button" data-tab="errors">错误日志</button>
+  </nav>
+
+  <section class="card">
+    <h2>运行状态</h2>
+    <div class="status-grid" id="status-grid"></div>
+  </section>
+
+  <div class="grid-2">
+    <section class="card">
+      <h2>监控博主 <span class="count" id="accounts-count">0</span></h2>
+      <form id="account-form" class="row-form">
+        <input id="account-input" type="text" placeholder="uid 或主页链接" autocomplete="off">
+        <button class="btn primary" type="submit">添加</button>
+      </form>
+      <ul class="list" id="account-list"></ul>
+      <p class="empty" id="accounts-empty">尚未监控任何账号。添加后下一轮检查会先建立基线，历史微博不会推送。</p>
+      <p class="hint">点博主行的「@全体」可让该博主的新微博推送时 @全体成员（需机器人在群里是管理员，且下方「推送 @全体成员」的总开关开启）；不 @ 的博主保持普通推送。</p>
+      <p class="hint" id="at-all-tip" hidden>已勾选 @全体 的博主名单已保存，但 @全体成员总开关当前为关闭——可在下方「推送 @全体成员」卡片开启。</p>
+    </section>
+
+    <section class="card">
+      <h2>推送目标 <span class="count" id="sessions-count">0</span></h2>
+      <form id="session-form" class="row-form">
+        <input id="session-input" type="text" placeholder="平台:消息类型:会话号" autocomplete="off">
+        <button class="btn primary" type="submit">添加</button>
+      </form>
+      <ul class="list" id="session-list"></ul>
+      <p class="empty" id="sessions-empty">尚未绑定推送目标。推荐在目标群里发「微博绑定」自动带出会话 ID。</p>
+      <p class="hint">会话 ID 格式：平台:消息类型:会话号，群聊的消息类型为 GroupMessage。</p>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>相册绑定规则 <span class="count" id="rules-count">0</span></h2>
+    <form id="rule-form" class="rule-form">
+      <input id="rule-uid" type="text" placeholder="uid 或主页链接" autocomplete="off">
+      <input id="rule-gid" type="text" placeholder="群号" autocomplete="off">
+      <input id="rule-album" type="text" placeholder="相册名或 ID" autocomplete="off">
+      <button class="btn primary" type="submit">添加</button>
+    </form>
+    <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>博主</th><th>群号</th><th>相册</th><th class="col-op"></th></tr></thead>
+        <tbody id="rule-rows"></tbody>
+      </table>
+      <p class="empty" id="rules-empty">暂无规则。绑定后，对应博主的微博图片会在推送成功后自动上传到该群相册（可用「微博列相册」查看群内相册）。</p>
+    </div>
+    <p class="hint" id="album-disabled-tip" hidden>相册上传总开关当前为关闭状态，可在插件配置面板开启。</p>
+  </section>
+
+  <section class="card">
+    <h2>关键词路由规则 <span class="count" id="kw-rules-count">0</span></h2>
+    <form id="kw-rule-form" class="rule-form kw-rule-form">
+      <input id="kw-rule-uid" type="text" placeholder="博主 uid（留空=全局）" autocomplete="off">
+      <input id="kw-rule-keyword" type="text" placeholder="关键词" autocomplete="off">
+      <input id="kw-rule-gid" type="text" placeholder="群号" autocomplete="off">
+      <input id="kw-rule-album" type="text" placeholder="相册名或 ID" autocomplete="off">
+      <button class="btn primary" type="submit">添加</button>
+    </form>
+    <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>范围</th><th>关键词</th><th>群号</th><th>相册</th><th class="col-op"></th></tr></thead>
+        <tbody id="kw-rule-rows"></tbody>
+      </table>
+      <p class="empty" id="kw-rules-empty">未配置关键词路由，图片按上方默认相册绑定上传。配置后，命中关键词的微博图片只传到固定群相册；博主规则优先于全局规则。</p>
+    </div>
+    <p class="hint">博主规则的 uid 须已在监控列表中；关键词不可包含冒号；同（范围+关键词+群号）再次添加会覆盖相册。</p>
+  </section>
+
+  <section class="card">
+    <h2>推送 @全体成员
+      <span class="count" id="at-all-count" hidden>0</span>
+    </h2>
+    <div class="at-all-switch">
+      <button id="btn-at-all-switch" class="btn" type="button">开启 @全体</button>
+      <span class="badge" id="at-all-switch-state">总开关：关闭</span>
+    </div>
+    <form id="at-uid-form" class="row-form">
+      <input id="at-uid-input" type="text" placeholder="博主 uid 或主页链接（须已监控）" autocomplete="off">
+      <button class="btn primary" type="submit">加入名单</button>
+    </form>
+    <ul class="list" id="at-uid-list"></ul>
+    <p class="empty" id="at-uid-empty">名单为空 = 所有博主的新微博都 @全体；加入博主后只有名单内的才 @（也可以在上方「监控博主」逐行开关）。</p>
+    <form id="at-kw-form" class="row-form">
+      <input id="at-kw-input" type="text" placeholder="关键词（如：抽奖、福利、直播）" autocomplete="off">
+      <button class="btn primary" type="submit">加入关键词</button>
+    </form>
+    <ul class="list" id="at-kw-list"></ul>
+    <p class="empty" id="at-kw-empty">关键词为空 = 不限内容，名单内博主的每条新微博都 @全体。</p>
+    <p class="hint" id="at-all-last" hidden></p>
+    <p class="hint">生效条件：总开关开启 <b>且</b> 博主在名单内（名单留空则不限博主）<b>且</b> 命中关键词（关键词留空则不限内容）。仅群聊生效，且必须同时满足 QQ 的两道硬条件——机器人在目标群是<b>群主/管理员</b>、本账号 24 小时内还有 @全体 次数（普通管理员 10 次、超级会员 20 次，所有群共享）——不满足时插件不带 @全体，改成普通推送并在此处与日志里写明原因，避免发出「只有字样、没有提醒」的假 @。改动即时生效，已在待推送队列里的条目下一轮就按新设置发送。</p>
+  </section>
+
+  <section class="card">
+    <h2>推送预览
+      <button id="btn-preview-refresh" class="btn-mini card-action" type="button">刷新预览</button>
+    </h2>
+    <div class="preview-badges" id="preview-badges"></div>
+    <pre class="preview-text" id="preview-text"></pre>
+    <p class="hint">按当前插件配置渲染的一条样例（虚构微博，不会真的发送）：消息模板、话题标签行与表情翻译即时生效，图片/视频段与 @全体成员是否带上见上方标记；@全体 的博主名单与关键词都命中才会带上，两项都在上方「推送 @全体成员」卡片里改（博主也可以在「监控博主」逐行开关）。在插件配置面板改完配置后点「刷新预览」即可看到群里将收到的效果。</p>
+  </section>
+
+  <section class="card">
+    <h2>待推送队列 <span class="count" id="pending-count">0</span>
+      <button id="btn-stop-round" class="btn-mini card-action" type="button">停止本轮推送</button>
+    </h2>
+    <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>博主</th><th>内容摘要</th><th>入队时间</th><th>重试</th><th class="col-op"></th></tr></thead>
+        <tbody id="pending-rows"></tbody>
+      </table>
+      <p class="empty" id="pending-empty">队列为空，没有待推送的微博。</p>
+    </div>
+    <p class="hint">推送一直失败时，用每行的「取消」把这一条摘出队列——取消不记为推送失败，也不会触发群相册上传，30 分钟内可在下方「已取消」里恢复；「停止本轮推送」只结束当前这一轮，剩余条目原样留在队列、不消耗重试次数，下一轮检查会继续尝试。</p>
+  </section>
+
+  <section class="card">
+    <h2>已取消（可恢复） <span class="count" id="cancelled-count">0</span></h2>
+    <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>博主</th><th>内容摘要</th><th>取消时间</th><th>剩余可恢复</th><th class="col-op"></th></tr></thead>
+        <tbody id="cancelled-rows"></tbody>
+      </table>
+      <p class="empty" id="cancelled-empty">没有被取消的推送。取消过的条目会在这里保留一段时间，供误点时恢复。</p>
+    </div>
+    <p class="hint">「恢复」把条目原样放回队列尾部，取消时的重试进度保持不变——若取消时重试已超限，恢复后本轮会做一次「去视频降级补发」，未成功才按放弃推送记账。超出可恢复时间后条目与其已下载的视频临时文件会被清理，不再出现在这里。</p>
+  </section>
+
+  <section class="card">
+    <h2>运行统计</h2>
+    <div class="stat-tiles" id="stat-tiles"></div>
+    <div class="stats-flex">
+      <div class="chart-block">
+        <h3>近 7 天推送</h3>
+        <div class="bars" id="daily-bars"></div>
+      </div>
+      <div class="rank-block">
+        <h3>博主推送排行</h3>
+        <ol class="ranking" id="ranking"></ol>
+        <p class="empty" id="ranking-empty">暂无推送记录。</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>最近动态</h2>
+    <ul class="activity" id="activity-list"></ul>
+    <p class="empty" id="activity-empty">暂无动态。插件产生推送、相册上传、风控或异常事件后会显示在这里。</p>
+  </section>
+
+  <section class="card">
+    <h2>错误日志留存
+      <span class="count err" id="errors-count" hidden>0</span>
+      <button id="btn-clear-errors" class="btn-mini card-action" type="button">清空</button>
+    </h2>
+    <ul class="activity errlog" id="errors-list"></ul>
+    <p class="empty" id="errors-empty">没有错误记录。插件的发送超时、检查失败、相册上传失败、风控冷却等告警都会在这里留存。</p>
+    <p class="hint">每条告警在产生的瞬间落盘（errors.log，512KB 自动轮转），服务器崩溃或无响应后重启，这里仍能看到出事前的最后记录；时间带"重启回读"标记的是上次运行留下的。</p>
+  </section>
+
+  <section class="card" id="archive-card">
+    <h2>归档总览 <span class="badge" id="archive-badge">读取中</span></h2>
+    <div class="status-grid" id="archive-status"></div>
+    <div class="row-form">
+      <input id="backfill-uid" type="text" placeholder="uid 或主页链接">
+      <input id="backfill-since" type="date" aria-label="起始日期">
+      <label class="inline-check"><input id="backfill-full" type="checkbox"> 全量补详情</label>
+      <button id="btn-backfill" class="btn primary" type="button">开始回填</button>
+      <button id="btn-backfill-stop" class="btn" type="button">停止</button>
+    </div>
+    <pre class="preview-text compact-pre" id="backfill-progress">尚无回填任务</pre>
+    <div class="row-form">
+      <input id="reconcile-uid" type="text" placeholder="对账 uid（留空=全部）">
+      <button id="btn-reconcile" class="btn" type="button">运行对账</button>
+      <button id="btn-archive-refresh" class="btn" type="button">刷新归档</button>
+    </div>
+    <pre class="preview-text compact-pre" id="reconcile-report">尚未运行对账</pre>
+    <div class="table-wrap"><table class="table"><thead><tr><th>时间</th><th>博主</th><th>正文</th><th>图</th></tr></thead><tbody id="archive-rows"></tbody></table></div>
+    <p class="empty" id="archive-empty">归档库为空，或归档尚未启用。</p>
+    <div class="row-form">
+      <input id="archive-file" type="file" accept=".json,application/json">
+      <button id="btn-archive-import" class="btn" type="button">导入 JSON 种子</button>
+    </div>
+  </section>
+
+  <section class="card" id="pipeline-card">
+    <h2>图床管线 <span class="badge" id="pipeline-badge">读取中</span></h2>
+    <pre class="preview-text compact-pre" id="pipeline-status">读取中…</pre>
+    <div class="row-form">
+      <input id="pipeline-limit" type="number" min="1" max="500" value="200" aria-label="补跑上限">
+      <button id="btn-pipeline-retry" class="btn primary" type="button">补跑缺口</button>
+    </div>
+    <form id="naming-form" class="stack-form">
+      <label>目录模板<input id="naming-directory" type="text"></label>
+      <label>文件名模板<input id="naming-file" type="text"></label>
+      <label>博主分类 JSON<textarea id="naming-categories" rows="5" spellcheck="false"></textarea></label>
+      <button class="btn primary" type="submit">保存命名规则</button>
+    </form>
+  </section>
+
+  <section class="card" id="copylib-card">
+    <h2>文案库 <span class="badge" id="copylib-badge">读取中</span></h2>
+    <div class="status-grid" id="copylib-status"></div>
+    <div class="row-form">
+      <input id="copylib-uid" type="text" placeholder="筛选 uid（选填）">
+      <input id="copylib-keyword" type="text" placeholder="正文关键词">
+      <button id="btn-copylib-search" class="btn" type="button">搜索</button>
+    </div>
+    <div class="table-wrap"><table class="table"><thead><tr><th>时间</th><th>博主</th><th>文案</th><th>状态</th></tr></thead><tbody id="copylib-rows"></tbody></table></div>
+    <p class="empty" id="copylib-empty">文案库暂无已清洗内容。</p>
+    <div class="row-form">
+      <input id="copylib-file" type="file" accept=".csv,.md,.markdown">
+      <button id="btn-copylib-import" class="btn" type="button">导入 CSV / Markdown</button>
+    </div>
+  </section>
+
+  <section class="card" id="trace-card">
+    <h2>溯源与签到 <span class="badge" id="trace-badge">读取中</span></h2>
+    <div class="status-grid" id="trace-status"></div>
+    <pre class="preview-text compact-pre" id="trace-detail">读取中…</pre>
+    <div class="row-form">
+      <label class="inline-check"><input id="rescan-force" type="checkbox"> 强制重建扫描来源</label>
+      <button id="btn-trace-rescan" class="btn primary" type="button">启动图库重扫</button>
+      <button id="btn-trace-repair" class="btn" type="button">修复原图历史键</button>
+    </div>
+  </section>
+
+  <section class="card sns-panel" id="sns-session-card">
+    <h2>登录态与取数方式 <span class="badge" id="sns-badge">读取中</span></h2>
+    <div class="status-grid" id="sns-status"></div>
+    <table class="table">
+      <thead>
+        <tr><th>平台</th><th>订阅数</th><th>基础间隔</th><th>登录态</th><th>操作</th></tr>
+      </thead>
+      <tbody id="sns-platform-rows"></tbody>
+    </table>
+    <div class="row-form">
+      <label class="inline-check">取数方式
+        <select id="sns-fetch-mode">
+          <option value="browser">浏览器（推荐，复用本机 Edge）</option>
+          <option value="http">HTTP（需自备 Cookie，风控更高）</option>
+          <option value="rss">RSS（RSSHub 等，无需登录）</option>
+        </select>
+      </label>
+      <button id="btn-sns-save-mode" class="btn primary" type="button">保存取数方式</button>
+      <button id="btn-sns-check-now" class="btn" type="button">立即检查一轮</button>
+    </div>
+    <p class="hint">浏览器方式下「打开登录窗口」会在本机弹出 Edge（持久化目录），你手动扫码/登录一次即可，Cookie 始终留在浏览器内、不会导出。HTTP 方式需要填写 Cookie，风控概率明显更高。</p>
+    <p class="hint" id="sns-browser-tip" hidden></p>
+  </section>
+
+  <section class="card sns-panel" id="sns-accounts-card">
+    <h2>订阅名单 <span class="count" id="sns-accounts-count">0</span></h2>
+    <form id="sns-account-form" class="row-form">
+      <select id="sns-platform-select">
+        <option value="douyin">抖音</option>
+        <option value="xhs">小红书</option>
+        <option value="instagram">Instagram</option>
+      </select>
+      <input id="sns-account-input" type="text" placeholder="主页链接或账号 ID" autocomplete="off">
+      <button class="btn primary" type="submit">添加</button>
+      <button id="btn-sns-drill" class="btn" type="button">预览推送文案</button>
+    </form>
+    <ul class="list" id="sns-account-list"></ul>
+    <p class="empty" id="sns-accounts-empty">尚未订阅任何博主。添加后第一次成功取数只建立基线，历史作品不会推送。</p>
+    <pre class="preview-text compact-pre" id="sns-drill-output" hidden></pre>
+  </section>
+
+  <section class="card sns-panel" id="sns-guard-card">
+    <h2>风控守卫 <span class="badge" id="sns-guard-badge">读取中</span></h2>
+    <div class="status-grid" id="sns-guard-status"></div>
+    <div class="row-form">
+      <label>冷却基数（秒）<input id="sns-guard-base" type="number" min="60" step="60"></label>
+      <label>冷却上限（秒）<input id="sns-guard-cap" type="number" min="60" step="60"></label>
+      <label>健康暂停阈值<input id="sns-guard-pause" type="number" min="0" max="1" step="0.05"></label>
+      <label>健康降速阈值<input id="sns-guard-degrade" type="number" min="0" max="1" step="0.05"></label>
+    </div>
+    <div class="row-form">
+      <label>保号期（小时）<input id="sns-guard-warmup" type="number" min="0" max="720" step="1"></label>
+      <label class="inline-check"><input id="sns-guard-night" type="checkbox"> 夜间（0-8 点）翻倍间隔</label>
+      <label class="inline-check"><input id="sns-guard-aggressive" type="checkbox"> 激进档位（更容易被风控）</label>
+      <button id="btn-sns-save-guard" class="btn primary" type="button">保存守卫参数</button>
+    </div>
+    <p class="hint">风控命中按指数退避冷却；健康度过低会自动暂停该账号，登录态失效（需要人工重新登录）只暂停不重试。激进档位会把基础间隔降到 180/180/600 秒，被风控的概率显著上升，默认关闭。</p>
+  </section>
+
+  <section class="card sns-panel" id="sns-latency-card">
+    <h2>延迟估算</h2>
+    <table class="table">
+      <thead>
+        <tr><th>平台</th><th>订阅数</th><th>实际间隔</th><th>P50 延迟</th><th>P95 延迟</th></tr>
+      </thead>
+      <tbody id="sns-latency-rows"></tbody>
+    </table>
+    <p class="hint" id="sns-latency-note">延迟是从博主发布到群里看到消息的估算：轮询间隔内均匀到点，所以中位数约为半个间隔。</p>
+  </section>
+
+  <section class="card sns-panel" id="sns-credentials-card">
+    <h2>Cookie 与凭据</h2>
+    <ul class="list" id="sns-credential-list"></ul>
+    <p class="hint">这里只展示脱敏后的字段名与长度，不展示 Cookie 原文；凭据文件权限为 0600。浏览器取数模式下不会读写这里的 Cookie。</p>
+  </section>
+
+  <section class="card sns-panel" id="sns-events-card">
+    <h2>订阅事件</h2>
+    <ul class="activity" id="sns-events"></ul>
+    <p class="empty" id="sns-events-empty">暂无订阅事件。</p>
+  </section>
+
+  <section class="card">
+    <details class="about">
+      <summary>功能与指令说明</summary>
+      <div class="about-body">
+        <h3>功能特性</h3>
+        <ul>
+          <li>免 Cookie：自动向微博游客系统换取匿名身份并维护续期，无需提供账号 Cookie（也支持自定义 Cookie 模式）</li>
+          <li>准实时轮询：默认 120 秒一轮（最小 30 秒），逐账号检查新微博并推送到绑定的群</li>
+          <li>推送带图：消息附带轻量图（mw2000），转发微博也会推送，支持屏蔽词/白名单/时效过滤</li>
+          <li>群相册：按博主绑定相册，原图自动上传（实况图转 GIF 需 ffmpeg），台账去重防重复</li>
+          <li>关键词路由：命中关键词的微博图片只传固定群相册（全局或按博主），博主规则优先，未配置时按默认绑定</li>
+          <li>可靠性：失败重试补推、风控自愈（418/432 全局冷却梯度）、基线防历史刷屏、状态持久化</li>
+        </ul>
+        <h3>聊天指令</h3>
+        <table class="table cmd-table">
+          <tbody>
+            <tr><td>微博绑定 / 微博解绑</td><td>把当前群绑定为推送目标 / 解除（管理员）</td></tr>
+            <tr><td>微博添加 &lt;uid或链接&gt; / 微博删除 &lt;uid&gt;</td><td>添加监控账号 / 取消监控（管理员）</td></tr>
+            <tr><td>微博列表</td><td>查看监控账号与推送目标</td></tr>
+            <tr><td>微博相册绑定 &lt;uid&gt; &lt;相册名或ID&gt; / 微博相册移除 &lt;uid&gt;</td><td>绑定/解除博主图片上传到本群相册（管理员）</td></tr>
+            <tr><td>微博相册列表 / 微博列相册</td><td>查看相册绑定规则 / 查看本群相册（管理员）</td></tr>
+            <tr><td>微博关键词相册 &lt;关键词&gt; &lt;群号&gt; &lt;相册名或ID&gt; / 微博关键词相册移除 &lt;关键词&gt;</td><td>设置/删除全局关键词路由（管理员，群内可省群号）</td></tr>
+            <tr><td>微博博主关键词相册 &lt;uid&gt; &lt;关键词&gt; &lt;群号&gt; &lt;相册名或ID&gt; / 微博博主关键词相册移除 &lt;uid&gt; &lt;关键词&gt;</td><td>设置/删除博主关键词路由，优先于全局（管理员）</td></tr>
+            <tr><td>微博关键词相册列表</td><td>查看关键词路由规则</td></tr>
+            <tr><td>微博检测 / 微博状态</td><td>立即检查一轮（管理员）/ 查看运行状态</td></tr>
+          </tbody>
+        </table>
+        <h3>说明</h3>
+        <ul>
+          <li>本页面的增删操作与聊天指令写入同一份插件配置，立即生效</li>
+          <li>更细的参数（消息模板、过滤词、并发等）在插件配置面板调整</li>
+          <li>面板数据每 20 秒自动刷新，也可点右上角「刷新」</li>
+        </ul>
+      </div>
+    </details>
+  </section>
+
+  <footer class="page-footer">数据每 20 秒自动刷新 · 由插件 WebUI 面板提供</footer>
+</main>
+<script type="module" src="./app.js"></script>
+</body>
+</html>

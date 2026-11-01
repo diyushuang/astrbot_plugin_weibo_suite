@@ -81,7 +81,7 @@ async def test_search_can_return_candidate_vectors_for_duplicate_clustering():
     engine = make_engine()
     calls = []
 
-    async def request_json(method, url, *, json_body=None, headers=None):
+    async def request_json(method, url, *, json_body=None, headers=None, **_kwargs):
         calls.append(json_body)
         return {
             "result": {
@@ -460,7 +460,7 @@ async def test_original_url_for_thumb_matches_payload_and_returns_image_url():
 async def test_original_url_for_thumb_falls_back_to_path_when_host_differs():
     """host 不同时，整串精确匹配必然落空，必须退回「按对象键」匹配。
 
-    线上真实故障：payload 记的是内网 `192.0.2.10:7658`，插件手上的直链来自
+    典型故障：payload 记的是内网 `192.0.2.10:7658`，插件手上的直链来自
     公网反代 `bed.example.com`（同一图床）。此时 count(精确) = 0，若不退回按路径
     匹配，`/原图` 就会报「找不到」——v1.5.9 首次上线即如此。
     """
@@ -483,9 +483,9 @@ async def test_original_url_for_thumb_falls_back_to_path_when_host_differs():
                     {
                         "id": "uuid-1",
                         "payload": {
-                            "thumb_url": "http://192.0.2.10:7658/file/thumbnails/1789660677557_【微博_兰蔻LANCOME】20230507-04：郑州线下活动.jpg",
+                            "thumb_url": "http://192.0.2.10:7658/file/thumbnails/1789660677557_【微博_示例品牌6】20230507-04：示例活动.jpg",
                             "image_url": "http://192.0.2.10:7658/file/8%E3%80%81…/orig.jpg",
-                            "file_name": "【微博@兰蔻LANCOME】20230507-04：郑州线下活动.jpg",
+                            "file_name": "【微博@示例品牌6】20230507-04：示例活动.jpg",
                         },
                     }
                 ]
@@ -496,13 +496,13 @@ async def test_original_url_for_thumb_falls_back_to_path_when_host_differs():
     # 插件手上的是公网域名形态（与 payload 的 host 不同）
     public_thumb = (
         "https://bed.example.com/file/thumbnails/"
-        "1789660677557_%E3%80%90%E5%BE%AE%E5%8D%9A_%E5%85%B0%E8%94%BBLANCOME"
-        "%E3%80%9120230507-04%EF%BC%9A%E9%83%91%E5%B7%9E%E7%BA%BF%E4%B8%8B%E6%B4%BB%E5%8A%A8.jpg"
+        "1789660677557_%E3%80%90%E5%BE%AE%E5%8D%9A_%E7%A4%BA%E4%BE%8B%E5%93%81%E7%89%8C6"
+        "%E3%80%9120230507-04%EF%BC%9A%E7%A4%BA%E4%BE%8B%E6%B4%BB%E5%8A%A8.jpg"
     )
     info = await engine.original_info_for_thumb(public_thumb)
     assert info is not None
     assert info["url"].endswith("orig.jpg")
-    assert info["file_name"] == "【微博@兰蔻LANCOME】20230507-04：郑州线下活动.jpg"
+    assert info["file_name"] == "【微博@示例品牌6】20230507-04：示例活动.jpg"
 
     # 第二次尝试必须是按路径匹配（match.text，且不含 host）
     text_filter = filters[2][1]
@@ -567,7 +567,7 @@ async def test_original_url_for_thumb_skips_work_when_disabled_or_blank():
 async def test_original_by_file_name_returns_payload_image_url_with_full_path():
     """按裸文件名反查，取回**带完整目录**的权威直链。
 
-    线上真实故障：`/原图 【微博@潮流合伙人】20200207-04：示例博主A海报.jpg` 报
+    典型故障：`/原图 【微博@示例综艺4】20200207-04：示例海报.jpg` 报
     「图床里没有找到」。因为插件把裸名直接拼成 `/file/{裸名}`，而图床的
     `/file/{path}` **只认完整对象键**，裸名必然 404（实测 A/B：裸名 404、
     带目录 200，内网与公网域名结果一致）。payload.image_url 才是入库时登记的
@@ -575,13 +575,13 @@ async def test_original_by_file_name_returns_payload_image_url_with_full_path():
     """
     engine = make_engine()
     calls = []
-    name = "【微博@潮流合伙人】20200207-04：示例博主A海报.jpg"
+    name = "【微博@示例综艺4】20200207-04：示例海报.jpg"
     with_path = (
         "http://192.0.2.10:7658/file/7%E3%80%81%E7%BB%BC%E8%89%BA%E8%8A%82%E7%9B%AE/"
-        "%E7%88%B1%E5%A5%87%E8%89%BA%E3%80%8A%E6%BD%AE%E6%B5%81%E5%90%88%E4%BC%99%E4%BA%BA"
-        "%E3%80%8B/%E3%80%8A%E6%BD%AE%E6%B5%81%E5%90%88%E4%BC%99%E4%BA%BA%E3%80%8B%E5%9B%BE"
-        "%E9%9B%86/%E3%80%90%E5%BE%AE%E5%8D%9A%40%E6%BD%AE%E6%B5%81%E5%90%88%E4%BC%99%E4%BA%BA"
-        "%E3%80%9120200207-04%EF%BC%9A%E8%B5%B5%E4%BB%8A%E9%BA%A6%E6%B5%B7%E6%8A%A5.jpg"
+        "%E7%A4%BA%E4%BE%8B%E5%B9%B3%E5%8F%B04%E3%80%8A%E7%A4%BA%E4%BE%8B%E7%BB%BC%E8%89%BA4"
+        "%E3%80%8B/%E3%80%8A%E7%A4%BA%E4%BE%8B%E7%BB%BC%E8%89%BA4%E3%80%8B%E5%9B%BE"
+        "%E9%9B%86/%E3%80%90%E5%BE%AE%E5%8D%9A%40%E7%A4%BA%E4%BE%8B%E7%BB%BC%E8%89%BA4"
+        "%E3%80%9120200207-04%EF%BC%9A%E7%A4%BA%E4%BE%8B%E6%B5%B7%E6%8A%A5.jpg"
     )
 
     async def request_json(method, url, *, json_body=None, headers=None):
@@ -644,7 +644,7 @@ async def test_original_by_file_name_returns_none_when_absent():
 async def test_original_by_file_name_resolves_duplicates_when_content_identical():
     """同名多份但**内容一致**时，确定性地取一份返回。
 
-    线上真实故障：`/原图 【微博@YOUKESHU有棵树】20240308-05：抖音直播.jpg` 报
+    典型故障：`/原图 【微博@示例品牌7】20240308-05：抖音直播.jpg` 报
     「图床里没有找到」。该名字在 Qdrant 精确命中 **2 个点**（同一张图被放进两个
     相册目录），而旧实现要求命中数**恰好为 1**，于是主动放弃反查 → 退回裸名拼
     URL → 必然 404。实测这两个点 sha256 完全相同（3,594,079 字节），任取一份
@@ -654,20 +654,20 @@ async def test_original_by_file_name_resolves_duplicates_when_content_identical(
     这些名字能不能被 /原图 取到。
     """
     engine = make_engine()
-    name = "【微博@YOUKESHU有棵树】20240308-05：抖音直播.jpg"
+    name = "【微博@示例品牌7】20240308-05：抖音直播.jpg"
     base = "http://192.0.2.10:7658/file/"
     first = {
         "file_name": name,
         "size_bytes": 3.43,
         "mime": "image/jpeg",
-        "src": "/file/10、商务宣传/有棵树/有棵树抖音直播（20240304）/" + name,
+        "src": "/file/10、商务宣传/示例品牌7/示例品牌7抖音直播（20240304）/" + name,
         "image_url": base + "10%E3%80%81%E5%95%86%E5%8A%A1%E5%AE%A3%E4%BC%A0.jpg",
     }
     second = {
         "file_name": name,
         "size_bytes": 3.43,
         "mime": "image/jpeg",
-        "src": "/file/9、访谈直播/【78】有棵树抖音直播/" + name,
+        "src": "/file/9、访谈直播/【78】示例品牌7抖音直播/" + name,
         "image_url": base + "9%E3%80%81%E8%AE%BF%E8%B0%88%E7%9B%B4%E6%92%AD.jpg",
     }
 
@@ -824,7 +824,7 @@ def test_thumb_path_key_strips_host_and_scheme():
     同一张图在内网 IP 与公网反代下必须得到同一个键——这正是反查能跨 host
     命中的前提。
     """
-    key = "thumbnails/1789660677557_【微博_兰蔻LANCOME】20230507-04：郑州线下活动.jpg"
+    key = "thumbnails/1789660677557_【微博_示例品牌6】20230507-04：示例活动.jpg"
     internal = f"http://192.0.2.10:7658/file/{key}"
     public = f"https://bed.example.com/file/{key}"
     assert thumb_path_key(internal) == key
@@ -834,11 +834,11 @@ def test_thumb_path_key_strips_host_and_scheme():
 
 def test_thumb_path_key_decodes_percent_encoding():
     """库内存未编码串、插件手上多为已编码串，必须先 unquote 才能对上。"""
-    key = "thumbnails/1789660677557_【微博_兰蔻LANCOME】20230507-04：郑州线下活动.jpg"
+    key = "thumbnails/1789660677557_【微博_示例品牌6】20230507-04：示例活动.jpg"
     encoded = (
         "https://bed.example.com/file/thumbnails/"
-        "1789660677557_%E3%80%90%E5%BE%AE%E5%8D%9A_%E5%85%B0%E8%94%BBLANCOME"
-        "%E3%80%9120230507-04%EF%BC%9A%E9%83%91%E5%B7%9E%E7%BA%BF%E4%B8%8B%E6%B4%BB%E5%8A%A8.jpg"
+        "1789660677557_%E3%80%90%E5%BE%AE%E5%8D%9A_%E7%A4%BA%E4%BE%8B%E5%93%81%E7%89%8C6"
+        "%E3%80%9120230507-04%EF%BC%9A%E7%A4%BA%E4%BE%8B%E6%B4%BB%E5%8A%A8.jpg"
     )
     assert thumb_path_key(encoded) == key
 
@@ -863,7 +863,7 @@ def test_thumb_path_key_handles_garbage_without_raising():
 
 
 def make_engine_without_embed(collection: str = "imgbed_images") -> VectorEngine:
-    """只配 Qdrant、缺 embed 的引擎——线上真实故障形态。
+    """只配 Qdrant、缺 embed 的引擎——典型故障形态。
 
     2026-10-20 排查：另一台 AstrBot 实例（v4.29.1）随机图命中缩略图后反查
     全部失败。当时的判定 `enabled = qdrant_url and embed_base_url and
@@ -910,7 +910,7 @@ async def test_reverse_lookup_works_without_embed_config():
                                 "http://192.0.2.10:7658/file/thumbnails/1789666357268_x.jpg"
                             ),
                             "image_url": "http://192.0.2.10:7658/file/12、日常分享/原图.jpg",
-                            "file_name": "【小红书@示例博主A】20231110-02：MiuMiu假日派对.jpg",
+                            "file_name": "【小红书@示例博主A】20231110-02：示例品牌8假日派对.jpg",
                         },
                     }
                 ]
@@ -921,7 +921,7 @@ async def test_reverse_lookup_works_without_embed_config():
     info = await engine.original_info_for_thumb(thumb)
     assert info is not None
     assert info["url"].endswith("原图.jpg")
-    assert info["file_name"] == "【小红书@示例博主A】20231110-02：MiuMiu假日派对.jpg"
+    assert info["file_name"] == "【小红书@示例博主A】20231110-02：示例品牌8假日派对.jpg"
 
     # 按文件名反查同样只看 qdrant_ready
     async def count_one(method, url, *, json_body=None, headers=None):

@@ -7,7 +7,7 @@ from datetime import timedelta, timezone
 from urllib.parse import quote
 
 PLUGIN_NAME = "astrbot_plugin_weibo_suite"
-PLUGIN_VERSION = "v0.5.0"
+PLUGIN_VERSION = "v0.8.1"
 
 WEIBO_HOME_URL = "https://m.weibo.cn/"
 WEIBO_INDEX_URL = "https://m.weibo.cn/api/container/getIndex"
@@ -23,8 +23,12 @@ WEIBO_VISITOR_REFERER = (
     "&ua=php-sso_sdk_client-0.6.36&_rand=1791030900.1"
 )
 
-# 出网白名单：微博时间线/全文接口 + 微博游客身份系统
-WEIBO_ALLOWED_HOSTS = {"m.weibo.cn", "visitor.passport.weibo.cn"}
+# 出网白名单：微博时间线接口 + 微博游客身份系统 + 长文全文接口（weibo.com）。
+# weibo.com 只为归档长文首选接口（archive.py 的 ARCHIVE_LONGTEXT_URL）开通：
+# 之前漏了它，该接口必然被 _validate_url 拒绝、又被 debug 日志吞掉，
+# 等于永久静默失效。放开 host 不等于放松防 SSRF——_resolve_host +
+# _ensure_public_addrs 仍然逐跳校验解析结果必须是公网地址。
+WEIBO_ALLOWED_HOSTS = {"m.weibo.cn", "visitor.passport.weibo.cn", "weibo.com"}
 
 # 相册/视频媒体下载白名单（与 API 白名单分离）：图片 CDN + 视频段/视频 CDN。
 # .sina.com.cn 覆盖旧版视频 CDN（*.video.sina.com.cn）
@@ -73,6 +77,12 @@ RENEW_COOLDOWN = 600.0  # 主动续期最小间隔（秒）：频繁 genvisitor 
 RENEW_MAX_PER_HOUR = 3  # 每小时最多续期尝试次数
 RENEW_FAIL_BACKOFF = 600.0  # 续期失败退避基数（秒），指数递增，封顶 1 小时
 REQUEST_GAP = (2.0, 5.0)  # 相邻两次微博请求的最小随机间隔（秒）
+# 媒体 CDN 专用的小间隔（秒）。媒体走的是 sinaimg / weibocdn 这类独立 CDN，
+# 与 m.weibo.cn 的接口风控不是一条线：套用 REQUEST_GAP(2~5s) 会把 9~18 张图的
+# 一批下载串行拖到分钟级，相册任务直接超时。但"完全不限速 + 并发 5 路"对 CDN
+# 也不礼貌，所以取一个很小的间隙来削峰会免得瞬时几十个请求同时打出去。
+# 归档原图下载同样走这里。
+MEDIA_REQUEST_GAP = 0.2
 # 出网校验用 DNS 解析缓存时长（秒）：白名单 host 只有寥寥几个且极少变更，
 # 而每个接口请求、每张图片下载前都要 getaddrinfo 一遍
 DNS_CACHE_TTL = 300.0
@@ -211,8 +221,11 @@ AT_ALL_ROLE_NAMES = {"owner": "群主", "admin": "管理员", "member": "普通�
 # ---- 归档（P3）：库文件与媒体根都落在 data_dir 下 ----
 ARCHIVE_DB_NAME = "archive.db"
 ARCHIVE_DIR_NAME = "archive"
-# 原图下载队列上限：队列满即丢弃（归档是旁路，永远不能反压推送/回填）
+# 原图下载队列上限：归档是旁路，永远不能反压推送/回填
 ARCHIVE_QUEUE_MAX = 500
+# 队列满时转存待办的条数上限：不能因为"满了"就把 mid 直接丢掉（那会让 media
+# 永远停在 pending，只有对账才看得出来）。满了丢最旧的，等 worker 空闲重投。
+ARCHIVE_PENDING_RETRY_MAX = 500
 # 回填翻页安全上限：异常数据（如游标不前进）时也必须能停下来
 BACKFILL_SAFETY_MAX_PAGES = 1000
 # 媒体状态顺序即推进等级（rank 0..N），DB 层据此保证状态单调不回退
@@ -224,6 +237,11 @@ PIPELINE_QUEUE_MAX = 500
 # 缩略图目录：与 img-indexer 现网一致（Qdrant payload.thumb_url 指向这里）
 THUMBNAIL_DIR_NAME = "thumbnails"
 PIPELINE_STAGE_DIR_NAME = "pipeline_stage"
+
+# ---- 文案库（P5/F3）：archive.db 即文案库，CSV/MD 只是导入导出通道 ----
+COPYLIB_DIR_NAME = "copylib"
+COPYLIB_LIST_LIMIT = 10
+COPYLIB_CSV_HEADER = ("序号", "发布时间", "来源", "文案", "微博链接")
 
 _MONTH_MAP = {
     "Jan": 1,
@@ -277,6 +295,11 @@ USAGE = (
     "微博对账 [uid] - 核对归档完整性（管理员）\n"
     "微博管线状态 - 查看图床/向量管线的队列与六态进度\n"
     "微博管线补跑 - 把归档库里没跑完图床/向量的帖子重新入队（管理员）\n"
+    "微博文案库 [uid] - 查看文案库清洗进度与账号分布\n"
+    "微博文案列表 [uid] [关键词] - 查看文案（默认最近 10 条）\n"
+    "微博文案清洗 [uid] [条数] - 补齐未清洗的文案（管理员）\n"
+    "微博文案导出 [uid] [csv|md] - 导出文案到 copylib/（管理员）\n"
+    "微博文案导入 <CSV 文件路径> [uid] - 把 Node 版 CSV 文案导入归档库（管理员）\n"
     "WebUI 控制面板：AstrBot 管理面板 - 插件 - 本插件详情页打开"
 )
 

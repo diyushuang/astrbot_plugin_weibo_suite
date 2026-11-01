@@ -1,17 +1,50 @@
+# 虚拟环境与构建产物
 .venv/
+build/
+dist/
+*.egg-info/
+
+# Python 缓存
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
-dist/
-build/
-*.egg-info/
+
+# 测试与覆盖率
 .coverage
 htmlcov/
 pytest.log
+.pytest-of-*/
+
+# 本地工具与编辑器
 .mimosa/
 .workbuddy/
+.trae-html-share-packages/
+.screenshots/
+_scratch/
+_selftest/
+_tools/
+.pytest-tmp/
+_tmp_pytest_run/
+.tmp-sns-pytest/
+
+# 运行时数据（绝不入库：含用户 cookie、会话、归档与文案原文）
 data/plugin_data/
 *.db
 *.db-wal
 *.db-shm
+# 微博文案导出目录：内容是真实文案原文，属于用户隐私
+copylib/
+
+# 凭据与会话（任何一份都可能被直接拿去登录）
+.env
+.env.*
+!.env.example
+*.log
+*_cookie*.json
+cookie*.json
+credentials*.json
+sessions*.json
+sns_state.json
+state.json
+**/sns_data/

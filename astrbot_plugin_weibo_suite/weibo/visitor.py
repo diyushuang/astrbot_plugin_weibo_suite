@@ -56,7 +56,10 @@ class VisitorMixin:
     async def _pace(self):
         """全局请求间隔：任意两次微博请求之间至少间隔 REQUEST_GAP 内的随机秒数。
 
-        加锁串行，保证轮询任务与指令处理并发时同样全局生效。
+        加锁串行，保证轮询任务与指令处理并发时同样全局生效。锚点统一用
+        「上一次请求放行的时刻」，因此间隔按 **请求发起时间** 计算——调用方
+        必须保证每次出网前都过一遍这里，重试路径也不例外（`api._get_text`
+        的退避若短于 `REQUEST_GAP` 下限，就等于绕过了限速）。
         """
         async with self._pace_lock:
             gap = random.uniform(*REQUEST_GAP)
@@ -173,9 +176,11 @@ class VisitorMixin:
     async def _do_renew(self):
         assert self._http is not None
         logger.info(f"{PLUGIN_NAME} 正在获取微博游客身份…")
-        self._ua = random.choice(UA_POOL)
+        # UA 与 cookie 必须成套：先写 self._ua 会让失败的续期留下"旧身份+新 UA"
+        ua = random.choice(UA_POOL)
         cookies: dict[str, str] = {}
         common = self._base_headers()
+        common["User-Agent"] = ua
         visitor_headers = dict(common)
         visitor_headers["Referer"] = WEIBO_VISITOR_REFERER
 
@@ -198,7 +203,7 @@ class VisitorMixin:
             {"cb": "gen_callback", "fp": quote(fp, safe="")},
             visitor_headers,
         )
-        gen = _jsonp_data(body) or {}
+        gen = jsonp_data(body) or {}
         if gen.get("retcode") != 20000000:
             raise WeiboFetchError(f"genvisitor 失败: {gen.get('retcode')} {gen.get('msg')}")
         tid = str((gen.get("data") or {}).get("tid") or "")
@@ -222,6 +227,8 @@ class VisitorMixin:
         if "SUB" not in cookies:
             raise WeiboAuthError("游客身份获取失败（未拿到 SUB）")
         cookies.setdefault("MLOGIN", "0")
+        # 全部请求成功后才整体切换身份：失败分支不污染现有 cookie/UA 组合
+        self._ua = ua
         self._visitor_cookies = cookies
         self._visitor_ts = time.time()
         logger.info(f"{PLUGIN_NAME} 游客身份已更新（{sorted(cookies)}）")

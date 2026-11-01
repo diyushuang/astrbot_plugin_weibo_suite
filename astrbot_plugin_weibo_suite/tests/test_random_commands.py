@@ -230,10 +230,10 @@ async def test_original_image_reverses_bare_name_to_authoritative_url(
 ):
     """核心回归：`/原图 <裸文件名>` 必须先反查拿回**带完整目录**的权威直链。
 
-    线上故障：`/原图 【微博@潮流合伙人】20200207-04：示例博主A海报.jpg` 报
+    线上故障：`/原图 【微博@示例剧集】20200207-04：示例博主A海报.jpg` 报
     「图床里没有找到」。根因不是文件名有问题（前缀在 1.6.1 已清洗干净），
     而是图床的 `/file/{path}` **只认完整对象键**——该文件在
-    `7、综艺节目/爱奇艺《潮流合伙人》/《潮流合伙人》图集/` 下面，而插件拼的是
+    `7、综艺节目/示例平台《示例剧集》/《示例剧集》图集/` 下面，而插件拼的是
     `/file/{裸名}`，**必然 404**。实测 A/B 对照（内网与公网域名结果一致）：
 
         裸文件名   /file/{裸名}              → HTTP 404
@@ -242,13 +242,13 @@ async def test_original_image_reverses_bare_name_to_authoritative_url(
     payload.image_url 里存的正是那条带目录的直链，所以只能反查，不能猜目录。
     """
     plugin = make_plugin(random_media={"base_url": imgbed.base_url})
-    name = "【微博@潮流合伙人】20200207-04：示例博主A海报.jpg"
+    name = "【微博@示例剧集】20200207-04：示例博主A海报.jpg"
     authoritative = (
         f"{imgbed.base_url}/file/7%E3%80%81%E7%BB%BC%E8%89%BA%E8%8A%82%E7%9B%AE/"
-        "%E7%88%B1%E5%A5%87%E8%89%BA%E3%80%8A%E6%BD%AE%E6%B5%81%E5%90%88%E4%BC%99%E4%BA%BA"
-        "%E3%80%8B/%E3%80%8A%E6%BD%AE%E6%B5%81%E5%90%88%E4%BC%99%E4%BA%BA%E3%80%8B%E5%9B%BE"
-        "%E9%9B%86/%E3%80%90%E5%BE%AE%E5%8D%9A%40%E6%BD%AE%E6%B5%81%E5%90%88%E4%BC%99%E4%BA%BA"
-        "%E3%80%9120200207-04%EF%BC%9A%E8%B5%B5%E4%BB%8A%E9%BA%A6%E6%B5%B7%E6%8A%A5.jpg"
+        "%E7%A4%BA%E4%BE%8B%E5%B9%B3%E5%8F%B0%E3%80%8A%E7%A4%BA%E4%BE%8B%E5%89%A7%E9%9B%86"
+        "%E3%80%8B/%E3%80%8A%E7%A4%BA%E4%BE%8B%E5%89%A7%E9%9B%86%E3%80%8B%E5%9B%BE"
+        "%E9%9B%86/%E3%80%90%E5%BE%AE%E5%8D%9A%40%E7%A4%BA%E4%BE%8B%E5%89%A7%E9%9B%86"
+        "%E3%80%9120200207-04%EF%BC%9A%E7%A4%BA%E4%BE%8B%E5%8D%9A%E4%B8%BBA%E6%B5%B7%E6%8A%A5.jpg"
     )
     seen = _stub_name_lookup(monkeypatch, plugin, {name: authoritative})
     # 探测必须打桩成「不存在」：若实现退回裸名拼 URL，就会在这里被拦下并报
@@ -450,7 +450,7 @@ async def test_original_image_name_with_directory_skips_lookup(
     """
     plugin = make_plugin(random_media={"base_url": imgbed.base_url})
     seen = _stub_name_lookup(monkeypatch, plugin, {})
-    relative = "7、综艺节目/爱奇艺《潮流合伙人》/《潮流合伙人》图集/海报.jpg"
+    relative = "7、综艺节目/示例平台《示例剧集》/《示例剧集》图集/海报.jpg"
 
     async def probe_ok(url, cache=None, **kwargs):
         return True, 1234
@@ -482,7 +482,7 @@ async def test_original_image_keeps_directory_when_decoration_prefixed(
     """
     plugin = make_plugin(random_media={"base_url": imgbed.base_url})
     seen = _stub_name_lookup(monkeypatch, plugin, {})
-    relative = "7、综艺节目/爱奇艺《潮流合伙人》/海报.jpg"
+    relative = "7、综艺节目/示例平台《示例剧集》/海报.jpg"
 
     async def probe_ok(url, cache=None, **kwargs):
         return True, 1234
@@ -508,7 +508,7 @@ async def test_strip_leading_decoration_preserves_directory_but_strips_prefix():
     """
     from astrbot_plugin_weibo_suite.trace import random_media
 
-    relative = "7、综艺节目/爱奇艺《潮流合伙人》/海报.jpg"
+    relative = "7、综艺节目/示例平台《示例剧集》/海报.jpg"
     assert random_media.strip_leading_decoration(relative) == relative
     assert random_media.strip_leading_decoration(f"🖼️ {relative}") == relative
     assert random_media.strip_leading_decoration(f"1. 🖼️ {relative}") == relative
@@ -609,11 +609,13 @@ async def test_llm_tool_disabled_by_config(make_plugin, make_event):
     assert "已被禁用" in results[0].text
 
 
-def test_original_and_register_are_distinct_command_names(make_plugin):
-    plugin = make_plugin()
+def test_original_and_register_are_distinct_command_names():
+    # 指令注册统一在入口 main.py（AstrBot 只按入口模块绑定 handler）
+    from astrbot_plugin_weibo_suite.main import WeiboSuitePlugin
 
-    assert plugin.original_image.command_name == "原图"
-    assert plugin.original_repair.command_name == "原图修复"
+    assert WeiboSuitePlugin.original_image.command_name == "原图"
+    assert WeiboSuitePlugin.original_repair.command_name == "原图修复"
+    assert WeiboSuitePlugin.register_image.command_name == "登记原图"
 
 
 async def test_original_repair_renames_dirty_history_keys(make_plugin, imgbed, make_event):
@@ -669,25 +671,29 @@ async def test_random_image_caption_has_no_decoration_inside_filename(
     assert text.startswith("🖼️ ")
     assert text.count("🖼️") == 1
     assert text[len("🖼️ ") :] == "x.jpg"
-    assert plugin.register_image.command_name == "登记原图"
-    assert plugin.original_image.command_name != plugin.register_image.command_name
+    from astrbot_plugin_weibo_suite.main import WeiboSuitePlugin
+
+    assert WeiboSuitePlugin.register_image.command_name == "登记原图"
+    assert (
+        WeiboSuitePlugin.original_image.command_name != WeiboSuitePlugin.register_image.command_name
+    )
     # 注：AstrBot 按命令首个词精确匹配（/原图 与 /登记原图 首词不同）这一路由
     # 行为发生在 AstrBot 框架内，本桩不执行命令路由，无法在此运行时证明；
     # 此处只证明两者被注册为不同的命令名，路由假设记为未在本仓库验证。
 
 
-def test_random_image_alias_matches_documented_alias(make_plugin):
+def test_random_image_alias_matches_documented_alias():
     """README 指令表把 /随机图片 记为 /随机图 的别名，二者必须同步。
 
     文档与注册名漂移过一次（README 写了别名但代码没注册），用断言钉住，
     避免以后改文档忘改代码、或反之。
     """
-    plugin = make_plugin()
+    from astrbot_plugin_weibo_suite.main import WeiboSuitePlugin
 
-    assert plugin.random_image.command_name == "随机图"
-    assert "随机图片" in plugin.random_image.command_alias
-    assert plugin.random_video.command_name == "随机视频"
-    assert plugin.random_video.command_alias == set()
+    assert WeiboSuitePlugin.random_image.command_name == "随机图"
+    assert "随机图片" in WeiboSuitePlugin.random_image.command_alias
+    assert WeiboSuitePlugin.random_video.command_name == "随机视频"
+    assert WeiboSuitePlugin.random_video.command_alias == set()
 
 
 async def test_trace_hash_path_still_hits(make_plugin, imgbed, make_event, tmp_path):
@@ -947,7 +953,7 @@ async def test_original_image_reverses_quoted_thumbnail_to_original(
     thumb_url = f"{imgbed.base_url}/file/thumbnails/{thumb_name}"
     # 原图直链在图床 payload 里是**编码后**的形态
     original_url = (
-        f"{imgbed.base_url}/file/%E3%80%90%E5%BE%AE%E5%8D%9A%40%E8%B5%B5%E4%BB%8A%E9%BA%A6"
+        f"{imgbed.base_url}/file/%E3%80%90%E5%BE%AE%E5%8D%9A%40%E7%A4%BA%E4%BE%8B%E5%8D%9A%E4%B8%BBA"
         "%E5%B7%A5%E4%BD%9C%E5%AE%A4official%E3%80%9120260410-05%EF%BC%9A%E8%8A%B1%E7%B5%AE.jpg"
     )
     seen = _stub_reverse_lookup(
@@ -984,12 +990,12 @@ async def test_original_image_strips_thumbnail_timestamp_in_quoted_name(
     """
     plugin = make_plugin(random_media={"base_url": imgbed.base_url})
     ts = "1789658616018"
-    raw_name = f"{ts}_【微博_示例博主A】20200228-01：《重生》剧照.jpg"
+    raw_name = f"{ts}_【微博_示例博主A】20200228-01：《示例剧集》剧照.jpg"
     thumb_url = f"{imgbed.base_url}/file/thumbnails/{raw_name}"
     original_url = (
         f"{imgbed.base_url}/file/12%E3%80%81%E6%97%A5%E5%B8%B8%E5%88%86%E4%BA%AB/"
-        "%E3%80%90%E5%BE%AE%E5%8D%9A%40%E8%B5%B5%E4%BB%8A%E9%BA%A6angel%E3%80%91"
-        "20200228-01%EF%BC%9A%E3%80%8A%E9%87%8D%E7%94%9F%E3%80%8B%E5%89%A7%E7%85%A7.jpg"
+        "%E3%80%90%E5%BE%AE%E5%8D%9A%40%E7%A4%BA%E4%BE%8B%E5%8D%9A%E4%B8%BBA%E3%80%91"
+        "20200228-01%EF%BC%9A%E3%80%8A%E7%A4%BA%E4%BE%8B%E5%89%A7%E9%9B%86%E3%80%8B%E5%89%A7%E7%85%A7.jpg"
     )
     seen = _stub_reverse_lookup(monkeypatch, plugin, {thumb_url: original_url})
 

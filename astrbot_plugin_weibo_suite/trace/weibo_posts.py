@@ -26,9 +26,12 @@ import os
 import re
 import time
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote, urlsplit
 
-# MD 末尾元信息：`—— 2026-10-30 23:52 · 微博@示例博主A工作室official`
+_TZ_CN = timezone(timedelta(hours=8))
+
+# MD 末尾元信息：`—— 2026-10-30 23:52 · 微博@示例账号`
 MD_META_RE = re.compile(r"——\s*(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})\s*·\s*微博@([^\s]+)")
 MD_ENTRY_RE = re.compile(r"^\d+\.\s+")
 MD_YEAR_RE = re.compile(r"^\d{4}\s*年")
@@ -442,3 +445,68 @@ def map_is_stale(path: str, source_dir: str) -> bool:
 def replace_image(post: WeiboPost, image: WeiboImage | None) -> WeiboPost:
     """构建脚本用：只替换 image，其余字段原样保留。"""
     return replace(post, image=image)
+
+
+def _archive_stamp(created_at) -> str:
+    """秒级时间戳 → 东八区 YYYY-MM-DD HH:MM（归档库的 created_at 口径）。
+
+    导入的第三方数据可能给毫秒时间戳或越界值；这里失败即返回空串，由调用方
+    回退原文日期。不能让一条脏行把整个签到池（甚至 /溯源状态）打崩。
+    """
+    try:
+        stamp = int(created_at or 0)
+        if not 946684800 <= stamp <= 4102444800:  # 2000-01-01 ~ 2100-01-01
+            return ""
+        return datetime.fromtimestamp(stamp, tz=_TZ_CN).strftime("%Y-%m-%d %H:%M")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return ""
+
+
+def posts_from_archive_rows(rows, source: str = "archive") -> list[WeiboPost]:
+    """把归档库（archive.db）的行转成签到池条目（P5：文案库即事实源）。
+
+    rows 的字段由 weibo/archive_db.py 的 list_copy_entries 提供（mid/link/
+    author/created_at/cleaned_text/image_url/thumb_url/local_path…）。本函数是纯
+    数据转换：文案域传入字典，溯源域只认这里定义的形状，两域互不 import。
+
+    只收「已清洗且有正文」的帖子；没配到图的行保留（image=None），签到时会退回
+    同账号同日的任意图，再退回随机语句。
+    """
+    posts: list[WeiboPost] = []
+    for row in rows or ():
+        if not isinstance(row, dict):
+            continue
+        text = str(row.get("cleaned_text") or row.get("text") or "").strip()
+        if not text:
+            continue
+        link = str(row.get("link") or "").strip()
+        account = normalize_account(row.get("author") or row.get("uid") or "")
+        published_at = normalize_published_at(
+            row.get("published_at") or _archive_stamp(row.get("created_at"))
+        )
+        image_url = str(row.get("image_url") or "").strip()
+        image = None
+        if image_url:
+            file_name = ""
+            try:
+                file_name = unquote(urlsplit(image_url).path.rsplit("/", 1)[-1])
+            except Exception:
+                file_name = ""
+            image = WeiboImage(
+                file_name=file_name or f"{str(row.get('mid') or '') or 'weibo'}.jpg",
+                image_url=image_url,
+                thumb_url=str(row.get("thumb_url") or "").strip(),
+            )
+        posts.append(
+            WeiboPost(
+                link=link,
+                account=account,
+                published_at=published_at,
+                date=date_key(published_at),
+                text=text,
+                image=image,
+                code=extract_short_code(link),
+                source=source,
+            )
+        )
+    return posts

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import html as html_lib
 import re
 from datetime import datetime

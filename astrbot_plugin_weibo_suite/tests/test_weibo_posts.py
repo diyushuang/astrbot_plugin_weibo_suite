@@ -23,11 +23,11 @@ MD_SAMPLE = """# 微博原创文案 · 示例博主A（账号 1000000001）
 
 ## 2026 年（2 条）
 
-1. 坠入秋日棕调氛围里🍂  
-   @MiuMiu —— 2026-10-21 11:00 · 微博@示例博主A
+1. 午后散步捡到一片落叶🍂  
+   @示例品牌 —— 2026-10-21 11:00 · 微博@示例博主A
 
-2. 先锋无可替代  
-   我有我的答案 —— 2026-10-19 10:10 · 微博@示例博主A
+2. 今天的天气很适合出门  
+   路上顺手拍了几张照片 —— 2026-10-19 10:10 · 微博@示例博主A
 
 ## 去掉话题和链接后无正文的微博（1 条）
 
@@ -35,10 +35,10 @@ MD_SAMPLE = """# 微博原创文案 · 示例博主A（账号 1000000001）
 """
 
 CSV_SAMPLE = """序号,发布时间,来源,文案,微博链接
-1,"2026-10-21 11:00","微博@示例博主A","坠入秋日棕调氛围里🍂
-@MiuMiu","https://weibo.com/1000000001/RnFxu0zgA"
-2,"2026-10-19 10:10","微博@示例博主A","先锋无可替代
-我有我的答案","https://weibo.com/1000000001/RnmlWjQgw"
+1,"2026-10-21 11:00","微博@示例博主A","午后散步捡到一片落叶🍂
+@示例品牌","https://weibo.com/1000000001/RnFxu0zgA"
+2,"2026-10-19 10:10","微博@示例博主A","今天的天气很适合出门
+路上顺手拍了几张照片","https://weibo.com/1000000001/RnmlWjQgw"
 """
 
 
@@ -49,7 +49,7 @@ def test_parse_md_skips_appendix_and_reads_meta():
     assert first.account == "示例博主A"
     assert first.published_at == "2026-10-21 11:00"
     assert first.date == "20261021"
-    assert first.text == "坠入秋日棕调氛围里🍂\n@MiuMiu"
+    assert first.text == "午后散步捡到一片落叶🍂\n@示例品牌"
     assert first.link == ""
 
 
@@ -95,7 +95,7 @@ def test_map_roundtrip(tmp_path):
             account="示例博主A",
             published_at="2026-10-21 11:00",
             date="20261021",
-            text="坠入秋日棕调氛围里",
+            text="午后散步捡到一片落叶",
             code="RnFxu0zgA",
         ),
     ]

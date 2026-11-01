@@ -68,8 +68,12 @@ def is_utc_iso(value: str) -> bool:
 
 
 def test_schema_tables_indexes_and_connection_pragmas(store, tmp_path):
-    assert store.meta_get("schema_version") == "1"
-    assert store.schema_version == 1
+    assert store.meta_get("schema_version") == "2"
+    assert store.schema_version == 2
+    post_columns = {row[1] for row in store._conn.execute("PRAGMA table_info(posts)").fetchall()}
+    media_columns = {row[1] for row in store._conn.execute("PRAGMA table_info(media)").fetchall()}
+    assert "cleaned_text" in post_columns
+    assert "thumb_url" in media_columns
     assert store.media_root == tmp_path / "archive"
     assert MEDIA_STATES == ("pending", "downloaded", "album", "bed", "thumb", "vector")
 
@@ -107,15 +111,15 @@ def test_higher_schema_version_is_not_downgraded(tmp_path):
     connection = sqlite3.connect(db_path)
     try:
         connection.executescript("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
-        connection.execute("INSERT INTO meta (key, value) VALUES ('schema_version', '2')")
+        connection.execute("INSERT INTO meta (key, value) VALUES ('schema_version', '3')")
         connection.commit()
     finally:
         connection.close()
 
     store = ArchiveStore(db_path)
     try:
-        assert store.meta_get("schema_version") == "2"
-        assert store.schema_version == 2
+        assert store.meta_get("schema_version") == "3"
+        assert store.schema_version == 3
         assert store.get_post("missing") is None
     finally:
         store.close()
@@ -425,7 +429,12 @@ def test_reconcile_counts_aggregates(store):
     assert report["posts"] == 3
     assert report["posts_with_text"] == 2
     assert report["posts_without_text"] == 1
-    assert report["posts_need_text"] == 1
+    # posts_need_text 的判据是 cleaned_at（清洗流水线是否跑过），不是 TRIM(text)：
+    # 三条帖子都还没洗过，所以是 3，而不是跟着 posts_without_text 一起变成 1。
+    assert report["posts_need_text"] == 3
+    # 洗过一条之后就该少一条，即使它的清洗结果合法为空串（纯链接/纯表情帖）。
+    store.mark_post_cleaned("r2", "")
+    assert store.reconcile_counts()["posts_need_text"] == 2
     assert report["posts_with_media"] == 2
     assert report["media_expected"] == 5  # 3 + 2 + 0（-1 不计）
     assert report["pic_total_sum"] == 5
@@ -504,3 +513,141 @@ def test_concurrent_writes_do_not_raise_database_locked(store):
     assert errors == []
     assert store.count_posts() == 60
     assert store.media_stats()["total"] == 60
+
+
+_OLD_SCHEMA_SQL = """
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE posts (
+    mid TEXT PRIMARY KEY, uid TEXT NOT NULL, author TEXT NOT NULL DEFAULT '',
+    bid TEXT NOT NULL DEFAULT '', link TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL DEFAULT 0, created_raw TEXT NOT NULL DEFAULT '',
+    text TEXT NOT NULL DEFAULT '', text_raw TEXT NOT NULL DEFAULT '',
+    is_long INTEGER NOT NULL DEFAULT 0, is_retweet INTEGER NOT NULL DEFAULT 0,
+    orig_text TEXT NOT NULL DEFAULT '', pic_total INTEGER NOT NULL DEFAULT -1,
+    pics_json TEXT NOT NULL DEFAULT '[]', video_src TEXT NOT NULL DEFAULT '',
+    raw_json TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'monitor',
+    pushed_at TEXT NOT NULL DEFAULT '', cleaned_at TEXT NOT NULL DEFAULT '',
+    reconciled_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL
+);
+CREATE TABLE media (
+    mid TEXT NOT NULL, pid TEXT NOT NULL, idx INTEGER NOT NULL DEFAULT 0,
+    url TEXT NOT NULL DEFAULT '', alt_url TEXT NOT NULL DEFAULT '',
+    ext TEXT NOT NULL DEFAULT 'jpg', kind TEXT NOT NULL DEFAULT 'image',
+    local_path TEXT NOT NULL DEFAULT '', size INTEGER NOT NULL DEFAULT 0,
+    state TEXT NOT NULL DEFAULT 'pending', state_rank INTEGER NOT NULL DEFAULT 0,
+    attempts INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '',
+    downloaded_at TEXT NOT NULL DEFAULT '', album_at TEXT NOT NULL DEFAULT '',
+    bed_at TEXT NOT NULL DEFAULT '', thumb_at TEXT NOT NULL DEFAULT '',
+    vector_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL,
+    PRIMARY KEY (mid, pid)
+);
+"""
+
+
+def test_p5_old_database_gets_new_columns(tmp_path):
+    """1 版库（无 cleaned_text / thumb_url）打开后自动补列，旧数据保留。"""
+    import sqlite3
+
+    db_path = tmp_path / "archive.db"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.executescript(_OLD_SCHEMA_SQL)
+        connection.execute("INSERT INTO meta (key, value) VALUES ('schema_version', '1')")
+        connection.execute(
+            "INSERT INTO posts (mid, uid, text, updated_at) VALUES ('old', '42', '旧正文', ?)",
+            ("2026-01-01T00:00:00Z",),
+        )
+        connection.execute(
+            "INSERT INTO media (mid, pid, url, updated_at) VALUES ('old', 'p1', 'u', ?)",
+            ("2026-01-01T00:00:00Z",),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    store = ArchiveStore(db_path)
+    try:
+        assert store.schema_version == 2
+        assert store.meta_get("schema_version") == "2"
+        row = store.get_post("old")
+        assert row is not None
+        assert row["text"] == "旧正文"
+        assert row["cleaned_text"] == ""
+        media = store.get_media("old", "p1")
+        assert media is not None
+        assert media["thumb_url"] == ""
+        store.mark_media("old", "p1", "thumb", thumb_url="https://cdn/thumb.jpg")
+        assert store.get_media("old", "p1")["thumb_url"] == "https://cdn/thumb.jpg"
+    finally:
+        store.close()
+
+
+def test_mark_post_cleaned_and_copy_stats(store):
+    store.upsert_post(make_post("1001"))
+    store.upsert_post(make_post("1002", pic_total=0, pics=[]))
+    store.upsert_post(make_post("1003", is_long=1, is_retweet=1))
+
+    assert {row["mid"] for row in store.iter_uncleaned_posts()} == {"1001", "1002", "1003"}
+    store.mark_post_cleaned("1001", "清洗后的文案 [赞]")
+    assert [row["mid"] for row in store.iter_uncleaned_posts()] == ["1002", "1003"]
+    assert [row["mid"] for row in store.iter_uncleaned_posts(limit=1)] == ["1002"]
+
+    row = store.get_post("1001")
+    assert row["cleaned_text"] == "清洗后的文案 [赞]"
+    assert is_utc_iso(row["cleaned_at"])
+
+    stats = store.copy_stats()
+    assert stats["total"] == 3
+    assert stats["cleaned"] == 1
+    assert stats["long"] == 1
+    assert stats["retweet"] == 1
+    assert stats["with_pics"] == 2
+    assert store.copy_stats(uid="42")["total"] == 3
+    assert store.copy_stats(uid="404")["total"] == 0
+
+    accounts = store.copy_accounts()
+    assert accounts == [{"uid": "42", "author": "作者", "total": 3, "cleaned": 1, "long": 1}]
+    assert store.copy_signature().startswith("3|")
+
+
+def test_list_copy_posts_filters_and_paginates(store):
+    store.upsert_post(make_post("1001", created_at=100))
+    store.upsert_post(make_post("1002", created_at=200, is_retweet=1))
+    store.upsert_post(make_post("1003", created_at=300))
+    store.mark_post_cleaned("1002", "转发文案")
+
+    newest = store.list_copy_posts(limit=2)
+    assert [row["mid"] for row in newest] == ["1003", "1002"]
+    assert store.list_copy_posts(limit=2, offset=2)[0]["mid"] == "1001"
+    assert [row["mid"] for row in store.list_copy_posts(include_retweets=False)] == [
+        "1003",
+        "1001",
+    ]
+    assert [row["mid"] for row in store.list_copy_posts(keyword="转发")] == ["1002"]
+    assert store.list_copy_posts(uid="404") == []
+
+
+def test_list_copy_entries_joins_first_image(store):
+    store.upsert_post(make_post("1001"))
+    store.upsert_media(
+        "1001",
+        [
+            {"pid": "p2", "idx": 2, "url": "u2"},
+            {"pid": "p1", "idx": 1, "url": "u1"},
+            {"pid": "v1", "idx": 0, "url": "uv", "kind": "video"},
+        ],
+    )
+    store.mark_media("1001", "p1", "thumb", thumb_url="https://cdn/t1.jpg")
+    store.upsert_post(make_post("1002", pic_total=0, pics=[]))
+    store.mark_post_cleaned("1001", "文案一")
+    store.mark_post_cleaned("1002", "文案二")
+
+    entries = store.list_copy_entries()
+    assert [row["mid"] for row in entries] == ["1002", "1001"]
+    with_image = entries[1]
+    assert with_image["pid"] == "p1"
+    assert with_image["image_url"] == "u1"
+    assert with_image["thumb_url"] == "https://cdn/t1.jpg"
+    assert with_image["cleaned_text"] == "文案一"
+    assert entries[0]["pid"] is None
+    assert [row["mid"] for row in store.list_copy_entries(uid="404")] == []

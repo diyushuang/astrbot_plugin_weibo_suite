@@ -350,12 +350,16 @@ class PusherMixin:
         """记账一次真正带 @全体 出群的推送（与 QQ 同口径：账号级、所有群共享）。"""
         self._at_all_sent.append(time.time())
         self._at_all_quota_used()
-        self._save_state()
+        # 推送循环里同步写 state 会卡住事件循环；合并到防抖落盘
+        self._save_state_debounced()
 
     async def _bot_self_id(self, bot) -> str:
         """AstrBot 这条连接上的登录账号 QQ 号（按 bot 实例缓存，拿不到返回空串）。"""
-        self_id = self._self_ids.get(id(bot))
-        if self_id is not None:
+        try:
+            self_id = self._self_ids.get(bot) if self._self_ids else None
+        except TypeError:  # 少数适配器对象不支持弱引用：退化为不缓存
+            self_id = None
+        if self_id:
             return self_id
         try:
             info = await asyncio.wait_for(
@@ -365,8 +369,11 @@ class PusherMixin:
         except Exception as e:
             # 拿不到 self_id 只影响 @全体 的权限预检与相册的同机判定，不影响发送
             logger.info(f"{PLUGIN_NAME} 获取机器人登录信息失败: {e!r}")
-            self_id = ""
-        self._self_ids[id(bot)] = self_id
+            return ""
+        # 只缓存成功结果：失败缓存会让该连接后续一直拿到空串
+        if self_id:
+            with contextlib.suppress(TypeError):
+                self._self_ids[bot] = self_id
         return self_id
 
     async def _group_role(self, platform_id: str, gid: str) -> str:
@@ -996,6 +1003,7 @@ class PusherMixin:
                     break
                 sent_sessions: list[str] = []
                 timed_out_sessions: list[str] = []
+                failed_sessions: list[str] = []
                 if (
                     self._video_prefer_file()
                     and self._video_file_fallback_enabled()
@@ -1036,6 +1044,10 @@ class PusherMixin:
                                 f"推送到 {session} 超过 {send_timeout} 秒未返回，结果未知："
                                 f"微博 {item['post_id']} 对该会话不再重发（防重复）"
                             )
+                        elif status == "failed":
+                            # 部分会话明确失败时仍会被 sent_sessions 的"成功"掩盖；
+                            # 这里单独记账，面板不再显示全量成功。
+                            failed_sessions.append(session)
                 finally:
                     item.pop("_send_active", None)
                 cancel_late = bool(item.get("_cancel_requested"))
@@ -1065,6 +1077,11 @@ class PusherMixin:
                         + (
                             f"，另 {len(timed_out_sessions)} 个会话超时结果未知未重发"
                             if timed_out_sessions
+                            else ""
+                        )
+                        + (
+                            f"，{len(failed_sessions)} 个会话明确失败待重试"
+                            if failed_sessions
                             else ""
                         )
                         + (f"，{reason}" if reason else "")
@@ -1655,3 +1672,81 @@ class PusherMixin:
             text=str(item.get("text") or ""),
             detail=f"视频 {len(files)}/{expected} 段到手：{reason}",
         )
+
+    # ---------------------------------------------------------------- 多平台订阅投递
+
+    async def deliver_sns_payload(self, payload: dict, session: str) -> str:
+        """把一条多平台订阅的更新推到某个会话。
+
+        返回 `"sent"` / `"unknown"` / `"failed"`，语义与 `_send_rich_media` 一致：
+        超时算 unknown（消息可能已经发出去了，重试会重复），其余失败算 failed。
+
+        这里刻意**不复用** weibo 的 pending 队列：订阅域有自己的去重与守卫，
+        再套一层待推送队列会让"风控冷却中却还在重试推送"这种事故变得可能。
+        """
+        import time as _time
+
+        group = self.config.get("sns")
+        group = group if isinstance(group, dict) else {}
+        fmt = str(group.get("message_format") or "").strip() or (
+            "📢 {platform}更新\n【{name}】{time}\n{text}\n🔗 {link}"
+        )
+        when = _time.strftime("%m-%d %H:%M", _time.localtime(payload.get("ts") or _time.time()))
+        try:
+            text = fmt.format(
+                platform=payload.get("platform") or "",
+                name=payload.get("name") or "",
+                time=when,
+                text=payload.get("text") or payload.get("title") or "",
+                link=payload.get("link") or "",
+            )
+        except (KeyError, IndexError, ValueError):
+            # 用户把 {xxx} 写坏了不能让推送直接消失：退回默认模板
+            text = (
+                f"📢 {payload.get('platform') or ''}更新\n"
+                f"【{payload.get('name') or ''}】{when}\n"
+                f"{payload.get('text') or payload.get('title') or ''}\n"
+                f"🔗 {payload.get('link') or ''}"
+            )
+
+        chain = MessageChain().message(text)
+        if bool(group.get("message_with_images", True)):
+            for url in (payload.get("images") or [])[:9]:
+                if url:
+                    chain.chain.append(Image.fromURL(str(url)))
+
+        if self._sns_at_all_hit(payload, session):
+            allowed, _why = await self._at_all_gate(session)
+            if allowed:
+                chain = MessageChain(chain=[AtAll(), *chain.chain])
+
+        try:
+            ok = await self._send_with_timeout(session, chain)
+        except (asyncio.TimeoutError, TimeoutError):
+            # 超时时消息可能已经出群，重试会重复——按 unknown 上报
+            return "unknown"
+        except Exception as exc:  # 一个群发失败不能拖垮整轮
+            logger.warning(f"多平台订阅推送失败 {session}: {exc!r}")
+            return "failed"
+        return "sent" if ok else "failed"
+
+    def _sns_at_all_hit(self, payload: dict, session: str) -> bool:
+        """订阅域的 @全体：平台开关 + 关键词 + 账号白名单，三关都过才生效。"""
+        group = self.config.get("sns")
+        group = group if isinstance(group, dict) else {}
+        if not bool(group.get("at_all", False)):
+            return False
+        try:
+            kind = self._parse_umo(session)[1]
+        except Exception:
+            kind = ""
+        if kind != "GroupMessage":
+            return False
+        keywords = [str(k) for k in (group.get("at_all_keywords") or []) if str(k).strip()]
+        if keywords:
+            body = str(payload.get("text") or payload.get("title") or "")
+            if not any(word in body for word in keywords):
+                return False
+        keys = [str(k) for k in (payload.get("at_all_keys") or []) if str(k).strip()]
+        allowed_uids = [str(u) for u in (group.get("at_all_uids") or []) if str(u).strip()]
+        return not (allowed_uids and not any(key in allowed_uids for key in keys))

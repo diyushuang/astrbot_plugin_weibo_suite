@@ -36,27 +36,42 @@ def _parse_backfill_args(args: list[str], uid_text: str) -> tuple[str, str, bool
     return uid or "", since, full
 
 
+# 「微博归档导入」的命令词（含别名）。用于从整条消息里定位参数起点：
+# 消息可能带唤醒前缀，不能假定第 0 个 token 就是命令词。
+_ARCHIVE_IMPORT_WORDS = ("归档导入", "微博归档导入")
+
+
 def _import_path(event: AstrMessageEvent, path_text: str) -> str:
-    """取 微博归档导入 的剩余文本（路径可能含空格，不能只取第一个 token）。"""
+    """取 微博归档导入 的剩余文本（路径可能含空格，不能只取第一个 token）。
+
+    这里不能简单 `raw[len(tokens[0]):]`：消息里可能带唤醒前缀（"小助手 微博
+    归档导入 D:/a b.json"），此时 tokens[0] 是唤醒词而不是命令词，切完剩下的
+    是一段带命令名的垃圾路径（以前就是这样把导入做成"文件不存在"的）。
+    改为从所有出现过的命令词里找**最后一次**出现的位置往后切，找不到再退回
+    到装饰器给的 path_text。
+    """
     raw = (event.message_str or "").strip()
-    tokens = re.split(r"\s+", raw)
-    path = raw[len(tokens[0]) :].strip() if len(tokens) > 1 else path_text.strip()
-    return path.strip().strip('"').strip("'")
+    if not raw:
+        return path_text.strip().strip('"').strip("'")
+    for word in _ARCHIVE_IMPORT_WORDS:
+        idx = raw.rfind(word)
+        if idx < 0:
+            continue
+        rest = raw[idx + len(word) :].strip()
+        if rest:
+            return rest.strip().strip('"').strip("'")
+    return path_text.strip().strip('"').strip("'")
 
 
 class CommandsMixin:
-    @filter.command_group("微博")
     async def weibo(self, event: AstrMessageEvent):
         """微博监控转发指令组"""
         yield event.plain_result(USAGE)
 
-    @weibo.command("帮助", alias={"help", "用法"})
     async def weibo_help(self, event: AstrMessageEvent):
         """查看微博监控指令用法"""
         yield event.plain_result(USAGE)
 
-    @weibo.command("绑定")
-    @filter.permission_type(filter.PermissionType.ADMIN)
     async def weibo_bind(self, event: AstrMessageEvent):
         """把当前群聊绑定为微博推送目标（管理员）"""
         if not event.get_group_id():
@@ -68,13 +83,11 @@ class CommandsMixin:
             yield event.plain_result("本群已在推送列表中，无需重复绑定")
             return
         sessions.append(umo)
-        self.config["push_sessions"] = sessions
+        self._set_cfg("push_sessions", sessions)
         self._save_config()
         logger.info(f"{PLUGIN_NAME} 新增推送目标: {umo}")
         yield event.plain_result("绑定成功，本群将接收微博更新推送")
 
-    @weibo.command("解绑")
-    @filter.permission_type(filter.PermissionType.ADMIN)
     async def weibo_unbind(self, event: AstrMessageEvent):
         """解除当前群聊的微博推送（管理员）"""
         umo = event.unified_msg_origin
@@ -83,13 +96,11 @@ class CommandsMixin:
             yield event.plain_result("本群尚未绑定推送")
             return
         sessions.remove(umo)
-        self.config["push_sessions"] = sessions
+        self._set_cfg("push_sessions", sessions)
         self._save_config()
         logger.info(f"{PLUGIN_NAME} 移除推送目标: {umo}")
         yield event.plain_result("解绑成功，本群不再接收推送")
 
-    @weibo.command("添加")
-    @filter.permission_type(filter.PermissionType.ADMIN)
     async def weibo_add(self, event: AstrMessageEvent, uid_text: str = ""):
         """添加监控的微博账号，参数为 uid 或主页链接（管理员）"""
         uid = _extract_uid(uid_text)
@@ -112,7 +123,7 @@ class CommandsMixin:
             "fail_count": 0,
             "next_retry_ts": 0.0,
         }
-        self.config["monitored_uids"] = list(self.accounts.keys())
+        self._set_cfg("monitored_uids", list(self.accounts.keys()))
         self._save_config()
         self._save_state()
         name = self.accounts[uid]["name"]
@@ -122,8 +133,6 @@ class CommandsMixin:
             "下一轮检查将建立基线，历史微博不会推送，仅推送之后的新微博。"
         )
 
-    @weibo.command("删除")
-    @filter.permission_type(filter.PermissionType.ADMIN)
     async def weibo_remove(self, event: AstrMessageEvent, uid_text: str = ""):
         """取消监控某个微博账号（管理员）"""
         uid = _extract_uid(uid_text)
@@ -132,12 +141,11 @@ class CommandsMixin:
             yield event.plain_result(f"账号 {uid or '(空)'} 不在监控列表中，请用 微博列表 查看")
             return
         name = self.accounts.pop(uid)["name"]
-        self.config["monitored_uids"] = list(self.accounts.keys())
+        self._set_cfg("monitored_uids", list(self.accounts.keys()))
         self._save_config()
         self._save_state()
         yield event.plain_result(f"已取消监控：{name}（{uid}）")
 
-    @weibo.command("列表")
     async def weibo_list(self, event: AstrMessageEvent):
         """查看当前监控的微博账号"""
         self._sync_accounts_from_config()
@@ -159,8 +167,6 @@ class CommandsMixin:
         )
         yield event.plain_result("\n".join(lines))
 
-    @weibo.command("相册绑定")
-    @filter.permission_type(filter.PermissionType.ADMIN)
     async def weibo_album_bind(self, event: AstrMessageEvent, uid_text: str = ""):
         """把某博主的微博图片自动上传到本群指定相册（管理员）。
 
@@ -194,7 +200,7 @@ class CommandsMixin:
             return
         rules = self._album_rules()
         rules[(uid, str(gid))] = album_name
-        self.config["album_rules"] = [album_rule_token(u, g, a) for (u, g), a in rules.items()]
+        self._set_cfg("album_rules", [album_rule_token(u, g, a) for (u, g), a in rules.items()])
         self._save_config()
         name = self.accounts[uid]["name"]
         tip = (
@@ -207,8 +213,6 @@ class CommandsMixin:
             f"已绑定：{name}（{uid}）的微博图片将自动上传到本群相册「{album_name}」{tip}"
         )
 
-    @weibo.command("相册移除")
-    @filter.permission_type(filter.PermissionType.ADMIN)
     async def weibo_album_unbind(self, event: AstrMessageEvent, uid_text: str = ""):
         """解除博主的相册绑定（管理员）：群内使用解除本群，私聊使用解除全部"""
         uid = _extract_uid(uid_text)
@@ -223,14 +227,13 @@ class CommandsMixin:
             return
         for key in targets:
             rules.pop(key, None)
-        self.config["album_rules"] = [album_rule_token(u, g, a) for (u, g), a in rules.items()]
+        self._set_cfg("album_rules", [album_rule_token(u, g, a) for (u, g), a in rules.items()])
         self._save_config()
         logger.info(f"{PLUGIN_NAME} 相册解绑: {uid} -> {targets}")
         yield event.plain_result(
             f"已解除 {len(targets)} 条绑定（群：{'、'.join(g for _, g in targets)}）"
         )
 
-    @weibo.command("相册列表")
     async def weibo_album_rules_cmd(self, event: AstrMessageEvent):
         """查看所有博主的相册绑定规则"""
         rules = self._album_rules()
@@ -245,8 +248,6 @@ class CommandsMixin:
             lines.append(f"{idx}. {name}（{uid}）→ 群 {gid} 相册「{album}」{tip}")
         yield event.plain_result("\n".join(lines))
 
-    @weibo.command("列相册")
-    @filter.permission_type(filter.PermissionType.ADMIN)
     async def weibo_album_list(self, event: AstrMessageEvent):
         """查看本群的相册列表（名称与 ID，管理员）"""
         gid = event.get_group_id()
@@ -271,8 +272,6 @@ class CommandsMixin:
             lines.append(f"{idx}. {name}（ID: {aid}）")
         yield event.plain_result("\n".join(lines))
 
-    @weibo.command("关键词相册")
-    @filter.permission_type(filter.PermissionType.ADMIN)
     async def weibo_keyword_album(self, event: AstrMessageEvent, kw: str = ""):
         """全局关键词路由（管理员）：命中关键词的微博图片只传固定群相册。
 
@@ -293,7 +292,8 @@ class CommandsMixin:
         rest: list[str] = []
         with contextlib.suppress(ValueError):
             rest = tokens[tokens.index(kw) + 1 :]
-        if rest and rest[0].isdigit():
+        # 群内省略群号时只剩一段：数字相册 ID 不能被误判成群号
+        if len(rest) >= 2 and rest[0].isdigit():
             target_gid, album = rest[0], " ".join(rest[1:])
         elif gid:
             target_gid, album = str(gid), " ".join(rest)
@@ -309,8 +309,8 @@ class CommandsMixin:
             )
             return
         rules = self._album_keyword_rules()
-        overwritten = _keyword_rules_upsert(rules, None, kw, target_gid, album)
-        self.config["album_keyword_rules"] = _keyword_rules_to_cfg(rules)
+        overwritten = keyword_rules_upsert(rules, None, kw, target_gid, album)
+        self._set_cfg("album_keyword_rules", _keyword_rules_to_cfg(rules))
         self._save_config()
         logger.info(f"{PLUGIN_NAME} 关键词路由(全局): 「{kw}」 -> 群 {target_gid} 相册「{album}」")
         tip = "（已覆盖同关键词同群的原规则）" if overwritten else ""
@@ -320,8 +320,6 @@ class CommandsMixin:
             "仅对该博主生效请用 微博博主关键词相册（博主规则优先）"
         )
 
-    @weibo.command("关键词相册移除")
-    @filter.permission_type(filter.PermissionType.ADMIN)
     async def weibo_keyword_album_remove(self, event: AstrMessageEvent, kw: str = ""):
         """删除同名全局关键词路由规则（管理员）：微博关键词相册移除 <关键词>"""
         if not kw:
@@ -336,7 +334,7 @@ class CommandsMixin:
             )
             return
         rules = [r for r in rules if not (r[0] is None and r[1] == kw)]
-        self.config["album_keyword_rules"] = _keyword_rules_to_cfg(rules)
+        self._set_cfg("album_keyword_rules", _keyword_rules_to_cfg(rules))
         self._save_config()
         logger.info(f"{PLUGIN_NAME} 关键词路由移除(全局): 「{kw}」 -> {removed}")
         yield event.plain_result(
@@ -344,8 +342,6 @@ class CommandsMixin:
             + "、".join(f"群 {g} 相册「{a}」" for g, a in removed)
         )
 
-    @weibo.command("博主关键词相册")
-    @filter.permission_type(filter.PermissionType.ADMIN)
     async def weibo_blogger_keyword_album(
         self, event: AstrMessageEvent, uid_text: str = "", kw: str = ""
     ):
@@ -372,7 +368,8 @@ class CommandsMixin:
         rest: list[str] = []
         with contextlib.suppress(ValueError):
             rest = tokens[tokens.index(kw) + 1 :]
-        if rest and rest[0].isdigit():
+        # 同 微博关键词相册：群内单段参数一律视为相册名/ID
+        if len(rest) >= 2 and rest[0].isdigit():
             target_gid, album = rest[0], " ".join(rest[1:])
         elif gid:
             target_gid, album = str(gid), " ".join(rest)
@@ -387,8 +384,8 @@ class CommandsMixin:
             )
             return
         rules = self._album_keyword_rules()
-        overwritten = _keyword_rules_upsert(rules, uid, kw, target_gid, album)
-        self.config["album_keyword_rules"] = _keyword_rules_to_cfg(rules)
+        overwritten = keyword_rules_upsert(rules, uid, kw, target_gid, album)
+        self._set_cfg("album_keyword_rules", _keyword_rules_to_cfg(rules))
         self._save_config()
         name = self.accounts[uid]["name"]
         logger.info(
@@ -400,8 +397,6 @@ class CommandsMixin:
             f"群 {target_gid} 相册「{album}」{tip}"
         )
 
-    @weibo.command("博主关键词相册移除")
-    @filter.permission_type(filter.PermissionType.ADMIN)
     async def weibo_blogger_keyword_album_remove(
         self, event: AstrMessageEvent, uid_text: str = "", kw: str = ""
     ):
@@ -418,14 +413,13 @@ class CommandsMixin:
             )
             return
         rules = [r for r in rules if not (r[0] == uid and r[1] == kw)]
-        self.config["album_keyword_rules"] = _keyword_rules_to_cfg(rules)
+        self._set_cfg("album_keyword_rules", _keyword_rules_to_cfg(rules))
         self._save_config()
         logger.info(f"{PLUGIN_NAME} 关键词路由移除(博主 {uid}): 「{kw}」 -> {removed}")
         yield event.plain_result(
             f"已删除 {len(removed)} 条规则：" + "、".join(f"群 {g} 相册「{a}」" for g, a in removed)
         )
 
-    @weibo.command("关键词相册列表")
     async def weibo_keyword_album_list(self, event: AstrMessageEvent):
         """查看关键词相册路由规则（博主规则优先于全局规则）"""
         rules = self._album_keyword_rules()
@@ -450,8 +444,6 @@ class CommandsMixin:
                 lines.append(f"{idx}. 命中「{kw}」→ 群 {gid} 相册「{album}」")
         yield event.plain_result("\n".join(lines))
 
-    @weibo.command("检测")
-    @filter.permission_type(filter.PermissionType.ADMIN)
     async def weibo_check(self, event: AstrMessageEvent):
         """立即检查一轮微博更新（管理员）"""
         if self._checking:
@@ -471,7 +463,6 @@ class CommandsMixin:
         else:
             yield event.plain_result("检查完成，暂无新微博")
 
-    @weibo.command("状态")
     async def weibo_status(self, event: AstrMessageEvent):
         """查看插件运行状态"""
         lines = ["微博监控运行状态："]
@@ -489,8 +480,10 @@ class CommandsMixin:
             lines.append("归档：未启用")
         else:
             try:
-                posts_n = store.count_posts()
-                media = store.media_stats()
+                # count_posts/media_stats 是同步 sqlite 全表聚合，直接调会卡住
+                # 事件循环（状态指令本身也是高频入口）
+                posts_n = await asyncio.to_thread(store.count_posts)
+                media = await asyncio.to_thread(store.media_stats)
                 lines.append(
                     f"归档：{posts_n} 帖 / {int(media.get('total') or 0)} 图"
                     f"（已落盘 {int(media.get('downloaded') or 0)}）"
@@ -518,7 +511,7 @@ class CommandsMixin:
             lines.append(f"身份模式：自定义 Cookie（{sorted(self._custom_cookies)}）")
         else:
             lines.append("身份模式：免 Cookie 游客身份")
-        lines.append(f"出网方式：{'代理 ' + _redact_proxy(self._proxy) if self._proxy else '直连'}")
+        lines.append(f"出网方式：{'代理 ' + redact_proxy(self._proxy) if self._proxy else '直连'}")
         if self._web_ready:
             lines.append("控制面板：AstrBot 管理面板 - 插件 - 本插件详情页打开")
         else:
@@ -527,8 +520,6 @@ class CommandsMixin:
 
     # ---------------- 归档（P3） ----------------
 
-    @weibo.command("回填")
-    @filter.permission_type(filter.PermissionType.ADMIN)
     async def weibo_backfill(self, event: AstrMessageEvent, uid_text: str = ""):
         """全量回填某博主的全部历史微博到归档库（管理员）"""
         uid, since, full = _parse_backfill_args(_cmd_args(event), uid_text)
@@ -562,7 +553,6 @@ class CommandsMixin:
             + "；微博回填状态 查看进度，微博回填停止 可中止"
         )
 
-    @weibo.command("回填状态")
     async def weibo_backfill_status(self, event: AstrMessageEvent):
         """查看回填进度、最近一次统计与游标"""
         running = self.archive_backfill_running()
@@ -592,15 +582,11 @@ class CommandsMixin:
         lines.append("游标：" + ("；".join(cursor_lines) if cursor_lines else "无"))
         yield event.plain_result("\n".join(lines))
 
-    @weibo.command("回填停止")
-    @filter.permission_type(filter.PermissionType.ADMIN)
     async def weibo_backfill_stop(self, event: AstrMessageEvent):
         """请求停止正在跑的回填（管理员，游标保留可续跑）"""
         self.archive_backfill_stop()
         yield event.plain_result("已请求停止回填：当前页处理完即退出，游标保留可续跑")
 
-    @weibo.command("归档导入")
-    @filter.permission_type(filter.PermissionType.ADMIN)
     async def weibo_archive_import(self, event: AstrMessageEvent, path_text: str = ""):
         """把 JSON 种子文件导入归档库（管理员）"""
         path = _import_path(event, path_text)
@@ -614,7 +600,6 @@ class CommandsMixin:
             return
         yield event.plain_result(self.format_import(stats))
 
-    @weibo.command("归档查询")
     async def weibo_archive_query_cmd(self, event: AstrMessageEvent, uid_text: str = ""):
         """查看归档库里的微博（每页 10 条）"""
         args = _cmd_args(event)
@@ -654,8 +639,6 @@ class CommandsMixin:
             lines.append(f"{when} @{author} {snippet or '（无正文）'}（{len(pics)} 图）")
         yield event.plain_result("\n".join(lines))
 
-    @weibo.command("对账")
-    @filter.permission_type(filter.PermissionType.ADMIN)
     async def weibo_archive_reconcile(self, event: AstrMessageEvent, uid_text: str = ""):
         """核对归档完整性并列出缺口（管理员）"""
         args = _cmd_args(event)
@@ -668,13 +651,14 @@ class CommandsMixin:
         report = await self.archive_reconcile(uid)
         yield event.plain_result(self.format_reconcile(report))
 
-    @weibo.command("管线状态")
     async def weibo_pipeline_status(self, event: AstrMessageEvent):
         """查看图床/向量管线的队列与六态进度"""
-        yield event.plain_result(self.format_pipeline_status())
+        # pipeline_stats 内部是同步 sqlite 全表统计（list_posts_for_pipeline +
+        # media_stats），图库上万条时会占住事件循环数百毫秒，期间所有群消息
+        # 与心跳都被卡住。统计本身对一致性没有要求，丢进线程池即可。
+        text = await asyncio.to_thread(self.format_pipeline_status)
+        yield event.plain_result(text)
 
-    @weibo.command("管线补跑")
-    @filter.permission_type(filter.PermissionType.ADMIN)
     async def weibo_pipeline_backfill(self, event: AstrMessageEvent):
         """把归档库里没跑完图床/向量的帖子重新入队（管理员）"""
         stats = await self.pipeline_backfill()
@@ -686,3 +670,87 @@ class CommandsMixin:
         queued = int((stats or {}).get("queued") or 0)
         yield event.plain_result(f"管线补跑完成：已扫描 {scanned} 帖，入队 {queued} 帖")
 
+    async def weibo_copylib_status(self, event: AstrMessageEvent, uid_text: str = ""):
+        """查看文案库（archive.db）的清洗进度与账号分布"""
+        uid = _extract_uid(uid_text) or ""
+        # 文案库统计同样走 sqlite 聚合，放线程里算
+        text = await asyncio.to_thread(self.format_copylib_status, uid)
+        yield event.plain_result(text)
+
+    async def weibo_copylib_list(self, event: AstrMessageEvent, args_text: str = ""):
+        """按账号/关键词查看文案，默认最近 10 条：微博文案列表 [账号] [关键词]"""
+        args = _cmd_args(event)
+        uid = _extract_uid(args_text) or ""
+        if not uid:
+            for tok in args:
+                uid = _extract_uid(tok) or ""
+                if uid:
+                    break
+        keyword = " ".join(tok for tok in args if not _extract_uid(tok))[:30]
+        rows = await asyncio.to_thread(self.copylib_list, uid, keyword)
+        yield event.plain_result(self.format_copylib_list(rows, uid))
+
+    async def weibo_copylib_rebuild(self, event: AstrMessageEvent, args_text: str = ""):
+        """把归档库里未清洗的帖子补齐 cleaned_text（管理员）"""
+        args = _cmd_args(event)
+        uid = ""
+        limit = 0
+        for tok in args:
+            # 微博 uid 本身是纯数字（通常 8 位以上）；先认链接/长数字为账号，
+            # 短数字才当数量，避免 微博文案清洗 <uid> 退化成"清洗全库 5000 条"。
+            if tok.isdigit() and len(tok) < 8:
+                limit = max(1, min(int(tok), 5000))
+            else:
+                uid = _extract_uid(tok) or uid
+        stats = await self.copylib_rebuild(uid, limit)
+        if not stats.get("ok"):
+            yield event.plain_result(f"文案清洗失败：{stats.get('error', '未知原因')}")
+            return
+        yield event.plain_result(
+            f"文案清洗完成：扫描 {stats.get('scanned', 0)} 帖，清洗 {stats.get('cleaned', 0)} 帖"
+        )
+
+    async def weibo_copylib_export(self, event: AstrMessageEvent, args_text: str = ""):
+        """把文案库导出成 CSV/Markdown（管理员）：微博文案导出 [账号] [csv|md]"""
+        args = _cmd_args(event)
+        uid = ""
+        fmt = "csv"
+        for tok in args:
+            low = tok.lower()
+            if low in {"csv", "md", "markdown"}:
+                fmt = "csv" if low == "csv" else "md"
+            else:
+                uid = _extract_uid(tok) or uid
+        if not uid and args_text:
+            uid = _extract_uid(args_text) or ""
+        result = (
+            await self.copylib_export(uid)
+            if fmt == "csv"
+            else await self.copylib_export_markdown(uid)
+        )
+        if not result.get("ok"):
+            yield event.plain_result(f"文案导出失败：{result.get('error', '未知原因')}")
+            return
+        count = int(result.get("count") or 0)
+        target = result.get("path", "")
+        yield event.plain_result(f"文案导出完成（{fmt.upper()}，{count} 条）：\n{target}")
+
+    async def weibo_copylib_import(self, event: AstrMessageEvent, path_text: str = ""):
+        """把 Node 版 CSV 文案导入 archive.db（管理员）：微博文案导入 <文件路径> [账号]"""
+        args = _cmd_args(event)
+        path = str(path_text or "").strip().strip('"').strip("'")
+        if not path and args:
+            path = args[0]
+        uid = ""
+        for tok in args:
+            uid = _extract_uid(tok) or uid
+        if not path:
+            yield event.plain_result("用法：微博文案导入 <CSV 文件路径> [账号]")
+            return
+        result = await self.copylib_import(path, uid)
+        if not result.get("ok"):
+            yield event.plain_result(f"文案导入失败：{result.get('error', '未知原因')}")
+            return
+        yield event.plain_result(
+            f"文案导入完成：CSV {result.get('records', 0)} 条，入库 {result.get('imported', 0)} 条"
+        )
