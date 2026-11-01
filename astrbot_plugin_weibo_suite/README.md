@@ -13,7 +13,7 @@
 
 ## 安装
 
-要求 AstrBot `>=4.28.0,<5`、Python 3.10+、平台适配器 `aiocqhttp`。
+要求 AstrBot `>=4.28.0,<4.30`、Python 3.10+、平台适配器 `aiocqhttp`。
 
 ```bash
 pip install -r requirements.txt

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/diyushuang/astrbot_plugin_weibo_suite/actions/workflows/ci.yml/badge.svg)](https://github.com/diyushuang/astrbot_plugin_weibo_suite/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.28.0%2C%3C5-blue)](https://github.com/AstrBotDevs/AstrBot)
+[![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.28.0%2C%3C4.30-blue)](https://github.com/AstrBotDevs/AstrBot)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
 
 一个 AstrBot 插件，把四条业务线装在一起：**微博监控转发**、**整条微博归档与图床上传**、
@@ -25,7 +25,7 @@
 
 ## 安装
 
-要求 AstrBot `>=4.28.0,<5`（下限对齐插件实际用到的 `register_web_api`、
+要求 AstrBot `>=4.28.0,<4.30`（下限对齐插件实际用到的 `register_web_api`、
 `astrbot.api.web` 的 `request`/`json_response`/`error_response`、
 `StarTools.get_data_dir`，这些在 4.28.0 中已存在且签名一致）、Python 3.10+、
 平台适配器 `aiocqhttp`。

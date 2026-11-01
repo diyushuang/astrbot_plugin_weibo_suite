@@ -74,6 +74,8 @@ graph TD
 | `archive.py` / `archive_db.py` | 归档编排 / 纯同步 SQLite 存储层 |
 | `pipeline.py` / `pipeline_naming.py` | 图床→缩略图→向量管线 / 命名模板渲染 |
 | `copylib.py` / `cleaner.py` | 文案库编排 / 清洗纯函数 |
+| `parser.py` / `runtime.py` | 帖子 JSON 解析纯函数 / 运行时开关（暂停、熔断）快照 |
+| `commands.py` / `constants.py` | 微博域指令实现（由 `main.py` 注册） / 域内常量 |
 
 ### 订阅域 `sns/`
 
@@ -94,9 +96,11 @@ graph TD
 
 ### 溯源域 `trace/`
 
-`trace/main.py` 是域入口 mixin，同时也是唯一还保留历史体量的模块（约 4800 行），
-它承担：指令实现、图库重扫、投递通道选择、签到渲染。其余模块都是可独立测试的
-纯逻辑或窄客户端：
+`trace/main.py` 只是域入口 mixin（约 640 行，负责装配与指令转发），历史体量早已
+按能力拆成若干 mixin：`trace_mixin.py`（溯源检索）、`library_mixin.py`（图库重扫与状态）、
+`original_mixin.py`（原图修复/投递）、`delivery_mixin.py`（投递通道选择）、
+`qq_upload_mixin.py`（QQ 上传）、`checkin_mixin.py`（签到）、`random_media.py`（随机图）。
+其余模块都是可独立测试的纯逻辑或窄客户端：
 
 - `features.py`（pHash/dHash/aHash）、`hash_index.py`、`vector_search.py`、`library.py`：
   检索双引擎与本地图库。
@@ -150,15 +154,28 @@ initialize()
   2. _bind_pipeline_services() # 管线服务必须在微博域启动 worker 之前就位
   3. _bind_checkin_source()    # 文案源是惰性供应器，此时 archive.db 还没打开
   4. super().initialize()      # 微博域：打开 archive.db、起 worker、起面板
+  失败 → _rollback_initialize()：按「微博域 → 溯源域」逆序尽力回收，再原样抛出
 
 terminate()
-  1. trace.terminate()
-  2. 微博域 terminate()        # 内部先 shutdown 面板后台任务，再 stop pipeline
+  1. 微博域 terminate()        # 内部先 shutdown 面板后台任务，再 stop pipeline
+  2. trace.terminate()
   → 任一步失败都记录汇总，不影响另一步
 ```
 
-顺序依据：溯源域先初始化会把共享日志处理器装上，这样两个域的 warning/error
-都进同一份错误留存；反之会丢掉溯源域加载期的告警。
+顺序依据：
+
+- **初始化溯源域在前**：它会把共享日志处理器装上，两个域的 warning/error 才进
+  同一份错误留存；反过来会丢掉溯源域加载期的告警。
+- **卸载时微博域在前**：推送管线持有溯源域注入的 `bed` / `library` 句柄，必须先
+  `pipeline_stop()` 再让溯源域关 SQLite 与 HTTP 会话，否则卸载瞬间还在跑的单帖会
+  写到已关闭的连接上。所以 terminate 与 initialize 是相反的顺序。
+- **失败必须自己回滚**：AstrBot 宿主的 `star_manager` 在 `initialize()` 抛错时只做
+  模块级清理，**从不调用** `terminate()`。已建的 errlog 写线程、SQLite 连接、面板
+  后台任务、aiohttp 会话若是放任不管，就变成孤儿，重载一次还会叠加一份。所以
+  `main.py:85-109` 用 `except BaseException` 兜住、先回收再 `raise`，且回滚不依赖
+  `_trace_initialized` / `_weibo_initialized` 标记（失败点可能落在某个域的
+  `initialize()` 内部，那个域标记还没置位却已经建了一半资源），两个 `terminate()`
+  自身都做到了幂等。
 
 ## 六、存储布局
 
@@ -174,6 +191,7 @@ terminate()
 ├── sns_state.json          # 订阅域状态（账号、冷却、健康度、已读 id）
 ├── sns/browser/<platform>/ # Playwright 持久化 profile（每个平台一个）
 ├── copylib/                # 文案导出（正文是真实原创内容，绝不入库）
+├── webui_uploads/          # 面板上传的临时文件（6 小时 TTL，最多留 50 个）
 └── errors.log              # 错误留存（面板 /errors 读它，返回前统一脱敏）
 ```
 
@@ -213,14 +231,34 @@ API 是两条风控线，套用 API 间隔会把一批 18 张图拖成几分钟�
   浏览器用一个实现相同窄接口的假对象。
 - 回归用例都带一句「为什么会有这条」的注释，指向真实故障场景
   （例如 `test_accounts_panel_payload_shape_uses_platform_and_account_id`）。
-- 全量测试 + `ruff check` 是 `ci.yml` 的门禁；发布清单由
-  `scripts/build_release.py --check` 校验。
+- `ci.yml` 的门禁：全量 `pytest`、`ruff check`、`ruff format --check`、
+  `scripts/build_release.py --check`，外加一个 `real-astrbot` job 装 `AstrBot>=4.28.0,<4.30`
+  （与 `metadata.yaml` 的 `astrbot_version` 同一区间，改一处必须同步改另一处），分两步：
+  1. `tests/test_real_astrbot.py` —— 干净子进程 `import astrbot`、构造插件、核对
+     `error_response` / `json_response` 契约，完全不经过 `conftest`；
+  2. 全量套件在 `WEIBO_SUITE_REAL_ASTRBOT=1` 下再跑一遍。
+- 两档宿主模式（同一套用例，两种环境）：
+  | 环境 | `WEIBO_SUITE_REAL_ASTRBOT` | `sys.modules["astrbot"]` | 用途 |
+  | --- | --- | --- | --- |
+  | 桩模式（默认） | 不设 | `conftest` 注入的最小桩 | 本机无 AstrBot 也能跑，快 |
+  | 真宿主模式 | `1` | 真 `astrbot` 包，只补桩里缺的符号 | 验证真实 Star/组件/filter 语义 |
+- **写用例的硬规矩**：不得依赖桩才有的行为（例如桩的 `Image.convert_to_file_path` 会
+  凭空造文件、桩的 `resolve_public_addrs` 会跳过 SSRF 白名单），否则该用例在真宿主下
+  必红。跨模式差异一律走 `tests/host_compat.py`（`chain_segments` / `image_ref` /
+  `command_name_of` / `real_host`），不要自己 `hasattr` 分支。
+- 造图片一律用 `Image.fromFileSystem` 或 `Image(file=..., url=...)`：真包的
+  `Image.fromURL` 会**真的发网络请求**（假 URL 直接 400），用它等于在测宿主的网络。
+- 本机没装 AstrBot 时 `test_real_astrbot` 会 skip；`REAL_ASTRBOT_REQUIRED=1` 时禁止
+  skip（缺 astrbot 直接失败）。CI 两步都设了该变量。
+- 凡是「框架 API 用法」的回归（如 `error_response(status_code=...)` 是 keyword-only）
+  由三层兜：真宿主冒烟、静态门禁 `tests/test_error_response_contract.py`、以及
+  真宿主模式下的全量套件。只跑桩模式时这些**一定是绿的**，别据此判断兼容性。
 
 ## 十、已知取舍
 
 | 取舍 | 原因 |
 | --- | --- |
-| `trace/main.py` 仍有约 4800 行 | 它承载大量指令实现与历史兼容分支，继续拆分的收益低于回归风险；新增能力应放到子模块 |
+| `trace/` 拆成 20+ 个 mixin/子模块 | 单文件曾到 4800 行，按能力拆开后 `main.py` 只剩装配；mixin 之间仍有隐式共享状态（`self.library` / `self.bed`），新增能力应放到独立子模块并显式传依赖 |
 | 订阅域延迟偏高（抖音 P50 约 150s） | 保号优先。激进档可在面板打开，文档里如实标注代价 |
 | 面板无插件级鉴权 | 复用 AstrBot 会话；加 token 会与 WebUI 的单点登录冲突 |
 | 归档下载串行 | 并发会显著提高被限流概率，默认 1，可在配置里调 |

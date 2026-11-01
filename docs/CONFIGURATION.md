@@ -4,7 +4,7 @@
 
 配置在 AstrBot 管理面板中打开：**插件 → 本插件 → 配置**，保存后写入 AstrBot 的插件配置文件。也可以直接编辑该 JSON 文件，但不推荐：AstrBot 加载时会按 schema 做一次完整性检查，schema 里没有声明的键会被丢弃，类型不符的值会被纠正，手改很容易被静默覆盖。
 
-配置分为 15 个一级分组，另有若干用于旧版本兼容的顶层键，合计 179 个分组键：
+配置分为 15 个一级分组，另有若干用于旧版本兼容的顶层键，合计 180 个分组键（以 `_conf_schema.json` 当前内容为准，改 schema 时这份计数要一起改）：
 
 | 分组 | 键数 | 作用 |
 | --- | --- | --- |
@@ -22,7 +22,7 @@
 | `checkin` | 12 | 每日签到 |
 | `vector_search` | 13 | Qdrant 向量检索与多模态 embedding |
 | `limits` | 4 | 下载体积上限与图床哈希缓存 |
-| `sns` | 27 | 多平台订阅（抖音 / 小红书 / Instagram） |
+| `sns` | 28 | 多平台订阅（抖音 / 小红书 / Instagram） |
 
 ## 敏感字段与脱敏
 
@@ -45,6 +45,8 @@
 | IG Cookie | `sns.instagram_cookie` | 含 sessionid，`http` 模式必填 |
 
 其余凭据类字段（如 `storage_bucket.r2_access_key_id`、`storage_bucket.oci_access_key_id`、`image_bed.cfi_base_url`）虽然未标 `secret`，但同样是账号凭据，对外分享配置时一并删除。旧布局的 `proxy` 与 `custom_cookie` 两个顶层键同样是 `secret`。
+
+`image_bed.auth_header` 在面板里也是密码框（`secret: true`），但它只该填**请求头的名字**（如 `Authorization`、`X-API-Key`）。把整串 `Authorization: Bearer sk-xxx` 填进去并不合规——那样 token 会既出现在 `token` 里、又明文躺在 `auth_header` 里，面板的回显保护也就失效了。
 
 `微博 状态` 在展示出网方式时会调用 `redact_proxy` 对代理地址脱敏，所以可以直接把状态截图给群友；但配置文件本身没有这层保护。
 
@@ -111,6 +113,7 @@
 - `text_max_length` 默认只有 100 字符，长微博会被截断；`show_full_weibo_text` 只影响长文（正文超过截断长度时是否改发全文），不改变普通帖的截断。
 - `message_send_timeout` 是单条消息的总超时，同时开图片与视频、或目标通道是 QQ 官方机器人时建议加到 120 以上。
 - 推送顺序由 `push_delay_seconds` 控制，`max_push_per_round` 用于压突发：一次检查命中很多帖子时，先推 N 条，其余留在待推送队列按重试次数继续。
+- 多群推送**部分失败只补发失败的会话**：某条微博只在部分 `push_sessions` 里失败时，条目留在队列并记住 `retry_sessions`（`weibo/pusher.py:1114-1136`），下一轮只发这些会话，已送达的群不会出现同一条微博两遍（`weibo/pusher.py:891-903`）。发送结果「未知」（超时但可能已经发出）按已送达处理、不重发——宁可漏一条也不在群里刷重复；这个重试名单与已下载的媒体一起落盘，重启不丢。之后新绑定的群不会参与老条目的补发。
 - `callback_api_base` 只在反向代理或容器化部署里需要手填，留空会按当前请求自动推断。
 
 ## album
@@ -254,7 +257,7 @@ NapCat 群相册上传。
 | `mode` | string | `local` | 图床模式（`local` / `generic_http` / `cloudflare_imgbed`） |
 | `api_url` | string | `""` | generic_http 的上传接口地址 |
 | `token` | string | `""` | generic_http 的鉴权 Token（敏感） |
-| `auth_header` | string | `Authorization` | 鉴权请求头名称 |
+| `auth_header` | string | `Authorization` | 鉴权请求头名称，**只填头名，不要填整串 `Authorization: Bearer xxx`**（面板按密码框显示） |
 | `auth_prefix` | string | `Bearer ` | 鉴权头值前缀 |
 | `file_field` | string | `file` | 上传文件字段名 |
 | `extra_fields` | dict | `{}` | 附加表单字段 |
@@ -271,10 +274,11 @@ NapCat 群相册上传。
 
 - `mode` 默认是 `local`，此时下面这些字段全部不生效。改成 `generic_http` 后至少要配 `api_url` 与 `url_path`，两者必须是同一套响应格式。
 - `url_path` 是点号路径，`data.url` 表示取响应 JSON 的 `data.url`；图片直链藏在多层里的服务要写全，比如 `data.0.url` 这种带数组下标的路径。
-- `auth_header` 与 `auth_prefix` 拼成完整请求头，默认是 `Authorization: Bearer <token>`；接口只认 `X-API-Key` 时改成对应名字并把前缀设成空字符串。
+- `auth_header` 与 `auth_prefix` 拼成完整请求头，默认是 `Authorization: Bearer <token>`；接口只认 `X-API-Key` 时改成对应名字并把前缀设成空字符串。这里只写头名：头值永远由 `auth_prefix + token` 生成，自己把整串塞进 `auth_header` 会拼出两层前缀，鉴权必然失败。
 - `extra_fields` 用于接口要求的固定表单参数（如 `bucket`、`folder`），值是字符串，不要写成嵌套结构。
 - CloudFlare-ImgBed 模式下 `cfi_base_url` 必填，`cfi_token` 与 `cfi_auth_code` 按站点是否开了鉴权二选一填写；`cfi_upload_channel` 与 `cfi_channel_name` 对应站点里的存储渠道，填错会返回「渠道不存在」。
 - 图床与对象存储同时配置时，`storage_bucket` 优先，见下节。
+- **上传失败不会让登记失败**：只对瞬时故障做指数退避重试（`UPLOAD_RETRY_ATTEMPTS`），重试耗尽后图会存成本地副本，同时把图床标记为「降级」（`trace/image_bed.py:238-258`、`:301-319`）。降级只影响直链形态——直链变成本地路径、日志里只有一条 warning——并且下一次上传成功会自动解除，不用重启插件；当前是否降级看 `溯源状态`（见 [指令手册](COMMANDS.md#溯源状态)）。
 
 ## storage_bucket
 
@@ -433,6 +437,7 @@ Qdrant 向量检索与多模态 embedding。
 | `text_max_length` | int | `300` | 正文截断长度 |
 | `at_all` | bool | `false` | 推送时 @全体成员（需机器人在群里是管理员） |
 | `at_all_keywords` | list | `[]` | @全体关键词（留空 = 不过滤） |
+| `at_all_uids` | list | `[]` | @全体生效的账号白名单（留空 = 不限；填的是订阅账号的 ID / 名称 / 平台标识） |
 | `douyin_cookie` | string | `""` | 抖音 Cookie（`http` 模式必填，敏感） |
 | `xhs_cookie` | string | `""` | 小红书 Cookie（`http` 模式必填，敏感） |
 | `instagram_cookie` | string | `""` | Instagram Cookie（`http` 模式必填，敏感） |
@@ -447,6 +452,7 @@ Qdrant 向量检索与多模态 embedding。
 - `jitter_ratio` 为 `0` 时用平台内置抖动比例且只向长的一侧抖；手动填正数会在内置基础上再加一层，一般不需要动。
 - `platform_concurrency` 为 `0` 时用内置并发（抖音 2 / 小红书 1 / IG 1）。调高能加快多号检查，但同一平台的请求会挤在一起，比调低间隔更容易触发风控。
 - `push_sessions` 留空时沿用微博的推送目标（`sns/service.py:137-139` 的回落逻辑），只想给订阅单独建群时再填。
+- `sns.at_all_uids` 与 `push.at_all_uids` 是**两个不同的键**，各管各的域：前者匹配订阅账号的账号 ID、名称或平台标识（`weibo/pusher.py:1853-1872` 的 `_sns_at_all_hit` 拿 `at_all_keys` 去比），后者匹配微博博主 uid。填 `douyin` 等于给抖音平台的所有账号开 @全体；留空表示白名单不设限，此时能不能 @ 只取决于 `at_all` 开关、关键词与群管理员权限这三关。
 - `message_format` 支持 `{platform}`、`{name}`、`{time}`、`{text}`、`{link}` 五个占位符，模板里写错占位符不会报错，只会原样输出。
 - `cooldown_base_seconds` 与 `cooldown_cap_seconds` 共同决定风控冷却的指数退避区间，默认 10 分钟起、最多 1 小时。
 
