@@ -1,4 +1,4 @@
-"""Warning/error persistence shared by every business domain."""
+"""各业务域共用的告警/错误持久化。"""
 
 from __future__ import annotations
 

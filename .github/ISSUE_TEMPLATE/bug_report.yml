@@ -1,0 +1,84 @@
+name: Bug 报告
+description: 插件行为不符合预期、报错或数据异常
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请先确认：**不要在报告里粘贴真实 Cookie、账号密码、图床密钥或内网地址**，
+        这些内容会被公开展示。日志里的直链与凭据请手动打码。
+  - type: input
+    id: plugin-version
+    attributes:
+      label: 插件版本
+      description: 见 `astrbot_plugin_weibo_suite/metadata.yaml` 的 `version`，或面板「总览」页
+      placeholder: v0.8.1
+    validations:
+      required: true
+  - type: input
+    id: astrbot-version
+    attributes:
+      label: AstrBot 版本
+      description: AstrBot WebUI「关于」页显示，或 `pip show astrbot` 的版本
+      placeholder: 4.28.0
+    validations:
+      required: true
+  - type: dropdown
+    id: domain
+    attributes:
+      label: 出问题的域
+      options:
+        - 微博监控转发
+        - 群相册
+        - 归档与回填
+        - 图床与向量管线
+        - 文案库（签到文案）
+        - 图片溯源与签到
+        - 多平台订阅（抖音 / 小红书 / IG）
+        - 管理面板
+        - 插件加载 / 安装
+        - 其它
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 现象
+      description: 实际发生了什么。有报错就贴**脱敏后**的完整堆栈
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      description: 从冷启动开始写，包括相关配置项（**只写键名与取值类型，不要写密钥**）
+      placeholder: |
+        1. 配置 monitor.poll_interval = 120
+        2. 执行「微博 添加 1000000001」
+        3. 等待一轮轮询后……
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志
+      description: 面板「错误日志」页签可导出；**务必先打码**直链、查询串、Cookie、IP
+      render: text
+    validations:
+      required: false
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 确认
+      options:
+        - label: 我已搜索过现有 issue，没有重复
+          required: true
+        - label: 我已移除报告中的真实凭据、账号、内网地址与签名直链
+          required: true

@@ -1,5 +1,52 @@
 # 更新日志
 
+## Unreleased
+
+本轮为「按 GitHub 通行规范整理文档与仓库结构」，外加两处面板前端与后端字段
+不一致导致的真实故障。
+
+### 修掉的真 bug
+
+- **面板「停用 / 启用」订阅按钮永远失败**（`views/dashboard/app.js` 与
+  `views_backend/sns_api.py` 的字段名不一致）：面板提交
+  `{action, platform, account_id}`，而接口只读 `key`（`platform:account_id`
+  全量键）→ 点「停用」恒返回 404「没有这个订阅」，点「移除」恒返回 400
+  「缺少平台或账号」。接口现在同时接受 `key`、`account_id` 与 `target` 三种
+  写法，并抽出 `_locate_account()` 统一按 `(platform, account_id)` 定位。
+  回归用例：`tests/test_sns_api.py::test_accounts_panel_payload_shape_uses_platform_and_account_id`。
+- **面板「Cookie 与凭据」列表恒为空**（`app.js::loadSnsCredentials`）：前端读
+  `data.credentials`，接口返回的字段是 `rows`。改为读 `rows` 并保留旧字段兼容。
+
+### 文档
+
+- 新增 `docs/COMMANDS.md`（53 条指令：顶层 12 + 微博 30 + 订阅 11，含别名、
+  权限、参数与示例）、`docs/CONFIGURATION.md`（15 个配置分组、179 个配置键、
+  敏感字段说明与旧布局迁移键）、`docs/WEBUI.md`（七个页签 + 35 条面板路由 +
+  鉴权边界）、`docs/ARCHITECTURE.md`（分层、依赖方向、一条微博的完整路径、
+  生命周期、存储布局、横向能力、测试策略、已知取舍）。
+- 重写根 `README.md`（特性总览、安装、配置、文档索引、隐私边界、许可）与
+  `CONTRIBUTING.md`（环境、四条门禁、代码组织、注释与文档规范、
+  Conventional Commits、分支与发布、既有约束）。
+- 重写 `astrbot_plugin_weibo_suite/SECURITY.md`：补报告渠道、支持版本、
+  设计上的安全边界（凭据/出网/日志脱敏/面板/文件读写）与不在范围内的项。
+- 重写 `astrbot_plugin_weibo_suite/README.md`：按域重新组织，删掉阶段编号式
+  叙述，补「什么时候需要哪条通道」的说明。
+- 新增 `.github/ISSUE_TEMPLATE/{bug_report,feature_request}.yml` 与
+  `.github/PULL_REQUEST_TEMPLATE.md`：模板里带脱敏检查项。
+- 新增仓库根 `LICENSE`（MIT）。
+
+### 注释
+
+- 补齐 11 个测试模块缺失的模块级 docstring（`tests/__init__.py`、
+  `test_common.py`、`test_features.py`、`test_http_client.py`、`test_image_bed.py`、
+  `test_image_delivery.py`、`test_library.py`、`test_media_history.py`、
+  `test_random_media.py`、`test_url_guard.py`、`test_vector_search.py`）。
+- 把 10 处英文模块 docstring 统一改为中文（`shared/errorlog.py`、
+  `shared/napcat.py`、`trace/common.py`、`trace/http_client.py`、`weibo/runtime.py`
+  及 5 个测试模块）。现在 116 个模块的模块级 docstring 全部为中文且齐全。
+- 校验方式：AST 剥离 docstring 后与改前逐字节比对，20 个文件
+  `BODY_DRIFT 0`，纯注释改动零逻辑变化。
+
 ## v0.8.1 - 2026-10-31
 
 本轮为「按 AstrBot 开发规范与官方接口文档的全量复审」，重点在可恢复性、

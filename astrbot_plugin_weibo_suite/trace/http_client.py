@@ -1,4 +1,4 @@
-"""Compatibility import for the shared guarded HTTP client."""
+"""共享受保护 HTTP 客户端的兼容性导入。"""
 
 from ..shared.http import GuardedHttpClient, HttpClientGetter
 

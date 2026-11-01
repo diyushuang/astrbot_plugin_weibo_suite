@@ -1,3 +1,9 @@
+"""覆盖图床客户端的 URL 与键值推导校验。
+
+包括 JSON 路径取值、公开 URL 编码（保留斜杠），以及 OCI/Cloudflare/S3
+的密钥与路径推导在同源、同桶、越界场景下的拒绝，和 S3 错误详情不做实体转义。
+"""
+
 from astrbot_plugin_weibo_suite.trace.image_bed import (
     ImageBedClient,
     _public_url,

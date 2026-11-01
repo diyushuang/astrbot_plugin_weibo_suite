@@ -222,6 +222,39 @@ def test_accounts_add_rejects_link_that_is_not_a_profile(api):
     assert instance.service().state.accounts == {}
 
 
+def test_accounts_panel_payload_shape_uses_platform_and_account_id(api):
+    """面板提交的是 `{platform, account_id}`：停用与移除都必须能定位到号。
+
+    回归用例：面板按钮原本发 `account_id`，而接口只读 `key`，导致点「停用」
+    永远回 404「没有这个订阅」、点「移除」永远回 400「缺少平台或账号」。
+    """
+    instance, body = api
+    body["payload"] = {
+        "action": "add",
+        "platform": "douyin",
+        "target": "https://www.douyin.com/user/MS4wLjABAAAAtester",
+    }
+    assert _run(instance.accounts())["status"] == "ok"
+
+    account = next(iter(instance.service().state.accounts.values()))
+    body["payload"] = {
+        "action": "toggle",
+        "platform": account.platform,
+        "account_id": account.account_id,
+    }
+    out = _run(instance.accounts())
+    assert out == {"status": "ok", "key": account.key, "enabled": False}
+
+    body["payload"] = {
+        "action": "remove",
+        "platform": account.platform,
+        "account_id": account.account_id,
+    }
+    out = _run(instance.accounts())
+    assert out["status"] == "ok"
+    assert instance.service().state.accounts == {}
+
+
 def test_accounts_toggle_unknown_key_is_404(api):
     instance, body = api
     body["payload"] = {"action": "toggle", "key": "douyin:nope"}

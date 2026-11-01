@@ -1,4 +1,4 @@
-"""P1 structural and command-surface contract."""
+"""P1 拆分后 trace 域的结构与命令面契约。"""
 
 from __future__ import annotations
 

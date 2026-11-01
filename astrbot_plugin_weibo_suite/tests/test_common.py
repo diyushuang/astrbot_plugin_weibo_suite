@@ -1,3 +1,9 @@
+"""覆盖 shared.common 与 shared.http 的公共辅助能力。
+
+包括 QQ 图床域名的精确匹配与伪造后缀拒绝、错误文本的脱敏与截断，
+以及 prepare_headers 在重定向时逐跳重算 Referer。
+"""
+
 from urllib.parse import urlparse
 
 from astrbot_plugin_weibo_suite.shared.common import is_qq_image_bed_host, sanitize_error_text

@@ -1596,7 +1596,8 @@ async function loadSns() {
 async function loadSnsCredentials() {
   try {
     const data = await window.__bridge.apiGet("sns/credentials");
-    renderSnsCredentials(data.credentials || []);
+    // 后端字段名是 rows（与其它列表接口一致）；credentials 仅作旧字段兼容
+    renderSnsCredentials(data.rows || data.credentials || []);
   } catch (e) {
     // 凭据读取失败不打断面板其它区块
   }

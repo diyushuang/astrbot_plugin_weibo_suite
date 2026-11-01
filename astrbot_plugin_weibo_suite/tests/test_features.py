@@ -1,3 +1,9 @@
+"""验证 trace.features 的图像特征计算与格式识别。
+
+含 pHash 长度、DCT 矩阵缓存、超大像素拒绝、Pillow 全局限制不被篡改，
+以及 HEIC/AVIF 识别、MIME 内容嗅探与扫描扩展名覆盖。
+"""
+
 import pytest
 from PIL import Image
 

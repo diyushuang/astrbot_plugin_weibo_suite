@@ -1,7 +1,7 @@
-"""Runtime imports shared by the split Weibo mixins.
+"""微博域拆分后各 mixin 共用的导入汇总。
 
-This module is intentionally the only broad namespace bridge used during the
-mechanical split. Business modules stay one-way: mixins -> runtime -> parser/shared.
+本模块是拆分过程中**唯一**允许的宽命名空间桥：业务模块保持单向依赖，
+即 mixin -> runtime -> parser/shared，避免各 mixin 互相 import 成环。
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""NapCat/OneBot error classification and payload helpers."""
+"""NapCat/OneBot 错误分类与负载辅助工具。"""
 
 from __future__ import annotations
 

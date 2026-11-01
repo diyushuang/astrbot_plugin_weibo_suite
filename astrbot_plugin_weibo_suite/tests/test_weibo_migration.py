@@ -1,4 +1,4 @@
-"""P2 Weibo-domain split and command-surface regression."""
+"""P2 微博域拆分与命令面回归。"""
 
 from __future__ import annotations
 

@@ -1,3 +1,9 @@
+"""验证 ImageLibrary 的入库、检索与去重。
+
+含 v1 结构迁移时的 pHash 去重、按扫描目录裁剪记录，
+以及匹配结果带回文件大小。
+"""
+
 import sqlite3
 
 import pytest

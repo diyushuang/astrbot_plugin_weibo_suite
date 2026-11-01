@@ -1,3 +1,9 @@
+"""覆盖 MediaHistory 的会话级媒体记忆。
+
+含记录与别名登记、重插移到末尾、容量淘汰与会话隔离，
+以及精确/同主干/子串查找、遗忘与脏键修复。
+"""
+
 from astrbot_plugin_weibo_suite.trace.media_history import (
     MAX_PER_SESSION,
     MediaHistory,

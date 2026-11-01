@@ -1,4 +1,4 @@
-"""Shared guarded download discipline."""
+"""共享的受保护下载约束。"""
 
 from __future__ import annotations
 

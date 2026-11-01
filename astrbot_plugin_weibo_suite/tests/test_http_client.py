@@ -1,3 +1,9 @@
+"""验证 GuardedHttpClient 的会话复用与调用透传。
+
+同一实例内复用同一个 aiohttp 会话，prepare 钩子与超时按调用透传，
+关闭时释放会话。
+"""
+
 import aiohttp
 
 from astrbot_plugin_weibo_suite.shared import http as http_client

@@ -1,4 +1,4 @@
-"""Compatibility import for the shared common helpers."""
+"""共享 common 辅助工具的兼容性导入。"""
 
 from ..shared import common as _common
 

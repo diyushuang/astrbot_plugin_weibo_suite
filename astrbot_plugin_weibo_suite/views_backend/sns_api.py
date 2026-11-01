@@ -214,7 +214,13 @@ class SnsAPI:
         )
 
     async def accounts(self):
-        """订阅增删：`{action:"add"|"remove"|"toggle", platform, target|key}`。"""
+        """订阅增删：`{action:"add"|"remove"|"toggle", platform, target|key|account_id}`。
+
+        面板提交的是 `{action, platform, account_id}`（见 `views/dashboard/app.js`
+        的订阅列表按钮），而手工调接口习惯写 `key`（`platform:account_id` 全量键）。
+        两种写法都接受：只给 `account_id` 时按 `(platform, account_id)` 定位，
+        给 `key` 时直接按全量键定位。
+        """
         body = await self._body()
         action = str(body.get("action") or "").strip().lower()
         service, err = self._require_service()
@@ -233,7 +239,9 @@ class SnsAPI:
             return json_response({"status": "ok", "message": message})
         if action == "remove":
             platform = self._platform(body.get("platform"))
-            target = str(body.get("key") or body.get("target") or "").strip()
+            target = str(
+                body.get("key") or body.get("target") or body.get("account_id") or ""
+            ).strip()
             if not platform or not target:
                 return error_response("缺少平台或账号", 400)
             ok, message = service.remove_account(platform, target)
@@ -241,16 +249,31 @@ class SnsAPI:
                 return error_response(message, 409)
             return json_response({"status": "ok", "message": message})
         if action == "toggle":
-            key = str(body.get("key") or "").strip()
-            account = service.state.get(key)
+            account = self._locate_account(service, body)
             if account is None:
                 return error_response("没有这个订阅", 404)
             account.enabled = not account.enabled
             if account.enabled:
                 account.next_check_ts = time.time()
             service.state.save()
-            return json_response({"status": "ok", "key": key, "enabled": account.enabled})
+            return json_response({"status": "ok", "key": account.key, "enabled": account.enabled})
         return error_response(f"不支持的操作：{action or '（空）'}", 400)
+
+    @staticmethod
+    def _locate_account(service, body: dict):
+        """按 `key` 或 `(platform, account_id)` 定位订阅号；找不到返回 None。"""
+        platform = str(body.get("platform") or "").strip().lower()
+        account_id = str(body.get("account_id") or "").strip()
+        key = str(body.get("key") or "").strip()
+        if key:
+            found = service.state.get(key)
+            if found is not None:
+                return found
+        if platform:
+            found = service.state.get(platform, account_id)
+            if found is not None:
+                return found
+        return None
 
     async def guard(self):
         """守卫参数调整（冷却基数/上限、健康度阈值、间隔、开关）。"""

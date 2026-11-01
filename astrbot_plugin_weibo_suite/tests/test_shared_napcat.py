@@ -1,4 +1,4 @@
-"""NapCat error classification shared by album and trace delivery."""
+"""相册与 trace 投递共用的 NapCat 错误分类。"""
 
 from __future__ import annotations
 

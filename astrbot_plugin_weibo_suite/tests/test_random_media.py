@@ -1,3 +1,10 @@
+"""覆盖随机媒体客户端的 URL 构建、响应解析与命名判定。
+
+含 API URL 构建的各项校验（域名、绝对地址、查询与片段、内容类型）、
+响应解析与相对地址补全、文件名与类型判定、缩略图前缀处理、
+显示名清洗与目录提取。
+"""
+
 import pytest
 
 from astrbot_plugin_weibo_suite.trace import random_media

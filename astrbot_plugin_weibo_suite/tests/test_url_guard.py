@@ -1,3 +1,9 @@
+"""验证 URL 守卫的地址判定与重定向防护。
+
+含内网/回环/元数据等非公网地址拒绝与公网放行，
+以及跨源重定向时的凭据剥离、私有主机放行白名单的作用域隔离。
+"""
+
 import aiohttp
 import pytest
 from aiohttp import web
