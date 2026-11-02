@@ -614,14 +614,13 @@
       },
       "extra_fields": {
         "description": "【generic_http 选填】附加表单字段",
-        "type": "object",
-        "secret": true,
+        "type": "dict",
         "items": {},
         "default": {},
         "condition": {
           "mode": "generic_http"
         },
-        "hint": "上传时随请求附加的固定表单字段，如部分图床要求的 strategy_id、api_secret 等。"
+        "hint": "上传时随请求附加的固定表单字段，如部分图床要求的 strategy_id、api_secret 等。自由键值对，面板以 JSON 编辑器填写；内容在配置文件里是明文，含 api_secret 时请勿截图或分享配置。"
       },
       "url_path": {
         "description": "【generic_http 必填】响应中图片直链的 JSON 路径",
@@ -999,11 +998,11 @@
       },
       "quote_api_headers": {
         "description": "【选填】语句接口请求头",
-        "type": "object",
-        "secret": true,
+        "type": "dict",
+        "items": {},
         "default": {},
         "collapsed": true,
-        "hint": "需要 Token / Referer 的接口在此填写，如 {\"Authorization\": \"Bearer xxx\"}；该值可能包含 Authorization Bearer token 等凭据，面板中已按敏感字段隐藏显示，请勿把真实凭证写进公开配置或仓库。"
+        "hint": "需要 Token / Referer 的接口在此填写，如 {\"Authorization\": \"Bearer xxx\"}。自由键值对，面板以 JSON 编辑器填写、不遮罩：该值常包含 Bearer token 等凭据，截图或分享配置文件前请自行剔除，也不要写进公开仓库。"
       },
       "quote_timeout": {
         "description": "【选填】语句接口超时（秒）",
@@ -1302,7 +1301,8 @@
   },
   "image_delivery": {
     "description": "（旧布局迁移用，请勿修改）图片回传设置",
-    "type": "object",
+    "type": "dict",
+    "items": {},
     "default": {},
     "condition": {
       "advanced_settings": "__legacy__"
@@ -1312,7 +1312,8 @@
   },
   "qq_upload": {
     "description": "（旧布局迁移用，请勿修改）QQ 官方上传通道",
-    "type": "object",
+    "type": "dict",
+    "items": {},
     "default": {},
     "condition": {
       "advanced_settings": "__legacy__"

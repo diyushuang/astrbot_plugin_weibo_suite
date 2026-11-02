@@ -48,6 +48,8 @@
 
 `image_bed.auth_header` 在面板里也是密码框（`secret: true`），但它只该填**请求头的名字**（如 `Authorization`、`X-API-Key`）。把整串 `Authorization: Bearer sk-xxx` 填进去并不合规——那样 token 会既出现在 `token` 里、又明文躺在 `auth_header` 里，面板的回显保护也就失效了。
 
+`secret` 只对 `string` 与字符串 `list` 生效（AstrBot 文档口径）。上表里没有 `image_bed.extra_fields` 与 `checkin.quote_api_headers`，因为它们是自由键值对（`type: dict`），面板用 JSON 编辑器**明文**渲染、不做遮罩：字段上标 `secret` 也没有任何效果，反而会让人误以为已遮罩。这两处只要填了 `api_secret`、`Authorization: Bearer ...` 之类的值，截图、贴日志、分享配置文件都会原样带出去。
+
 `微博 状态` 在展示出网方式时会调用 `redact_proxy` 对代理地址脱敏，所以可以直接把状态截图给群友；但配置文件本身没有这层保护。
 
 ## monitor
@@ -490,8 +492,8 @@ Qdrant 向量检索与多模态 embedding。
 
 ### 另外两处一次性迁移
 
-- `_migrate_bucket_config`（`trace/main.py:710`）：v1.2.x → v1.3.0 时把 `image_bed.mode` 里的 `cloudflare_r2` / `oracle_oci` 搬到 `storage_bucket`，若 `storage_bucket.mode` 已有值则不覆盖。
-- `_migrate_album_max_images`（`weibo/plugin.py:483`）：v1.11.x 及以前的 `album_max_images` 默认值是 9，AstrBot 会把默认值物化进部署配置，导致升级后新默认值 18 不生效。迁移只在「当前值恰好等于旧默认值 9」时上调到 18，并在 `state.json` 记一个 `album_max_images_v18` 标记，之后不再自动改动，所以迁移后手动改回 9 是允许的。
+- `_migrate_bucket_config`（`trace/state_mixin.py:288`）：v1.2.x → v1.3.0 时把 `image_bed.mode` 里的 `cloudflare_r2` / `oracle_oci` 搬到 `storage_bucket`，若 `storage_bucket.mode` 已有值则不覆盖。
+- `_migrate_album_max_images`（`weibo/plugin.py:485`）：v1.11.x 及以前的 `album_max_images` 默认值是 9，AstrBot 会把默认值物化进部署配置，导致升级后新默认值 18 不生效。迁移只在「当前值恰好等于旧默认值 9」时上调到 18，并在 `state.json` 记一个 `album_max_images_v18` 标记，之后不再自动改动，所以迁移后手动改回 9 是允许的。
 
 ## 相关文档
 

@@ -127,7 +127,7 @@ pip install -r requirements.txt
 | 文档 | 内容 |
 | --- | --- |
 | [指令手册](docs/COMMANDS.md) | 53 条指令的别名、权限、参数与示例 |
-| [配置手册](docs/CONFIGURATION.md) | 15 个配置分组、179 个配置键、敏感字段与旧布局迁移键 |
+| [配置手册](docs/CONFIGURATION.md) | 15 个配置分组、180 个配置键、敏感字段与旧布局迁移键 |
 | [面板说明](docs/WEBUI.md) | 七个页签、35 条面板路由、鉴权边界、常见问题 |
 | [架构说明](docs/ARCHITECTURE.md) | 分层与依赖方向、一条微博的完整路径、生命周期、存储布局、已知取舍 |
 | [安全策略](SECURITY.md) | 漏洞报告渠道、支持版本、设计上的安全边界 |

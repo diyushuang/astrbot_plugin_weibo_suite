@@ -1,9 +1,22 @@
 # 更新日志
 
-## Unreleased
+## v0.9.1 - 2026-11-02
 
 ### 修掉的真 bug
 
+- **AstrBot 4.29.x 上插件根本装不上，报错只有一句 `'items'`**（`_conf_schema.json`）：
+  本仓库有三处把「自由键值映射」写成了 `"type": "object"` 却没配 `items`
+  （`checkin.quote_api_headers`、`image_delivery`、`qq_upload`）。宿主的
+  `AstrBotConfig._config_schema_to_default_config` 对每个 object 节点都直接取
+  `v["items"]` 递归生成默认配置，缺键就是 `KeyError('items')`；PluginManager
+  把它包成「加载插件「…」时出现问题，原因：'items'。」并判安装失败——报错里
+  既没有字段名也没有文件名，只能靠翻宿源码反查。按官方文档，`object` 必须有
+  `items` 子 schema，自由映射该用 `dict`（面板会给 JSON 编辑器）。三处统一改为
+  `type: dict` + `items: {}`，与文档里 `custom_extra_body` 的写法一致。
+  回归用例：`tests/test_config_layout.py::test_object_nodes_declare_items` 与
+  `::test_schema_to_default_config_matches_host_algorithm`——后者把宿主的默认值
+  生成算法照着复刻了一遍，回退修复立刻抛 `KeyError: 'items'`。**已发布过的
+  v0.9.0 受此影响，装了新版请直接升到 v0.9.1。**
 - **开机不足 60 秒的机器上，第一次写盘失败被当成「重复失败」吞掉**（`shared/errorlog.py`）：
   `_last_write_error_ts` 的初值 `0.0` 既当「从没上报过」的哨兵，又直接参与限频
   比较 `now - ts < 60`。`time.monotonic()` 是开机以来的秒数，容器与新开机机器上
@@ -19,6 +32,27 @@
   其实已经失效" 这条告警不再出现，而面板仍显示"已留存 N 条"——正是这块代码
   当初要修的那个误导。改为 `setLevel(WARNING)`，把上报级别变成模块自己的契约。
   回归用例：`tests/test_errorlog_write_failure.py::test_write_failure_survives_strict_root_logger`。
+- **`image_bed.extra_fields` 是同一个笔误的第二张面孔：装得上，但面板里填不进去**
+  （`_conf_schema.json`）：它同样写成了 `object` + 空的 `items`。宿主不会因此
+  报错——空 `items` 递归出来就是 `{}`——但面板是按 `items` 渲染子输入框的，
+  空 `items` 等于一个没有任何输入项的分组：generic_http 模式要求填的
+  `strategy_id`、`api_secret` 根本无处可填，图床只能改配置文件。一并改成
+  `type: dict`，与配置手册里一直是 `dict` 的记录对齐。
+- **两处自由键值字段上的 `secret: true` 是假遮罩**（`_conf_schema.json`、`docs/CONFIGURATION.md`）：
+  宿主文档写明 `secret` 只对 `string` 与字符串 `list` 生效，标在 `object`/`dict`
+  上不会有任何遮罩效果。`checkin.quote_api_headers` 的 hint 原先还写着「面板中
+  已按敏感字段隐藏显示」——等于向用户承诺了一件没做的事，而这个字段里放的往往
+  正是 `Authorization: Bearer ...`。删掉两处无效标记，hint 与配置手册改成实话：
+  这两处面板明文渲染，截图、贴日志、分享配置前要自己剔除。
+
+### 测试与文档一致性
+
+- 配置手册自己声明「以 `_conf_schema.json` 当前内容为准，改 schema 时这份计数
+  要一起改」，但此前纯靠人眼。README 与手册里的「180 个配置键」一旦漂移，只会
+  变成对读者的错误承诺。新增
+  `tests/test_config_layout.py::test_documented_config_key_count_matches_schema`：
+  按手册口径（分组容器本身算一个键、旧布局镜像键不计入）统计 schema，既校验
+  总数，也逐行校验 15 个分组的分项。
 
 ### CI
 
@@ -28,6 +62,12 @@
   于是版本之间表现不同），修完还剩一条抖动，才追到限频哨兵。定位手段是本地
   用「根日志器收紧到 ERROR」与「假时钟固定开机时长」两种条件分别复现，两次都
   拿到了与 CI 完全一致的红，修完两边都转绿。
+- 依赖升级改由 Dependabot 聚合成单个 PR，同时把并发 PR 上限降到 1
+  （`.github/dependabot.yml`）。
+- GitHub Actions 升级：`actions/checkout` v4→v7、`actions/setup-python` v5→v7
+  （`.github/workflows/ci.yml`）。
+- `.gitignore` 增加 Windows 设备名文件 `NUL`/`CON`/`PRN`/`AUX`：Git Bash 的
+  `2>NUL` 会在仓库根造出无法被 Git 暂存的设备名文件。
 
 ## v0.9.0 - 2026-11-01
 
