@@ -1,6 +1,6 @@
 # 更新日志
 
-## v0.9.1 - 2026-11-02
+## v0.9.2 - 2026-11-02
 
 ### 修掉的真 bug
 
@@ -15,23 +15,8 @@
   `type: dict` + `items: {}`，与文档里 `custom_extra_body` 的写法一致。
   回归用例：`tests/test_config_layout.py::test_object_nodes_declare_items` 与
   `::test_schema_to_default_config_matches_host_algorithm`——后者把宿主的默认值
-  生成算法照着复刻了一遍，回退修复立刻抛 `KeyError: 'items'`。**已发布过的
-  v0.9.0 受此影响，装了新版请直接升到 v0.9.1。**
-- **开机不足 60 秒的机器上，第一次写盘失败被当成「重复失败」吞掉**（`shared/errorlog.py`）：
-  `_last_write_error_ts` 的初值 `0.0` 既当「从没上报过」的哨兵，又直接参与限频
-  比较 `now - ts < 60`。`time.monotonic()` 是开机以来的秒数，容器与新开机机器上
-  完全可能还不到 60 秒，于是**首次**失败就被静默计入「被抑制」，一条都不报。
-  改为先判哨兵（`if self._last_write_error_ts and now - ... `）。这条在 CI 上表现
-  为「同一份代码有时红有时绿」——Actions 的 runner 每次都新开机器，跑得快的那
-  几次正好落在开机后的第一分钟里。回归用例：
-  `tests/test_errorlog_write_failure.py::test_first_failure_is_reported_on_freshly_booted_host`
-  （用只往前的假时钟把「开机 5 秒」固定下来，回退修复即变红）。
-- **宿主把日志级别调高后，写盘失败的唯一告警被静默吞掉**（`shared/errorlog.py`）：
-  `_WRITER_LOG` 从不设置自己的 level，"NOTSET 就继承根日志器" 意味着它的可见性
-  由全局日志级别决定。AstrBot 用户把日志级别调到 ERROR 之后，"磁盘满了、留存
-  其实已经失效" 这条告警不再出现，而面板仍显示"已留存 N 条"——正是这块代码
-  当初要修的那个误导。改为 `setLevel(WARNING)`，把上报级别变成模块自己的契约。
-  回归用例：`tests/test_errorlog_write_failure.py::test_write_failure_survives_strict_root_logger`。
+  生成算法照着复刻了一遍，回退修复立刻抛 `KeyError: 'items'`。**v0.9.0 受此影响，
+  装了旧版的请直接升到 v0.9.2。**
 - **`image_bed.extra_fields` 是同一个笔误的第二张面孔：装得上，但面板里填不进去**
   （`_conf_schema.json`）：它同样写成了 `object` + 空的 `items`。宿主不会因此
   报错——空 `items` 递归出来就是 `{}`——但面板是按 `items` 渲染子输入框的，
@@ -53,6 +38,26 @@
   `tests/test_config_layout.py::test_documented_config_key_count_matches_schema`：
   按手册口径（分组容器本身算一个键、旧布局镜像键不计入）统计 schema，既校验
   总数，也逐行校验 15 个分组的分项。
+
+## v0.9.1 - 2026-11-02
+
+### 修掉的真 bug
+
+- **开机不足 60 秒的机器上，第一次写盘失败被当成「重复失败」吞掉**（`shared/errorlog.py`）：
+  `_last_write_error_ts` 的初值 `0.0` 既当「从没上报过」的哨兵，又直接参与限频
+  比较 `now - ts < 60`。`time.monotonic()` 是开机以来的秒数，容器与新开机机器上
+  完全可能还不到 60 秒，于是**首次**失败就被静默计入「被抑制」，一条都不报。
+  改为先判哨兵（`if self._last_write_error_ts and now - ... `）。这条在 CI 上表现
+  为「同一份代码有时红有时绿」——Actions 的 runner 每次都新开机器，跑得快的那
+  几次正好落在开机后的第一分钟里。回归用例：
+  `tests/test_errorlog_write_failure.py::test_first_failure_is_reported_on_freshly_booted_host`
+  （用只往前的假时钟把「开机 5 秒」固定下来，回退修复即变红）。
+- **宿主把日志级别调高后，写盘失败的唯一告警被静默吞掉**（`shared/errorlog.py`）：
+  `_WRITER_LOG` 从不设置自己的 level，"NOTSET 就继承根日志器" 意味着它的可见性
+  由全局日志级别决定。AstrBot 用户把日志级别调到 ERROR 之后，"磁盘满了、留存
+  其实已经失效" 这条告警不再出现，而面板仍显示"已留存 N 条"——正是这块代码
+  当初要修的那个误导。改为 `setLevel(WARNING)`，把上报级别变成模块自己的契约。
+  回归用例：`tests/test_errorlog_write_failure.py::test_write_failure_survives_strict_root_logger`。
 
 ### CI
 

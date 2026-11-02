@@ -7,7 +7,7 @@ from datetime import timedelta, timezone
 from urllib.parse import quote
 
 PLUGIN_NAME = "astrbot_plugin_weibo_suite"
-PLUGIN_VERSION = "v0.9.1"
+PLUGIN_VERSION = "v0.9.2"
 
 WEIBO_HOME_URL = "https://m.weibo.cn/"
 WEIBO_INDEX_URL = "https://m.weibo.cn/api/container/getIndex"
