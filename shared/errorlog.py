@@ -173,10 +173,19 @@ class _ErrorLogStore(logging.Handler):
         以前这里是 except OSError: pass —— 磁盘满、只读挂载、目录被删都会让
         留存静默失效，而面板仍然显示"已留存 N 条"，排查时最具误导性。
         现在每 60 秒最多出一条，期间被压掉的次数一并带上。
+
+        `_last_write_error_ts` 的初值 0.0 是"从没上报过"的哨兵，必须显式判掉：
+        `time.monotonic()` 是开机以来的秒数，容器与新开机的机器上完全可能还
+        不到 `_WRITE_FAIL_LOG_INTERVAL`，直接相减会把**第一次**失败算成"窗口内
+        的重复失败"吞掉——正好是这段代码要消灭的那个静默。CI 上"同一份代码
+        有时红有时绿"就是这个：Actions 的 runner 每次都是新开机器，跑得快的那
+        几次撞进开机后第一分钟内。
         """
         now = time.monotonic()
         with self._lock:
-            if now - self._last_write_error_ts < _WRITE_FAIL_LOG_INTERVAL:
+            if self._last_write_error_ts and now - self._last_write_error_ts < (
+                _WRITE_FAIL_LOG_INTERVAL
+            ):
                 self._suppressed_write_errors += 1
                 return
             self._last_write_error_ts = now

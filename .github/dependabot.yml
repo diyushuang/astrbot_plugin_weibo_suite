@@ -12,6 +12,13 @@ updates:
       time: "09:00"
       timezone: Asia/Shanghai
     open-pull-requests-limit: 1
+    # 默认的 increase 会把下界无条件抬到"当前最新版"（pillow>=13.0.0、
+    # numpy>=2.5.4 这种），而 requirements.txt 的下界是**兼容性声明**、不是
+    # "测过的版本"：抬上去等于替 AstrBot 用户决定环境，AstrBot 自己锁的版本
+    # 一旦低于新下界就直接装不上。现有 `>=` 下界本来就允许最新版，而 CI
+    # 每次装的就是最新版，兼容性由 CI 兜底；只有新版本真的落在下界之外
+    # （破坏性变更）才需要动 manifest。
+    versioning-strategy: increase-if-necessary
     commit-message:
       prefix: "build"
     labels:

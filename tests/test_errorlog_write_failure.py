@@ -108,6 +108,39 @@ def test_write_failure_survives_strict_root_logger(broken_store, writer_records)
     assert "写入 errors.log 失败" in writer_records.records[0].getMessage()
 
 
+def test_first_failure_is_reported_on_freshly_booted_host(
+    broken_store, writer_records, monkeypatch
+):
+    """机器开机还不到限频窗口时，第一次失败也必须上报。
+
+    回归用例，对应 CI 上「同一份代码有时红有时绿」的抖动：`time.monotonic()`
+    是开机以来的秒数，而 `_last_write_error_ts` 的初值 0.0 既是"从没上报过"
+    的哨兵、又被直接拿去相减。开机不足 `_WRITE_FAIL_LOG_INTERVAL` 秒时，
+    首次失败被算成"窗口内的重复失败"直接吞掉——正好是这段代码要消灭的静默。
+    Actions 的 runner 每次都是新开机器，跑得快的那几次就撞进开机后第一分钟。
+
+    这里用一个只往前的假时钟把"开机 5 秒"稳定下来；时钟必须单调递增，
+    否则 `flush_to_disk` 的超时判定永远不成立。
+    """
+    _plugin, store, logger, _path = broken_store
+
+    ticks = [0]
+
+    def fake_clock() -> float:
+        ticks[0] += 1
+        return 5.0 + ticks[0] * 0.001
+
+    monkeypatch.setattr(errorlog.time, "monotonic", fake_clock)
+
+    logger.warning("新开机机器上的第一条告警")
+    assert store.flush_to_disk() is True, "写盘失败不应把 flush 变成阻塞/失败"
+
+    assert len(writer_records.records) == 1, (
+        f"首次失败不得被限频吞掉，实际 {[r.getMessage() for r in writer_records.records]}"
+    )
+    assert store._suppressed_write_errors == 0, "首次失败不该被记成被抑制"
+
+
 def test_write_failure_does_not_feed_itself_back(broken_store, writer_records):
     """上报日志不得回流进自己的 handler（会形成“失败→记日志→再失败”的活锁）。"""
     _plugin, store, logger, _path = broken_store

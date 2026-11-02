@@ -4,6 +4,15 @@
 
 ### 修掉的真 bug
 
+- **开机不足 60 秒的机器上，第一次写盘失败被当成「重复失败」吞掉**（`shared/errorlog.py`）：
+  `_last_write_error_ts` 的初值 `0.0` 既当「从没上报过」的哨兵，又直接参与限频
+  比较 `now - ts < 60`。`time.monotonic()` 是开机以来的秒数，容器与新开机机器上
+  完全可能还不到 60 秒，于是**首次**失败就被静默计入「被抑制」，一条都不报。
+  改为先判哨兵（`if self._last_write_error_ts and now - ... `）。这条在 CI 上表现
+  为「同一份代码有时红有时绿」——Actions 的 runner 每次都新开机器，跑得快的那
+  几次正好落在开机后的第一分钟里。回归用例：
+  `tests/test_errorlog_write_failure.py::test_first_failure_is_reported_on_freshly_booted_host`
+  （用只往前的假时钟把「开机 5 秒」固定下来，回退修复即变红）。
 - **宿主把日志级别调高后，写盘失败的唯一告警被静默吞掉**（`shared/errorlog.py`）：
   `_WRITER_LOG` 从不设置自己的 level，"NOTSET 就继承根日志器" 意味着它的可见性
   由全局日志级别决定。AstrBot 用户把日志级别调到 ERROR 之后，"磁盘满了、留存
@@ -13,11 +22,12 @@
 
 ### CI
 
-- 首次真正跑通 GitHub Actions，暴露并修掉上面这条：`test (3.10)` job 的三条
-  errorlog 用例红、`test (3.12)` 与 `real-astrbot` 绿。表象是版本差异，实际是
-  `_WRITER_LOG` 依赖根日志器级别；旧版 `Logger.isEnabledFor` 的缓存在根级别
-  变化后仍滞后生效，于是同一份代码在不同版本上表现不同。本地用「把根日志器
-  收紧到 ERROR」的插件复现出与 CI 完全一致的三红，修完两处都转绿。
+- 首次真正跑通 GitHub Actions，errorlog 的三条用例红在 `test (3.10)`、绿在
+  `test (3.12)`，看上去像版本差异，实际是上面两个根因叠加：先是 `_WRITER_LOG`
+  继承根日志器级别（旧版 `Logger.isEnabledFor` 的缓存还会让根级别变化滞后生效，
+  于是版本之间表现不同），修完还剩一条抖动，才追到限频哨兵。定位手段是本地
+  用「根日志器收紧到 ERROR」与「假时钟固定开机时长」两种条件分别复现，两次都
+  拿到了与 CI 完全一致的红，修完两边都转绿。
 
 ## v0.9.0 - 2026-11-01
 
