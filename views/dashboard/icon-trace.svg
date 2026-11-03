@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" role="img" aria-label="溯源与签到">
+  <rect x="2" y="2" width="36" height="36" rx="11" fill="#1F9D8B" fill-opacity="0.12"/>
+  <circle cx="18" cy="18" r="7.5" fill="none" stroke="#1F9D8B" stroke-width="2.2"/>
+  <path d="M23.5 23.5 30 30" stroke="#1F9D8B" stroke-width="2.6" stroke-linecap="round"/>
+  <path d="M14 18a4 4 0 0 1 8 0v3" fill="none" stroke="#6ED8C8" stroke-width="1.8" stroke-linecap="round"/>
+  <path d="M18 11.5v1M24.5 18h-1M18 24.5v-1" stroke="#6ED8C8" stroke-width="1.6" stroke-linecap="round"/>
+</svg>

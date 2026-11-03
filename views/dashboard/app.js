@@ -1,3 +1,10 @@
+import {
+  initSettings,
+  settingsConfirmLeave,
+  settingsHasUnsaved,
+  settingsOnShown,
+} from "./settings.js";
+
 /* 微博实时转发 · 控制面板逻辑
  * 通过 AstrBot 插件页面桥接对象与插件后端通信：
  *   window.AstrBotPluginView（新版）/ window.AstrBotPluginPage（旧版）
@@ -761,12 +768,14 @@ const TAB_DEFS = [
   ["copylib", "文案库"],
   ["trace", "溯源与签到"],
   ["sns", "多平台订阅"],
+  ["settings", "设置"],
   ["errors", "错误日志"],
 ];
 
 function nodeTab(node) {
   const ids = new Set([node.id, ...Array.from(node.querySelectorAll("[id]"), (n) => n.id)]);
   if (node.classList.contains("sns-panel")) return "sns";
+  if (ids.has("settings-card")) return "settings";
   if (ids.has("archive-card") || ids.has("pipeline-card")) return "archive";
   if (ids.has("copylib-card")) return "copylib";
   if (ids.has("trace-card")) return "trace";
@@ -776,8 +785,19 @@ function nodeTab(node) {
   return "monitor";
 }
 
-function activateTab(name) {
+let currentTab = "";
+
+async function activateTab(name) {
   const chosen = TAB_DEFS.some(([key]) => key === name) ? name : "overview";
+  // 设置页有未保存改动时，切页前必须二次确认；取消则把 hash 恢复回来。
+  if (currentTab === "settings" && chosen !== "settings" && settingsHasUnsaved()) {
+    const leave = await settingsConfirmLeave();
+    if (!leave) {
+      try { history.replaceState(null, "", `#${currentTab}`); } catch (e) { /* 忽略 */ }
+      return;
+    }
+  }
+  currentTab = chosen;
   for (const btn of document.querySelectorAll(".tab-btn")) {
     btn.classList.toggle("active", btn.dataset.tab === chosen);
   }
@@ -785,6 +805,7 @@ function activateTab(name) {
     panel.classList.toggle("active", panel.dataset.tab === chosen);
   }
   try { history.replaceState(null, "", `#${chosen}`); } catch (e) { /* iframe hash 受限时忽略 */ }
+  if (chosen === "settings") settingsOnShown();
 }
 
 function arrangeTabs() {
@@ -1690,6 +1711,10 @@ async function init() {
   wireForms();
   wireUnified();
   wireSns();
+  initSettings({
+    confirm: confirmDialog,
+    status: (message, tone) => setStatus(message, tone || ""),
+  });
   await load();
   // 页面切到后台时暂停轮询，切回前台时立即刷新一次
   setInterval(() => {

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from astrbot_plugin_weibo_suite.views_backend import dashboard, sns_api
+from astrbot_plugin_weibo_suite.views_backend import dashboard, settings_api, sns_api
 
 
 class Resp:
@@ -181,10 +181,12 @@ def test_registered_routes_cover_all_tabs(monkeypatch):
 
     monkeypatch.setattr(dashboard, "_WEB_AVAILABLE", True)
     monkeypatch.setattr(sns_api, "_WEB_AVAILABLE", True)
+    monkeypatch.setattr(settings_api, "_WEB_AVAILABLE", True)
     assert dashboard.register_dashboard(
         Plugin(), "suite", "v0.7.0", lambda text: text, lambda text: text
     )
     assert sns_api.register_sns_dashboard(Plugin(), "suite", "v0.7.0")
+    assert settings_api.register_settings_dashboard(Plugin(), "suite", "v0.7.0")
     paths = {path.rsplit("/suite/", 1)[-1] for path, *_ in Plugin.context.routes}
     assert {
         "overview",
@@ -211,8 +213,11 @@ def test_registered_routes_cover_all_tabs(monkeypatch):
         "sns/guard",
         "sns/check-now",
         "sns/preview",
+        "settings",
+        "settings/save",
     } <= paths
-    assert len(Plugin.context.routes) == 35
+    # 原 35 条保持不变，新增设置页 2 条，合计 37 条。
+    assert len(Plugin.context.routes) == 37
 
 
 def test_dashboard_markup_has_all_tabs_and_actions():
@@ -220,7 +225,16 @@ def test_dashboard_markup_has_all_tabs_and_actions():
     html = (root / "index.html").read_text(encoding="utf-8")
     js = (root / "app.js").read_text(encoding="utf-8")
     css = (root / "style.css").read_text(encoding="utf-8")
-    tabs = ("总览", "微博监控", "归档与图床", "文案库", "溯源与签到", "多平台订阅", "错误日志")
+    tabs = (
+        "总览",
+        "微博监控",
+        "归档与图床",
+        "文案库",
+        "溯源与签到",
+        "多平台订阅",
+        "设置",
+        "错误日志",
+    )
     for name in tabs:
         assert f">{name}</button>" in html
     for endpoint in (

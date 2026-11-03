@@ -10,10 +10,13 @@
 <main class="page-shell">
 
   <header class="page-header">
-    <div class="page-title">
-      <div class="eyebrow">微博全链路助手</div>
-      <h1>控制面板 <span id="version-chip" class="chip" hidden></span></h1>
-      <p class="subtitle">监控转发 · 整帖归档 · 图床向量 · 签到文案 · 图片溯源</p>
+    <div class="brand-lockup">
+      <img class="brand-logo" src="./logo.svg" alt="微博全链路助手">
+      <div class="page-title">
+        <div class="eyebrow">WEIBO SUITE · 四条业务线</div>
+        <h1>微博全链路助手 <span id="version-chip" class="chip" hidden></span></h1>
+        <p class="subtitle">监控转发 · 整帖归档 · 图床向量 · 溯源签到 · 多平台订阅</p>
+      </div>
     </div>
     <div class="header-actions">
       <button id="btn-check" class="btn primary" type="button">立即检查</button>
@@ -30,6 +33,7 @@
     <button class="tab-btn" type="button" data-tab="copylib">文案库</button>
     <button class="tab-btn" type="button" data-tab="trace">溯源与签到</button>
     <button class="tab-btn" type="button" data-tab="sns">多平台订阅</button>
+    <button class="tab-btn" type="button" data-tab="settings">设置</button>
     <button class="tab-btn" type="button" data-tab="errors">错误日志</button>
   </nav>
 
@@ -338,6 +342,40 @@
     <h2>订阅事件</h2>
     <ul class="activity" id="sns-events"></ul>
     <p class="empty" id="sns-events-empty">暂无订阅事件。</p>
+  </section>
+
+  <section class="card settings-shell" id="settings-card">
+    <div class="settings-hero">
+      <div>
+        <div class="eyebrow">CONFIGURATION</div>
+        <h2>插件设置</h2>
+        <p class="settings-summary" id="settings-summary">正在读取配置目录…</p>
+      </div>
+      <div class="settings-hero-actions">
+        <div class="settings-search">
+          <span class="settings-search-icon" aria-hidden="true"></span>
+          <input id="settings-search" type="search" placeholder="搜索标签、键名或说明…" autocomplete="off">
+        </div>
+        <button id="btn-settings-reload" class="btn" type="button">重新读取</button>
+      </div>
+    </div>
+    <div class="settings-coverage" id="settings-coverage"></div>
+    <div class="settings-layout">
+      <aside class="settings-rail" id="settings-rail" aria-label="设置主题页"></aside>
+      <div class="settings-main" id="settings-body">
+        <p class="empty">正在读取配置…</p>
+      </div>
+    </div>
+    <div class="settings-savebar" id="settings-savebar" hidden>
+      <div class="settings-dirty">
+        <span class="settings-dirty-dot"></span>
+        <strong id="settings-dirty-count">0</strong> 项未保存
+      </div>
+      <div class="settings-save-actions">
+        <button id="btn-settings-discard" class="btn" type="button">放弃改动</button>
+        <button id="btn-settings-save" class="btn primary" type="button">保存全部</button>
+      </div>
+    </div>
   </section>
 
   <section class="card">

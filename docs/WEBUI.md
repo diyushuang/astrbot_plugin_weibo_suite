@@ -4,8 +4,8 @@
 
 面板由两部分组成：
 
-- 前端是纯静态资源，位于 `views/dashboard/`：`index.html`、`app.js`、`style.css`。没有打包步骤、没有 npm 依赖，原生 JavaScript 直接运行在 AstrBot 插件视图的 iframe 里。
-- 后端是 `views_backend/` 里用 `register_web_api()` 注册的路由：`dashboard.py` 28 条（微博域）、`sns_api.py` 7 条（订阅域），合计 35 条。
+- 前端是纯静态资源，位于 `views/dashboard/`：`index.html`、`app.js`、`settings.js`、`style.css`、`logo.svg` 与 `icon-*.svg`。没有打包步骤、没有 npm 依赖，原生 JavaScript 直接运行在 AstrBot 插件视图的 iframe 里。
+- 后端是 `views_backend/` 里用 `register_web_api()` 注册的路由：`dashboard.py` 28 条（微博域）、`sns_api.py` 7 条（订阅域）、`settings_api.py` 2 条（设置页），合计 37 条。原 35 条路由路径与行为保持不变。
 
 页面不直接请求这些路由，而是通过 AstrBot 的插件页面桥接对象（新版 `window.AstrBotPluginView`、旧版 `window.AstrBotPluginPage`）的 `apiGet()` / `apiPost()`，由宿主转发到 `/api/v1/plugins/extensions/<插件名>/<endpoint>`。所以页面文件不能在浏览器地址栏里直接打开，必须经 AstrBot WebUI 进入。
 
@@ -15,7 +15,7 @@
 
 ## 界面
 
-导航栏有七个页签，页面加载时按卡片归属自动分页；所有数据来自下列只读接口，写操作走同一组 POST 接口。
+导航栏有八个页签，页面加载时按卡片归属自动分页；设置页是唯一不按卡片归属、而是按 schema 目录动态渲染的页签。所有数据来自下列只读接口，写操作走同一组 POST 接口。
 
 ### 总览
 
@@ -73,6 +73,19 @@
 - **危险操作**（均有二次确认）：取消订阅（移除）。「立即检查一轮」会同步等检查跑完再返回，页面在等待期间置忙。
 - **后台任务**：本页签没有后台任务；「立即检查一轮」是同步调用，最长会等一整轮取数。
 
+### 设置
+
+- **页面归并**：`_conf_schema.json` 的 15 个可见分组按业务线归入 5 个主题页（监控与推送 / 归档与管线 / 图床与存储 / 溯源与签到 / 多平台订阅），第 6 页「关于与安全」只放版本、覆盖统计与安全边界，不含配置键。15 组不跨页、不重复，180 个键每个只出现一次。
+- **每项一行**：中文短标签、一句说明、默认值、范围与单位、原始键名；危险项带红色标记。长分组把高级项收进「高级选项」折叠区，关键项默认展开。
+- **控件类型**：bool 用开关；schema 的 `options` 用下拉；int / float 用带范围和单位的数字框；`list` 用「每行一项」的文本域（保存为字符串数组）；`object` / `dict` 用 JSON 编辑器（保存前校验必须是对象）；`secret` 用密码框，只显示「已配置 / 未配置」。
+- **secret 约定**：响应里永远没有原值。输入框留空表示保持不变，输入新值表示覆盖，点「清除」才会写空串。批量保存时，未改动的 secret 不会进入请求体。
+- **未保存保护**：改动只留在页面内存里，20 秒轮询不会覆盖；切页签、重新读取、放弃改动都会二次确认，`beforeunload` 也会拦截。底部保存条常驻显示未保存数量。
+- **搜索**：跨全部 180 项匹配短标签、键名、说明、分组名与枚举标签；搜索结果按页面 / 分组重新组装卡片。
+- **批量保存**：点「保存全部」一次性 POST 全部改动；服务端先全量校验类型、范围与枚举，再统一写入 schema 分组，最后调用 `save_config()` 落盘。任何一项失败都不会产生半截写入；落盘失败会把内存分组与平铺镜像一起回滚。
+- **生效时机**：多数配置下一轮检查或下一次操作即读取；面板路由、ffmpeg 探测、已缓存的并发与浏览器目录等启动期初始化的项需要重载插件。
+- **危险操作**（均有二次确认）：保存危险项（如关闭归档、切换存储模式、开启激进档位）、恢复整组默认值、放弃未保存改动、带着未保存改动离开设置页。
+- **后台任务**：设置页没有后台任务；保存是同步的，通常在一秒内返回。
+
 ### 错误日志
 
 - 列出留存的 warning / error 记录：时间、级别、来源（函数名与行号）、消息；带「上次运行」标记的是重启前读回的记录。
@@ -115,6 +128,8 @@
 | `/trace/status` | GET | 无 | `library`；`vector{enabled, model, collection, count, error?}`；`checkin_mode`；`rescan{running, messages, error}` | 溯源域未初始化时返回 409 |
 | `/trace/rescan` | POST | `{force}` | `{started, force}` | 图库重扫在后台跑；已在进行中返回 409，进度看 `/trace/status` |
 | `/trace/repair-history` | POST | 无 | `{cleaned}` | 清理会话历史里带装饰前缀的原图键，只改本地键 |
+| `/settings` | GET | 无 | `version`；`counts{pages,groups,keys,writable,secrets}`；`pages[]`（主题页/分组/字段目录）；`values{}`；`secrets{}`（仅 `configured`） | 设置页目录与当前值；secret 原值从不出现 |
+| `/settings/save` | POST | `{values: {键: 值}}` | `{saved, ...快照}` | 只接受目录中登记的键；先全量校验再写入；未知键、类型/范围/枚举错误返回 400；落盘失败返回 500 并回滚 |
 | `/sns/overview` | GET | 无 | `status: "ok"`，另有 `enabled`、`fetch_mode`、`aggressive`、`accounts`、`platforms`、`sessions`、`stats`、`last_round`、`browser`、`guard`、`latency`、`events`、`browser_error` | 订阅域总览；SNS 服务未就绪返回 503 |
 | `/sns/credentials` | GET | 无 | `status`；`fetch_mode`；`rows[]`（`platform`、`label`、`logged_in`、`last_login_ts`、`note`、`cookie_configured`、`cookie_keys`、`cookie_preview`、`missing_keys`、`profile_ready`）；`modes[]` | 只返回脱敏摘要，Cookie 原文不会出现在任何响应里 |
 | `/sns/session` | POST | `{action, platform, logged_in, note}` | open 返回 `{status, message}`；mark 返回 `{status, platform, logged_in}` | `open` 只打开登录窗口，登录结果以下一轮检查为准；打开失败返回 409 |
@@ -129,6 +144,7 @@
 
 - 不要把面板端点直接暴露到公网。如果 AstrBot 需要公网访问，请在反向代理或网关上再加一层鉴权，或者只允许本机 / 内网访问 WebUI 端口。
 - 面板的写接口等同于聊天指令里的管理操作，能改监控名单、推送目标、相册绑定、文案库与订阅配置；拿到一个已登录会话就等于拿到全部管理能力。
+- `/settings/save` 只接受设置目录里登记的 180 个分组键，未知键一律 400；它不是通用的配置写入口，也不能写入旧布局的顶层镜像键。secret 字段的读取只回 `configured` 布尔，原值不会进入任何响应。
 
 其余边界：
 

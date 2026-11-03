@@ -5,6 +5,7 @@ from __future__ import annotations
 import weakref
 
 from ..views_backend.dashboard import register_dashboard
+from ..views_backend.settings_api import register_settings_dashboard
 from ..views_backend.sns_api import register_sns_dashboard
 from .album import AlbumMixin
 from .api import ApiMixin
@@ -180,6 +181,7 @@ class WeiboMonitorPlugin(
         # ---- WebUI 控制面板（dashboard.py 注册路由，旧版 AstrBot 自动降级）----
         self._web_ready = False
         self._sns_web_ready = False
+        self._settings_web_ready = False
         self._manual_check_task: asyncio.Task | None = None
         # 面板手动取消：被取消的条目在撤销窗口内留在这里（可一键放回队列）。
         # 与 pending 分开存：pending 是"还要发的"，这里是"已经决定不发、还能反悔的"，
@@ -285,6 +287,14 @@ class WeiboMonitorPlugin(
         except Exception as exc:
             self._sns_web_ready = False
             logger.warning(f"{PLUGIN_NAME} 订阅面板接口注册失败（降级）: {exc!r}")
+        # 设置页的 2 条接口独立注册：schema 目录或校验出问题只影响设置页
+        try:
+            self._settings_web_ready = register_settings_dashboard(
+                self, PLUGIN_NAME, PLUGIN_VERSION
+            )
+        except Exception as exc:
+            self._settings_web_ready = False
+            logger.warning(f"{PLUGIN_NAME} 设置页接口注册失败（降级）: {exc!r}")
         await self._diag(
             f"启动 ffmpeg={'有' if self._ffmpeg else '无'} "
             f"album_download_concurrency={self._int_cfg('album_download_concurrency', 5)} "

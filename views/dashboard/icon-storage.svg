@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" role="img" aria-label="图床与存储">
+  <rect x="2" y="2" width="36" height="36" rx="11" fill="#2BC4A8" fill-opacity="0.13"/>
+  <path d="M12 27h16a5.5 5.5 0 0 0 .8-10.9A8 8 0 0 0 13.2 14 5.5 5.5 0 0 0 12 27Z" fill="none" stroke="#23A992" stroke-width="2.2" stroke-linejoin="round"/>
+  <rect x="15" y="18.5" width="10" height="7.5" rx="1.6" fill="none" stroke="#7FE0D0" stroke-width="1.8"/>
+  <circle cx="18" cy="21" r="1.2" fill="#7FE0D0"/>
+  <path d="M15.5 25.5 19 22.5l2.3 2 2.2-1.7" fill="none" stroke="#7FE0D0" stroke-width="1.6"/>
+</svg>

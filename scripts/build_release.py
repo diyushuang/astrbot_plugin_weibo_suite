@@ -48,6 +48,7 @@ EXCLUDED_PARTS = {
     ".git",
     ".mimosa",
     ".workbuddy",
+    ".trae-html-share-packages",
     ".vscode",
     ".idea",
     "tests",

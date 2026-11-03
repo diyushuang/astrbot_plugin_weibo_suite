@@ -1,5 +1,28 @@
 # 更新日志
 
+## Unreleased
+
+### 新增
+
+- **全量设置页**（`views_backend/settings_schema.py`、`views_backend/settings_api.py`、
+  `views/dashboard/settings.js`）：AstrBot 原生配置面板按 schema 平铺 15 个分组，改一项
+  要翻半页；新增的「设置」页签把这 180 个键按业务线归成 5 个主题页，第 6 页「关于与
+  安全」只放版本、覆盖统计与凭据边界。控件类型、默认值、枚举与 secret 标记全部来自
+  `_conf_schema.json`，展示层只补短标签、单位与建议范围，避免页面与 schema 漂移。
+- **批量保存与 secret 脱敏**：`/settings` 只回显非敏感值，16 个 secret 字段仅返回
+  `configured` 布尔；`/settings/save` 只接受目录登记的 180 个键，先全量校验类型、范围
+  与枚举再写入，未知键和非法值一律 400 且不落盘。落盘失败回滚分组、平铺镜像与运行期
+  监控名单，不会留下"内存改了、磁盘没改"的半截状态。面板共 8 个页签、37 条路由，
+  原有 7 个页签与 35 条路由的行为不变。
+- 设置页的未保存改动接入切页与 `beforeunload` 二次确认，20 秒轮询不会覆盖输入；保存
+  请求期间的新输入不会被响应清空。
+
+### 文档与测试
+
+- 新增 `docs/SETTINGS_MAP.md`（由 `scripts/gen_settings_map.py` 从同一份目录生成）
+  与 `tests/test_settings.py`：覆盖 180 键、默认值回环、secret 不回显、400 不落盘、
+  落盘失败回滚（含账号运行态）。
+
 ## v0.9.2 - 2026-11-02
 
 ### 修掉的真 bug
