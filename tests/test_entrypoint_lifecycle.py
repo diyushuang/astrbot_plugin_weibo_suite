@@ -146,3 +146,21 @@ async def test_terminate_is_idempotent(suite, monkeypatch):
     await suite.terminate()
 
     assert suite._calls == ["weibo", "trace"]
+
+
+async def test_reinit_trace_runtime_rebinds_pipeline_services(suite):
+    """设置页保存触发的重建要同时更新 trace 快照与管线依赖。"""
+    trace = suite._trace_plugin
+    old_library = trace.library
+    trace.config["basic"] = {"hash_size": 8}
+
+    result = await suite.reinit_trace_runtime()
+
+    assert result["hash_size"] == 8
+    services = suite.pipeline_services()
+    assert services is not None
+    assert services.bed is trace.bed
+    assert services.vector is trace.vector
+    assert services.library is trace.library
+    assert services.hash_size == 8
+    old_library.close()

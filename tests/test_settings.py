@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from astrbot_plugin_weibo_suite.trace.features import phash_hex_len
 from astrbot_plugin_weibo_suite.views_backend import settings_api, settings_schema
 
 
@@ -48,6 +49,8 @@ class FakePlugin:
         self.config = FakeConfig()
         self.saved = 0
         self.synced = 0
+        self.reinit_calls = 0
+        self.reinit_error = ""
 
     def _sync_config_groups(self):
         self.synced += 1
@@ -58,6 +61,12 @@ class FakePlugin:
     def _save_config(self):
         self.saved += 1
         self.config.save_config()
+
+    async def reinit_trace_runtime(self):
+        self.reinit_calls += 1
+        if self.reinit_error:
+            raise RuntimeError(self.reinit_error)
+        return {"hash_size": 16}
 
 
 @pytest.fixture
@@ -257,6 +266,84 @@ async def test_save_failure_rolls_memory_back(api, monkeypatch):
     assert api.p.config["poll_interval"] == 120, "落盘失败后平铺镜像没有回滚"
 
 
+async def test_save_failure_removes_flat_key_that_only_existed_in_memory(api, monkeypatch):
+    """分组原本不存在时，回滚不能把 sync 写进平铺键的新值留在内存里。"""
+    assert "monitor" not in api.p.config
+    assert "poll_interval" not in api.p.config
+
+    def boom():
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(api.p, "_save_config", boom)
+    monkeypatch.setattr(
+        settings_api, "web_request", FakeRequest({"values": {"monitor.poll_interval": 300}})
+    )
+    response = await api.save_settings()
+
+    assert response.status_code == 500
+    assert "monitor" not in api.p.config
+    assert "poll_interval" not in api.p.config
+
+
+async def test_save_rebuilds_trace_runtime_after_success(api, monkeypatch):
+    monkeypatch.setattr(
+        settings_api, "web_request", FakeRequest({"values": {"monitor.poll_interval": 300}})
+    )
+    response = await api.save_settings()
+
+    assert response.status_code == 200
+    assert response.payload["saved"] == 1
+    assert response.payload["reinit_ok"] is True
+    assert api.p.reinit_calls == 1
+
+
+async def test_save_succeeds_when_trace_reinit_fails(api, monkeypatch):
+    """重建失败只降级为告警：磁盘已保存，响应要带标记而不是 500。"""
+    api.p.reinit_error = "向量引擎初始化失败"
+    monkeypatch.setattr(
+        settings_api, "web_request", FakeRequest({"values": {"monitor.poll_interval": 300}})
+    )
+    response = await api.save_settings()
+
+    assert response.status_code == 200
+    assert response.payload["saved"] == 1
+    assert response.payload["reinit_ok"] is False
+    assert "重建运行期配置失败" in response.payload["reinit_error"]
+    assert api.p.config["monitor"]["poll_interval"] == 300
+    assert api.p.reinit_calls == 1
+
+
+async def test_trace_reinit_rebuilds_bed_vector_and_hash_index(make_plugin):
+    """改面板配置后，溯源域的图床/向量/哈希快照要跟着换，旧对象不被打断。"""
+    plugin = make_plugin()
+    old_bed, old_vector, old_library = plugin.bed, plugin.vector, plugin.library
+    assert plugin.hash_size == 16
+
+    plugin.config["basic"] = {
+        "hash_size": 8,
+        "hash_similarity_threshold": 0.9,
+        "top_n": 2,
+        "max_images_per_query": 5,
+    }
+    result = await plugin.reinit_runtime_settings()
+
+    assert result["hash_size"] == 8
+    assert result["hash_size_changed"] is True
+    assert plugin.hash_size == 8
+    assert plugin.hash_threshold == pytest.approx(0.9)
+    assert plugin.top_n == 2
+    assert plugin.max_images_per_query == 5
+    assert plugin.bed is not old_bed
+    assert plugin.vector is not old_vector
+    assert plugin.library is not old_library
+    assert plugin.library.expected_phash_hex_len == phash_hex_len(8)
+    assert plugin.remote_hash.expected_hex_len == phash_hex_len(8)
+    # 旧图库只是被替换引用、不被 close：在跑命令/管线仍能继续读完
+    assert old_library.expected_phash_hex_len == phash_hex_len(16)
+    assert isinstance(old_library.count(), int)
+    old_library.close()
+
+
 def test_frontend_contains_settings_page_and_every_widget():
     root = Path(__file__).resolve().parents[1] / "views" / "dashboard"
     js = (root / "settings.js").read_text(encoding="utf-8")
@@ -273,6 +360,7 @@ def test_frontend_contains_settings_page_and_every_widget():
     assert "settingsHasUnsaved" in js
     assert "settingsConfirmLeave" in js
     assert "SECRET_KEEP" in js
+    assert "reinit_ok === false" in js
     assert "beforeunload" in js
     assert "initSettings" in app
     assert "max-width: 1580px" in css

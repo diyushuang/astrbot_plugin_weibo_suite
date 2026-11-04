@@ -17,6 +17,27 @@
 - 设置页的未保存改动接入切页与 `beforeunload` 二次确认，20 秒轮询不会覆盖输入；保存
   请求期间的新输入不会被响应清空。
 
+### 修掉的真 bug
+
+- **图库哈希命中后不回填直链**（`weibo/pipeline.py`、`weibo/archive_db.py`）：命中分支
+  原只把状态推进到 `vector`，本行 `url` / `thumb_url` 仍是空——详情页与直链导出都看不到
+  这张图。现在命中时把图库里已有的 `image_url` / `thumb_url` 一并写回，空值不覆盖旧值、
+  缺缩略图时保留原值。
+- **设置页保存后溯源域仍用旧配置**（`trace/main.py`、`main.py`、
+  `views_backend/settings_api.py`）：`hash_size`、图床配置、`ImageBedClient`、
+  `VectorEngine` 都是插件初始化时的快照，面板改完要重启才生效。现在保存落盘、镜像平铺
+  键、同步账号后显式重建这些快照（`hash_size` 变化时同时重建图库与远程哈希索引），
+  不依赖宿主 `save_config` 是否热重载；重建只替换引用、不打断在跑任务，失败也只记日志
+  并在响应里返回 `reinit_ok=false`，保存本身仍算成功。
+- **重试上限不落地**（`weibo/pipeline.py`、`weibo/archive_db.py`、`views_backend/dashboard.py`）：
+  达到 `max_attempts` 的图片此前每轮仍会被补跑选中、重算特征并重试上传。现在待处理查询
+  把 `attempts >= max_attempts` 视为该图已结束，pipeline 层同时过滤并预统计
+  `exhausted`；`media_stats` 新增 `abandoned`，面板与状态文案把「失败待重试」与
+  「已放弃（达到重试上限）」分开显示，不再重复计数。
+- **落盘失败回滚漏掉平铺键**（`views_backend/settings_api.py`）：分组原本不存在时回滚只
+  `pop` 分组，`_sync_config_groups` 已写进平铺镜像键的新值会留在内存里。现在 `touched`
+  同时快照对应平铺键的存在性与旧值，回滚时恢复或删除后再同步一次。
+
 ### 文档与测试
 
 - 新增 `docs/SETTINGS_MAP.md`（由 `scripts/gen_settings_map.py` 从同一份目录生成）

@@ -948,7 +948,15 @@ async function saveSettings() {
     }
     state.generatedTs = Number(data.generated_ts || 0);
     renderAll();
-    state.hooks.status(`已保存 ${data.saved || Object.keys(payload).length} 项配置`, "ok");
+    const savedText = `已保存 ${data.saved || Object.keys(payload).length} 项配置`;
+    if (data.reinit_ok === false) {
+      state.hooks.status(
+        `${savedText}，但重建运行期配置失败：${data.reinit_error || "未知错误"}（可重启插件生效）`,
+        "warning"
+      );
+    } else {
+      state.hooks.status(savedText, "ok");
+    }
   } catch (error) {
     state.hooks.status(
       `保存失败：${error && error.message ? error.message : error}（改动仍留在页面里）`,

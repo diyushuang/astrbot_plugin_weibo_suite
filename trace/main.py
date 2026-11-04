@@ -327,22 +327,16 @@ class ImageTracePlugin(
         # pHash 十六进制长度 = phash_hex_len(hash_size)（packbits 补齐到字节
         # 边界）；hash_size 必须为 4 的倍数，否则长度公式与旧数据对不上，
         # 全库记录都会被判为不匹配、索引静默清空
-        hash_size = as_int(self._cfg("hash_size"), 16)
-        if not 4 <= hash_size <= 32 or hash_size % 4 != 0:
-            logger.warning(
-                f"hash_size 配置值 {hash_size} 无效（须为 4~32 之间 4 的倍数，"
-                "如 8/16/24/32），已回退为默认 16。"
-            )
-            hash_size = 16
-        self.hash_size = hash_size
+        settings = self._parse_runtime_settings()
+        self.hash_size = int(settings["hash_size"])
         self.library = ImageLibrary(
             os.path.join(self.data_dir, "library.db"),
-            expected_phash_hex_len=phash_hex_len(hash_size),
+            expected_phash_hex_len=phash_hex_len(self.hash_size),
         )
-        self.hash_threshold = max(0.0, min(1.0, self._float_cfg("similarity_threshold", 0.85)))
+        self.hash_threshold = float(settings["hash_threshold"])
         # 配置上限：这两个值直接放大网络请求量与消息长度，手改离谱值时必须收敛
-        self.top_n = max(0, min(50, self._int_cfg("top_n", 3)))
-        self.max_images_per_query = max(1, min(10, self._int_cfg("max_images_per_query", 3)))
+        self.top_n = int(settings["top_n"])
+        self.max_images_per_query = int(settings["max_images_per_query"])
         # v1.2.x 的储存桶配置先迁移，再合并（储存桶完整时优先于图床）
         self._migrate_bucket_config()
         self._bed_cfg = self._effective_bed_cfg()
@@ -356,8 +350,10 @@ class ImageTracePlugin(
         # 让哈希引擎也能反查图床里的图（scan_dirs 只能扫本地目录，覆盖不到）
         self.remote_hash = HashIndex(
             os.path.join(self.data_dir, "remote_phash.json"),
-            expected_phash_hex_len=phash_hex_len(hash_size),
+            expected_phash_hex_len=phash_hex_len(self.hash_size),
         )
+        # 设置页保存后重建上述快照时串行化，避免两次保存并发替换到一半
+        self._reinit_lock = asyncio.Lock()
         self._remote_hash_task: asyncio.Task | None = None
         # 刷新失败/空结果的退避截止时间：否则每次 /溯源 都会重翻全量 Qdrant
         self._remote_hash_backoff_until = 0.0
@@ -411,6 +407,69 @@ class ImageTracePlugin(
             f"图片溯源插件已加载，当前图库共 {self.library.count()} 条，"
             f"引擎={engine} {vector_note}{bucket_note}{cache_note}"
         )
+
+    # ------------------------------------------------------------------
+    # 运行期配置重建
+    # ------------------------------------------------------------------
+
+    def _parse_runtime_settings(self) -> dict[str, object]:
+        """解析可热更新的溯源域配置；__init__ 与设置页重建共用这一份规则。"""
+        hash_size = as_int(self._cfg("hash_size"), 16)
+        if not 4 <= hash_size <= 32 or hash_size % 4 != 0:
+            logger.warning(
+                f"hash_size 配置值 {hash_size} 无效（须为 4~32 之间 4 的倍数，"
+                "如 8/16/24/32），已回退为默认 16。"
+            )
+            hash_size = 16
+        return {
+            "hash_size": hash_size,
+            "hash_threshold": max(0.0, min(1.0, self._float_cfg("similarity_threshold", 0.85))),
+            "top_n": max(0, min(50, self._int_cfg("top_n", 3))),
+            "max_images_per_query": max(1, min(10, self._int_cfg("max_images_per_query", 3))),
+        }
+
+    async def reinit_runtime_settings(self) -> dict[str, object]:
+        """设置页保存后重建溯源域运行期快照。
+
+        只替换引用、不关闭旧对象：正在执行的命令与管线仍持有旧 client，
+        让它们自然跑完再被 GC 回收，避免重建打断在跑任务。新请求立即使用
+        新配置，因此不需要依赖宿主 save_config 是否触发热重载。
+        """
+        async with self._reinit_lock:
+            settings = self._parse_runtime_settings()
+            old_hash = self.hash_size
+            self.hash_size = int(settings["hash_size"])
+            self.hash_threshold = float(settings["hash_threshold"])
+            self.top_n = int(settings["top_n"])
+            self.max_images_per_query = int(settings["max_images_per_query"])
+            self._bed_cfg = self._effective_bed_cfg()
+            self.bed = ImageBedClient(self.data_dir, self._bed_cfg, self._get_http)
+            self.vector = VectorEngine(self.config, self._get_http)
+            if self.hash_size != old_hash:
+                # hash_size 变了，pHash 十六进制长度口径随之变化；不重建索引
+                # 会让新旧两种长度的记录互相比对失败。旧 library 不显式 close，
+                # 交给仍在使用它的 in-flight 任务结束后回收。
+                self.library = ImageLibrary(
+                    os.path.join(self.data_dir, "library.db"),
+                    expected_phash_hex_len=phash_hex_len(self.hash_size),
+                )
+                self.remote_hash = HashIndex(
+                    os.path.join(self.data_dir, "remote_phash.json"),
+                    expected_phash_hex_len=phash_hex_len(self.hash_size),
+                )
+                self.remote_hash.load_cache()
+                self._remote_hash_backoff_until = 0.0
+            engine = self._engine_choice()
+            logger.info(
+                f"设置页已重建溯源域运行期配置：hash_size={self.hash_size} "
+                f"引擎={engine} 图床={self._bed_mode()}"
+            )
+            return {
+                "hash_size": self.hash_size,
+                "hash_size_changed": self.hash_size != old_hash,
+                "engine": engine,
+                "bed_mode": self._bed_mode(),
+            }
 
     # ------------------------------------------------------------------
     # 生命周期

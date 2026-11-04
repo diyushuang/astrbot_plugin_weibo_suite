@@ -55,6 +55,19 @@ class WeiboSuitePlugin(_WeiboMonitorPlugin, _SnsCommandsMixin):
             return
         self.pipeline_bind(services)
 
+    async def reinit_trace_runtime(self) -> dict[str, object]:
+        """设置页保存后重建溯源域运行期快照，并重新绑定图床管线服务。
+
+        不依赖宿主 save_config 是否触发热重载：由设置页保存流程显式调用。
+        重建失败时抛给调用方（调用方只记日志、仍返回保存成功）。
+        """
+        reinit = getattr(self._trace_plugin, "reinit_runtime_settings", None)
+        if not callable(reinit):
+            raise RuntimeError("溯源域不支持运行期重建")
+        result = await reinit()
+        self._bind_pipeline_services()
+        return dict(result or {})
+
     def _bind_checkin_source(self) -> None:
         """把归档库当作签到文案源接给溯源域（P5/F3）。
 

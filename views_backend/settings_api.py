@@ -291,11 +291,18 @@ class SettingsAPI:
 
         config = self._groups(getattr(self.p, "config", {}))
         touched: dict[str, Any] = {}
+        flat_touched: dict[str, tuple[bool, Any]] = {}
         for key, value in staged.items():
             group = fields[key]["group"]
             if group not in touched:
                 current = config.get(group)
                 touched[group] = copy.deepcopy(current) if isinstance(current, dict) else None
+            # 平铺镜像键也要快照：分组原本不存在时 previous 为 None，回滚只能
+            # pop 分组，而 sync 已经把新值写进了平铺键且再没有源可覆盖。
+            flat = fields[key]["field"]
+            if flat not in flat_touched:
+                exists = isinstance(config, dict) and flat in config
+                flat_touched[flat] = (exists, copy.deepcopy(config.get(flat)))
             group_cfg = config.get(group)
             if not isinstance(group_cfg, dict):
                 group_cfg = {}
@@ -327,8 +334,13 @@ class SettingsAPI:
                     config.pop(group, None)
                 else:
                     config[group] = previous
-            # 镜像同步发生在落盘之前；回滚分组后必须再同步一次，否则平铺键
-            # 会停留在"已保存"的新值，运行时读到的是磁盘上没有的配置。
+            for flat, (existed, previous) in flat_touched.items():
+                if existed:
+                    config[flat] = previous
+                else:
+                    config.pop(flat, None)
+            # 镜像同步发生在落盘之前；回滚分组与平铺键后再同步一次，确保
+            # 运行时读到的值与磁盘上的旧配置一致。
             if callable(sync):
                 with contextlib.suppress(Exception):
                     sync()
@@ -348,7 +360,22 @@ class SettingsAPI:
                     logger.warning(f"设置页写入后同步监控名单失败: {_safe_error(exc)}")
 
         snapshot = self._snapshot(catalog)
-        return json_response({"saved": len(staged), **snapshot})
+        payload = {"saved": len(staged), **snapshot}
+        # 落盘、镜像、账号同步都成功后再重建溯源域运行期快照（图床/向量/hash
+        # 尺寸），让面板改的配置立刻生效，不依赖宿主是否热重载。重建失败只降级
+        # 为告警：磁盘已经保存成功，重启插件即可恢复。
+        reinit = getattr(self.p, "reinit_trace_runtime", None)
+        if callable(reinit):
+            try:
+                await reinit()
+                payload["reinit_ok"] = True
+            except Exception as exc:
+                payload["reinit_ok"] = False
+                payload["reinit_error"] = f"重建运行期配置失败：{_safe_error(exc)}"
+                logger.warning(
+                    f"设置已保存，但重建溯源域运行期配置失败（重启插件可生效）: {_safe_error(exc)}"
+                )
+        return json_response(payload)
 
 
 def register_settings_dashboard(plugin, plugin_name: str, version: str) -> bool:
