@@ -33,19 +33,30 @@ from ..constants import (
     ERRLOG_PAGE_LIMIT,
     PENDING_PAGE_LIMIT,
 )
+from ..shared.common import sanitize_error_text
 
-_URL_OR_IP_RE = re.compile(
-    r"(?:https?|ftp)://[^\s'\"<>，。；：、）】]+|"
-    r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?\b",
-    re.IGNORECASE,
-)
 # 面板错误文本回传给浏览器时还要遮掉本机绝对路径：异常串里常带
 # C:\Users\<name>\AppData\... 或 /home/<name>/...，等于把部署目录和用户名
-# 告诉任何一个能打开面板的人。先遮 URL（URL 里也有 /），再遮裸路径。
+# 告诉任何一个能打开面板的人。先复用 sanitize_error_text 遮 URL/IP/裸凭据
+# （URL 里也有 /，必须先处理），再遮裸路径。
+_PATH_PLACEHOLDER = "<路径已隐藏>"
 _ABS_PATH_RE = re.compile(
     r"(?<![\w:\\])[A-Za-z]:\\(?:[^\\\s'\"<>|,;:]+\\)*[^\\\s'\"<>|,;:]*|"
     r"(?<![\w:/])/(?:[\w.-]+/)+[\w.-]*",
 )
+
+
+def _truncate_between_placeholders(text: str, limit: int) -> str:
+    """按面板长度上限截断，且不把占位符切成两半。"""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    open_at = cut.rfind("<")
+    if open_at > cut.rfind(">"):
+        cut = cut[:open_at]
+    return cut.rstrip() + "…"
+
+
 _UPLOAD_SUFFIXES = {".csv", ".md", ".markdown", ".json"}
 _UPLOAD_MAX_BYTES = 64 * 1024 * 1024
 # 上传分块大小：multipart 边读边写，避免 read(-1) 把整个 64MB 顶进内存
@@ -828,9 +839,11 @@ class DashboardAPI:
 
     @staticmethod
     def _safe_error(value: Any, limit: int = 240) -> str:
-        text = _URL_OR_IP_RE.sub("<地址已隐藏>", str(value or ""))
-        text = _ABS_PATH_RE.sub("<路径已隐藏>", text)
-        return text[:limit].rstrip() + ("…" if len(text) > limit else "")
+        """面板错误文本：URL/IP/裸凭据与本机绝对路径都不回传给浏览器。"""
+        # limit=None：凭据替换会加长文本，先不截断，最后统一按面板上限处理
+        text = sanitize_error_text(value, limit=None)
+        text = _ABS_PATH_RE.sub(_PATH_PLACEHOLDER, text)
+        return _truncate_between_placeholders(text, limit)
 
     def _record_unified(self, detail: str) -> None:
         record = getattr(self.p, "_record_event", None)

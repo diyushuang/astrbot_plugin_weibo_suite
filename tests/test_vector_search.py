@@ -1150,6 +1150,23 @@ def test_invalid_json_context_redacts_signed_url_and_truncates():
     assert len(after) <= 80
 
 
+def test_invalid_json_context_redacts_authorization_bearer_token():
+    """认证头的令牌不能被窗口截断绕过：整段（scheme + 令牌）都要消失。"""
+    token = "eyJhbGciOiJIUzI1NiJ9.abc.def"
+    body = "prefix authorization=Bearer " + token + " suffix"
+    position = body.index(token)
+
+    before, after = _invalid_json_context(body, position)
+
+    combined = before + after
+    assert token not in combined
+    assert "Bearer" not in combined
+    assert "authorization=" in combined
+    assert "<凭据已隐藏>" in combined
+    assert len(before) <= 80
+    assert len(after) <= 80
+
+
 async def test_original_info_for_thumb_name_tolerates_duplicate_points():
     """同一张图在库里被重复入库（多份缩略图副本）时，按原图直链去重后取其一。
 

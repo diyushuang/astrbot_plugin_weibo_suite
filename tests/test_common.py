@@ -146,3 +146,99 @@ def test_sanitize_error_text_mixed_url_and_bare_query_use_two_placeholders():
     assert "deadbeefcafebabe" not in safe
     assert "access_token=" in safe
     assert "X-Amz-Signature=" in safe
+
+
+def test_sanitize_error_text_masks_added_whitelist_keys():
+    text = (
+        "client_secret=cs_abcd1234efgh authorization=deadbeefcafebabe "
+        "x-api-key=xi_1234567890 session_token=st_abcdef123456 "
+        "accesstoken=at_1234567890 cookie=ck_1234567890 "
+        "set-cookie=sc_1234567890"
+    )
+    safe = sanitize_error_text(text, limit=400)
+
+    for key in (
+        "client_secret",
+        "authorization",
+        "x-api-key",
+        "session_token",
+        "accesstoken",
+        "cookie",
+        "set-cookie",
+    ):
+        assert key in safe
+    for value in (
+        "cs_abcd1234efgh",
+        "deadbeefcafebabe",
+        "xi_1234567890",
+        "st_abcdef123456",
+        "at_1234567890",
+        "ck_1234567890",
+        "sc_1234567890",
+    ):
+        assert value not in safe
+    assert CREDENTIAL_PLACEHOLDER in safe
+
+
+def test_sanitize_error_text_does_not_split_identifier_prefixed_keys():
+    """前置边界不放宽：my_token / subtoken / not_a_token 不能被拦腰匹配。"""
+    text = "my_token=abcdef123456 subtoken=deadbeef not_a_token=12345678"
+    assert sanitize_error_text(text, limit=200) == text
+
+
+def test_sanitize_error_text_weak_keys_keep_status_words_but_mask_credentials():
+    kept = "auth=none auth=basic token=expired sign=invalid sign=positive token=x"
+    assert sanitize_error_text(kept, limit=200) == kept
+
+    hidden = "token=ghp_secretvalue sign=deadbeefcafebabe token=abc12345"
+    safe = sanitize_error_text(hidden, limit=200)
+    for value in ("ghp_secretvalue", "deadbeefcafebabe", "abc12345"):
+        assert value not in safe
+    assert "token=" in safe
+    assert "sign=" in safe
+    assert safe.count(CREDENTIAL_PLACEHOLDER) == 3
+
+
+def test_sanitize_error_text_masks_authorization_scheme_and_token():
+    """认证头的值带空格：整段（scheme + 令牌）都要消失，分隔符与键名保留。"""
+    cases = {
+        "authorization=Bearer eyJhbGciOiJIUzI1NiJ9.abc.def": "authorization=<凭据已隐藏>",
+        "Authorization: Bearer abcdef123456token": "Authorization: <凭据已隐藏>",
+        "AUTHORIZATION: BEARER eyJhbGciOiJIUzI1NiJ9.abc.def": "AUTHORIZATION: <凭据已隐藏>",
+        "proxy-authorization=Basic dXNlcjpwYXNzd29yZA==": "proxy-authorization=<凭据已隐藏>",
+        "authorization=Basic dXNlcjpwYXNzd29yZA==": "authorization=<凭据已隐藏>",
+        'authorization: "Bearer eyJhbGciOiJIUzI1NiJ9.abc.def"': ('authorization: "<凭据已隐藏>"'),
+    }
+    for raw, expected in cases.items():
+        safe = sanitize_error_text(raw, limit=200)
+        assert safe == expected, safe
+        assert "bearer" not in safe.casefold()
+        assert "eyjhbGciO".casefold() not in safe.casefold()
+        assert "dXNlcjpwYXNzd29yZA" not in safe
+
+
+def test_sanitize_error_text_keeps_authorization_diagnostics():
+    """没有受支持 scheme + 令牌的形态是排障信息，不能误打码。"""
+    text = "authorization: failed auth: failed authorization=disabled Authorization: None auth=none"
+    assert sanitize_error_text(text, limit=200) == text
+
+
+def test_sanitize_error_text_masks_authorization_inside_url():
+    """URL 查询串里的认证头不能只遮半截，也不能留下叠加的畸形占位符。"""
+    cases = {
+        "https://h.example.com/x?authorization=Bearer TOKEN failed": ("<地址已隐藏> failed"),
+        "https://h.example.com/x?authorization=Basic dXNlcjpwYXNz failed": ("<地址已隐藏> failed"),
+        "https://h.example.com/x?authorization=Bearer%20TOKEN failed": ("<地址已隐藏> failed"),
+        "https://h.example.com/x?authorization=Bearer TOKEN&x=1": "<地址已隐藏>&x=1",
+        "https://h.example.com/x?a=1&authorization=Basic dXNlcjpwYXNz": "<地址已隐藏>",
+        "  https://h.example.com/x?authorization=Bearer TOKEN": "<地址已隐藏>",
+        "GET https://h.example.com/x failed authorization=Bearer TOKEN 后继续": (
+            "GET <地址已隐藏> failed authorization=<凭据已隐藏> 后继续"
+        ),
+    }
+    for raw, expected in cases.items():
+        safe = sanitize_error_text(raw, limit=300)
+        assert safe == expected, safe
+        assert "TOKEN" not in safe
+        assert "dXNlcjpwYXNz" not in safe
+        assert "<地址已隐藏><凭据已隐藏>" not in safe

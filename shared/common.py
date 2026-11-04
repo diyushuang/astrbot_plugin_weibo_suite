@@ -150,16 +150,23 @@ _SECRET_KEY_NAMES = (
     "x-amz-credential",
     "x-amz-security-token",
     "access_token",
+    "accesstoken",
     "refresh_token",
+    "session_token",
+    "client_secret",
     "api_key",
     "apikey",
+    "x-api-key",
     "signature",
     "sign",
     "secret",
     "password",
     "pwd",
     "token",
-    "auth",
+    "authorization",
+    "cookie",
+    "set-cookie",
+    "proxy-authorization",
 )
 # 值至少 4 个字符才打码：1-3 字符基本是 `token=x` 这类占位/示例，打掉只会让
 # 诊断信息消失，也扛不住真正的凭据熵。
@@ -168,13 +175,77 @@ _SECRET_KV_RE = re.compile(
     r"(?:'([^'\s<>]{4,})'|\"([^\"\s<>]{4,})\"|([^\s&'\"<>，。；：、）】]{4,}))"
 )
 
+# 认证头是唯一「值里带空格」的敏感形态：`authorization=Bearer <token>`、
+# `Authorization: Basic <base64>`。通用 key=value 规则遇到空格即停，只能遮到
+# scheme 词，后面的令牌仍会漏出；冒号头则完全不匹配。这里放在通用规则之前，
+# 整段吃掉「键 + 分隔符 + scheme + 空白 + 令牌」，替换成占位符并保留键名、
+# 分隔符与原有空白/引号风格。scheme 必须是受支持的认证方案且后面确有令牌，
+# `authorization: failed`、`authorization=None`、`authorization=disabled`
+# 这类诊断值不匹配。前置边界沿用通用规则的 `(?<![A-Za-z0-9_-])`。
+_AUTH_SCHEMES = ("bearer", "basic", "digest", "negotiate", "ntlm")
+_AUTH_HEADER_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9_-])((?:proxy-)?authorization)([=:])(\s*)(['\"]?)"
+    r"(" + "|".join(_AUTH_SCHEMES) + r")(\s+)([^\s'\"&]+)(['\"]?)"
+)
+
+# 认证头出现在 URL 查询串里时（`?authorization=Bearer TOKEN`），上一条规则先把
+# 键、scheme 与令牌换成 `<凭据已隐藏>`，URL 规则随后只能遮到它前面的地址，
+# 两个占位符会紧贴在一起。这里把它们（含中间空白/标点）合并成一个地址占位符，
+# 避免回传 `<地址已隐藏><凭据已隐藏>` 这种叠加畸形串。用常量拼正则，改占位符
+# 文案时不会漏改。
+_PLACEHOLDER_GAP = r"[ \t\r\n,;:，。；：、]*"
+_ADJACENT_PLACEHOLDER_RE = re.compile(
+    re.escape(ADDRESS_PLACEHOLDER)
+    + _PLACEHOLDER_GAP
+    + re.escape(CREDENTIAL_PLACEHOLDER)
+    + "|"
+    + re.escape(CREDENTIAL_PLACEHOLDER)
+    + _PLACEHOLDER_GAP
+    + re.escape(ADDRESS_PLACEHOLDER)
+)
+
+
+def _hide_auth_header(match: re.Match[str]) -> str:
+    """整段替换认证头，保留键名、分隔符、空白与引号风格。"""
+    key, sep, spaces, open_quote, _scheme, _gap, _token, close_quote = match.groups()
+    return f"{key}{sep}{spaces}{open_quote}{CREDENTIAL_PLACEHOLDER}{close_quote}"
+
+
+# `sign` / `token` / `authorization` 是弱键：值经常是 expired / invalid /
+# positive / none / disabled 这类排障状态词，整键打码会让错误失去可读性。
+# 只有值「像凭据」才打码，判据三条：
+#   1) 长度 ≥ 12——随机 token 的常见量级；
+#   2) 长度 ≥ 6 且是纯十六进制——摘要/签名段（如 `abcdef`、`deadbeefcafebabe`）；
+#   3) 含数字或凭据分隔符（_ - + / = %）——`ghp_xxx`、`abc12345` 这类。
+# `expired`/`invalid`/`positive`/`disabled`/`None` 都是无数字的字母词，
+# 三条都不满足，因此保持可读；真实 `Bearer/Basic <token>` 形态由上一条
+# 认证头规则整段吃掉，不依赖这里的判据。
+_WEAK_SECRET_KEYS = frozenset({"sign", "token", "authorization", "proxy-authorization"})
+_WEAK_VALUE_HINT_RE = re.compile(r"\d|[_\-+/=%]")
+_HEX_VALUE_RE = re.compile(r"[0-9a-fA-F]+")
+
+
+def _looks_like_credential(value: str) -> bool:
+    """弱键的值是否像凭据（而不是 expired / invalid 这类状态词）。"""
+    if len(value) >= 12:
+        return True
+    if len(value) >= 6 and _HEX_VALUE_RE.fullmatch(value):
+        return True
+    return bool(_WEAK_VALUE_HINT_RE.search(value))
+
 
 def _hide_secret_value(match: re.Match[str]) -> str:
-    """保留键名与引号，只替换等号右侧的值。"""
+    """保留键名与引号，只替换等号右侧的值；弱键不像凭据时原样返回。"""
     key = match.group(1)
-    if match.group(2) is not None:
+    single = match.group(2)
+    double = match.group(3)
+    bare = match.group(4)
+    value = single if single is not None else double if double is not None else bare or ""
+    if key.casefold() in _WEAK_SECRET_KEYS and not _looks_like_credential(value):
+        return match.group(0)
+    if single is not None:
         return f"{key}='{CREDENTIAL_PLACEHOLDER}'"
-    if match.group(3) is not None:
+    if double is not None:
         return f'{key}="{CREDENTIAL_PLACEHOLDER}"'
     return f"{key}={CREDENTIAL_PLACEHOLDER}"
 
@@ -184,19 +255,28 @@ def sanitize_error_text(value: Any, limit: int | None = 200) -> str:
 
     仅用于**用户可见**的错误提示；完整异常仍应写日志。管理员配置的图床
     地址可能含内网 IP 或带签名的查询串，异常字符串常把它们原样拼进去。
-    顺序固定为「URL/IP → 裸 key=value」：先整条隐藏带 scheme 的地址，键值规则
-    就不会再把它切碎成占位符套占位符的形状。
+    顺序固定为「认证头 → URL/IP → 裸 key=value → 占位符合并」：
+    认证头的值带空格，必须在 URL 规则与通用键值规则之前整段处理；若先跑 URL
+    规则，URL 会在空格处截断，把 `?authorization=Bearer` 吃掉、令牌留在外面。
+    URL 先于裸键值规则，是为了不让键值规则把整条地址切碎；最后把 URL 规则与
+    认证头规则各自产生的相邻占位符合并，避免 `<地址已隐藏><凭据已隐藏>`。
 
     ``limit=None`` 供需要按原文长度对照位置的调用方使用（如 embedding 诊断
-    片段）：裸凭据替换会改写文本长度，按原文长度截断会切掉尾部、让位置映射
-    落空。
+    片段、errors.log 落盘）：裸凭据替换会改写文本长度，按原文长度截断会切掉
+    尾部、让位置映射落空。
     """
     text = str(value or "").strip()
     if not text:
         return "未知错误（详情见机器人日志）"
+    text = _AUTH_HEADER_RE.sub(_hide_auth_header, text)
     text = _URL_IN_TEXT_RE.sub(ADDRESS_PLACEHOLDER, text)
     text = _IPV4_IN_TEXT_RE.sub(ADDRESS_PLACEHOLDER, text)
     text = _SECRET_KV_RE.sub(_hide_secret_value, text)
+    while True:
+        merged = _ADJACENT_PLACEHOLDER_RE.sub(ADDRESS_PLACEHOLDER, text)
+        if merged == text:
+            break
+        text = merged
     text = re.sub(r"\s+", " ", text).strip()
     if limit is not None and len(text) > limit:
         text = text[:limit].rstrip() + "…"

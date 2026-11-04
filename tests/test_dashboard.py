@@ -599,3 +599,39 @@ def test_safe_error_masks_local_absolute_paths(api):
     assert "<路径已隐藏>" in win
     # 相对路径与普通文本不该被误伤
     assert api._safe_error("archives/seed.json 解析失败") == "archives/seed.json 解析失败"
+
+
+def test_safe_error_masks_url_ip_secret_and_local_path(api):
+    """面板错误四个口径一次收齐：URL、裸 IP、裸凭据、本机绝对路径。"""
+    text = (
+        "request failed: http://internal.example.com/x from 10.1.2.3 "
+        "client_secret=abcd1234efgh at 'C:\\Users\\bob\\AstrBot\\data\\a.db'"
+    )
+    safe = api._safe_error(text)
+
+    assert "internal.example.com" not in safe
+    assert "10.1.2.3" not in safe
+    assert "abcd1234efgh" not in safe
+    assert "bob" not in safe
+    assert "client_secret=" in safe
+    assert "<路径已隐藏>" in safe
+
+
+def test_safe_error_masks_authorization_bearer_header(api):
+    """面板回传的认证头必须整段消失：只遮 Bearer 会留下后面的令牌。"""
+    token = "eyJhbGciOiJIUzI1NiJ9.abc.def"
+    text = api._safe_error(f"请求失败 authorization: Bearer {token}")
+    assert token not in text
+    assert "Bearer" not in text
+    assert "authorization: <凭据已隐藏>" in text
+
+
+def test_safe_error_keeps_plain_text_and_does_not_cut_placeholder(api):
+    assert api._safe_error("解析失败：缺少字段 title") == "解析失败：缺少字段 title"
+
+    # 占位符横跨长度上限时从它前面截断，不能回传半个 <凭据已隐藏>
+    noisy = "x" * 200 + " client_secret=abcd1234efgh"
+    cut = api._safe_error(noisy, limit=220)
+    assert cut.endswith("…")
+    assert "<凭据已" not in cut
+    assert "client_secret=" in cut

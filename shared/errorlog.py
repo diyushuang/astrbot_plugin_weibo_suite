@@ -44,22 +44,26 @@ _WRITER_LOG.propagate = False
 _WRITER_LOG.setLevel(logging.WARNING)
 
 
-def _redact_error_msg(value: Any, limit: int = ERRLOG_MSG_LIMIT) -> str:
+def _redact_error_msg(value: Any, limit: int | None = None) -> str:
     """脱敏一条错误文本：隐藏地址、查询串里的凭据与代理账号。
 
     地址类沿用 `sanitize_error_text` 的 `<地址已隐藏>`；凭据类用
     `<凭据已隐藏>`。额外覆盖它没管的裸 `/file/...`、`?token=...&sign=...`
     和 `user:pass@host` 三种形态。
+
+    ``limit=None`` 表示不截断：`errors.log` 落盘要保留完整原文，供事后排查；
+    面板回放由 `snapshot()` 显式传面板上限，截断只发生在展示侧。
     """
     raw = str(value or "").strip()
     if not raw:
         return ""
-    # 先按既有口径隐藏 URL / IP。limit 给足长度：截断后再匹配会把 URL 剩半截
-    text = sanitize_error_text(raw, limit=max(len(raw), 1))
+    # 先按既有口径隐藏 URL / IP。这里不截断：脱敏替换会改写长度，先截断会把
+    # 剩下的半截 URL/令牌漏出去，也会让落盘内容丢尾部。
+    text = sanitize_error_text(raw, limit=None)
     text = _QUERY_SECRET_RE.sub(rf"\1{CREDENTIAL_PLACEHOLDER}", text)
     text = _PROXY_USERINFO_RE.sub(CREDENTIAL_PLACEHOLDER, text)
     text = _BARE_FILE_PATH_RE.sub(ADDRESS_PLACEHOLDER, text)
-    if len(text) > limit:
+    if limit is not None and len(text) > limit:
         text = text[:limit].rstrip() + "…"
     return text
 
@@ -241,7 +245,12 @@ class _ErrorLogStore(logging.Handler):
     # ---------------- logging.Handler ----------------
 
     def emit(self, record: logging.LogRecord) -> None:
-        """只过滤 + 进缓冲 + 入待写队列，不碰磁盘。"""
+        """只过滤 + 脱敏 + 进缓冲 + 入待写队列，不碰磁盘。
+
+        脱敏放在入口而不是只在 snapshot() 出口：errors.log 也是可读文件，
+        令牌/URL 落盘同样是泄漏；入口脱敏后缓冲、写盘、面板三者拿到的都是
+        同一份清洗结果。
+        """
         try:
             if self._src_root:
                 pn = os.path.normcase(getattr(record, "pathname", "") or "")
@@ -251,7 +260,7 @@ class _ErrorLogStore(logging.Handler):
                 "ts": record.created,
                 "level": record.levelname,
                 "src": f"{record.funcName}:{record.lineno}",
-                "msg": record.getMessage(),
+                "msg": _redact_error_msg(record.getMessage()),
             }
             line = json.dumps(entry, ensure_ascii=False) + "\n"
         except Exception:
@@ -321,12 +330,14 @@ class _ErrorLogStore(logging.Handler):
 
         返回前逐条脱敏：留存的是完整异常，常带图床 URL、带签名的查询串和
         代理凭据，面板会原样展示，不能直接交出去。字段名保持不变，调用方
-        拿到的结构不受影响，只清洗 msg。
+        拿到的结构不受影响，只清洗 msg。展示侧按 `ERRLOG_MSG_LIMIT` 截断，
+        磁盘里的完整原文不受影响（emit() 落盘时刻意不截断）。
         """
         with self._lock:
             items = list(self._buf)
         return [
-            {**item, "msg": _redact_error_msg(item.get("msg"))} for item in reversed(items[-limit:])
+            {**item, "msg": _redact_error_msg(item.get("msg"), limit=ERRLOG_MSG_LIMIT)}
+            for item in reversed(items[-limit:])
         ]
 
     def clear(self) -> int:

@@ -35,6 +35,42 @@
   在 URL/IP 之后追加保守的 `key=value` 规则：只替换等号右侧的值（≥4 字符才打码，
   短值视为占位示例），键名保留便于诊断；`key: value` 与非白名单键不动，避免误伤。
   该规则会加长文本，`limit=None` 供需要按原文位置对照窗口的调用方绕过截断。
+- **裸 key=value 白名单漏掉常见真键名**（`shared/common.py`）：`client_secret`、
+  `authorization`、`x-api-key`、`session_token`、`accesstoken`、`cookie`、
+  `set-cookie` 此前不在名单里，网关原样回显时会落进 `errors.log` 与 `/errors`
+  面板。现在显式补入；前置边界 `(?<![A-Za-z0-9_-])` 保持不变，避免把
+  `my_token`、`subtoken`、`not_a_token` 这类标识符拦腰截断。
+- **弱键 `sign` / `token` 一律打码、`auth` 打码过度**（`shared/common.py`）：
+  `auth` 从白名单移除（常见值是 `none` / `basic` / `digest` 这类枚举，不是凭据）；
+  `sign` / `token` 仍保留，但只在值「像凭据」时打码，判据为：长度 ≥ 12，或
+  长度 ≥ 6 且纯十六进制，或含数字/凭据分隔符（`_ - + / = %`）。因此
+  `token=expired`、`sign=invalid`、`sign=positive`、`auth=none`、`auth=basic`
+  这些排障状态词保持原样；`password`、`secret`、`client_secret`、`api_key`
+  等强凭据键仍是「≥4 字符即打码」。
+- **面板错误文本只挡路径、不挡 URL/IP/裸凭据**（`views_backend/dashboard.py`）：
+  `_safe_error` 改为先复用 `sanitize_error_text(..., limit=None)` 遮 URL、裸 IP
+  与裸凭据，再遮本机绝对路径，最后按面板长度上限截断；截断时若落点落在
+  占位符中间则回退到占位符前，避免回传半个 `<凭据已隐藏>`。
+- **`Authorization` 认证头只遮到 scheme，令牌仍漏出**（`shared/common.py`）：
+  通用 `key=value` 规则遇到空格即停，`authorization=Bearer <token>` 只会把
+  `Bearer` 换成占位符，后面的令牌原样保留；`Authorization: Bearer ...` 冒号头
+  则完全不匹配。现在把专用规则提到 URL 规则之前：整段匹配
+  `(?:proxy-)?authorization` + `:`/`=` + 受支持的 scheme
+  （`bearer|basic|digest|negotiate|ntlm`）+ 空白 + 令牌，替换成
+  `<键名><分隔符><凭据已隐藏>`，保留原有分隔符、空白与引号风格。URL 查询串里
+  的认证头（`?authorization=Bearer TOKEN&x=1`）同样处理，URL 规则产生的
+  `<地址已隐藏>` 与认证头规则产生的 `<凭据已隐藏>` 紧邻时会合并成一个地址
+  占位符，不再出现叠加畸形串。`authorization: failed`、`authorization=None`、
+  `authorization=disabled` 这类没有「scheme + 令牌」的诊断值不动。
+  `authorization` / `proxy-authorization` 在通用规则里按弱键处理，避免把
+  `disabled` / `None` 当成凭据打码；`/errors` 的记录在 `shared/errorlog.py` 的
+  `emit()` 入口即脱敏，`errors.log` 保留完整原文（不截断），面板回放才按展示
+  上限截断。升级前已存在的 `errors.log` 明文不会被回写，只在 `/errors` 面板
+  回放时脱敏，彻底清理需在面板「清空错误留存」。
+- **弱键判据的已有边界**（`shared/common.py`）：阈值仍为 ≥12，没有收紧——
+  `token=authenticated` 这类 12 字符以上的纯字母状态词会被误判成凭据打码；
+  `token=abcdefghijk`（11 位纯字母）这类真凭据会漏打。这是「优先保住排障词
+  可读性」的取舍，尚未闭环。
 
 ## v0.9.3 - 2026-11-04
 
