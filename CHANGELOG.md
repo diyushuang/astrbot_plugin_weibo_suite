@@ -1,5 +1,24 @@
 # 更新日志
 
+## Unreleased
+
+### 修掉的真 bug
+
+- **签到卡片合成被超大长图拖垮**（`trace/checkin_card.py`）：合成前先对源图做
+  `Image.draft("RGB", (1440, 1440))` 的 JPEG DCT 降采样，再判 50MP 防炸闸门；
+  `draft` 对 PNG 等格式无效，原闸门保留。线上实测 8736×11648 的手机长图此前会
+  被闸门直接跳过、整张卡片静默降级成无边框的轻量模式，现在能正常合成。
+- **卡片上 emoji 渲染成豆腐块 / 多行文案换行符未处理**（`trace/checkin_card.py`）：
+  绘制前统一 `strip_emoji`（中文字体没有彩色 emoji 字形），`wrap_text` 改为先按
+  `\n` 切物理行、再按像素折行，行数预算仍全局共享。
+- **签到卡片合成用原图**（`trace/checkin_mixin.py`、`trace/qq_upload_mixin.py`）：
+  新增 `_checkin_card_source`，发送态是原图时先按原图对象键反查缩略图替身，查不到
+  再退回原图；`_random_send_url` 增加 `thumbnail: bool | None` 显式口径，
+  `random_media.send_thumbnail` 仍只决定 `/随机图` 的发图形态，互不覆盖。
+- **embedding 返回非 JSON 时日志缺上下文**（`trace/vector_search.py`）：解析失败分支
+  现在记录解析位置前后各 80 字片段，片段复用 `sanitize_error_text` 隐藏 URL 与裸 IPv4，
+  再进 `errors.log` / `/errors` 面板。
+
 ## v0.9.3 - 2026-11-04
 
 ### 新增

@@ -14,6 +14,7 @@ from astrbot_plugin_weibo_suite.trace.vector_search import (
     InvalidEmbeddingJSON,
     VectorEngine,
     VectorEngineError,
+    _invalid_json_context,
     parse_embedding_response,
     thumb_path_key,
 )
@@ -1065,6 +1066,26 @@ async def test_original_info_for_thumb_name_accepts_name_without_timestamp():
     info = await engine.original_info_for_thumb_name("【微博_示例博主A工作室official】剧照.jpg")
 
     assert info is not None and info["url"] == original
+
+
+def test_invalid_json_context_redacts_signed_url_and_truncates():
+    """解析片段会进 /errors 面板：必须先脱敏 URL，再截到窗口长度。"""
+    body = (
+        "<html>"
+        + "x" * 70
+        + " https://internal.example.com/v1/embed?key=secret-token "
+        + "x" * 70
+        + "</html>"
+    )
+    position = body.index("https")
+
+    before, after = _invalid_json_context(body, position)
+
+    combined = before + after
+    assert "internal.example.com" not in combined
+    assert "<地址已隐藏>" in combined
+    assert len(before) <= 80
+    assert len(after) <= 80
 
 
 async def test_original_info_for_thumb_name_tolerates_duplicate_points():

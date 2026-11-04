@@ -39,6 +39,7 @@ try:
     )
     from .random_media import (
         clean_display_name,
+        is_thumbnail_url,
         swap_url_origin,
     )
     from .weibo_posts import (
@@ -61,6 +62,7 @@ except ImportError:  # 兼容插件以独立模块方式加载
     )
     from random_media import (  # type: ignore[no-redef]
         clean_display_name,
+        is_thumbnail_url,
         swap_url_origin,
     )
     from weibo_posts import (  # type: ignore[no-redef]
@@ -359,12 +361,14 @@ class CheckinMixin:
     ):
         """签到统一交付：card 合成失败自动退回 simple；两类签到共用。
 
-        card_source 供微博模式传本地预缓存缩略图路径；为空时用 send_url。
+        card_source 供微博模式传本地预缓存缩略图路径；为空时走
+        ``_checkin_card_source`` 反查缩略图替身（查不到再退回发送图）。
         """
         remember = [{"url": original_url, "file_name": block_name}] if original_url else []
         if settings["render_mode"] == "card":
+            source = card_source or await self._checkin_card_source(send_url, original_url)
             path = await self._checkin_card_path(
-                card_source or send_url,
+                source,
                 quote,
                 footer,
                 settings,
@@ -394,6 +398,28 @@ class CheckinMixin:
             remember_blocks=remember,
         ):
             yield result
+
+    async def _checkin_card_source(self, send_url: str, original_url: str) -> str:
+        """卡片合成专用图源：发送态是原图时先反查缩略图替身。
+
+        卡片成品最长边只有 POSTER_MAX_SIDE，用原图合成没有收益——2026-11-02
+        线上实录：一张 8736×11648 的手机长图被拿来合成，既白花几十 MB 流量与
+        上亿像素解码，又被 compose_poster 的防炸上限挡回去，整张卡片降级成
+        没有边框的轻量模式。
+
+        这里只保证「合成用图」与「发送态」解耦：不论 ``random_media.send_thumbnail``
+        开关，合成都优先用缩略图替身，查不到再退回原图。反查复用
+        ``_random_send_url`` 的 thumbnail=True 口径，但**不改**该开关的默认语义，
+        /随机图 的发图选择不受影响。
+        """
+        source = original_url or send_url
+        if is_thumbnail_url(send_url):
+            # 上游已经给的就是缩略图直链（图床随机目录指到了 thumbnails/）
+            return send_url
+        thumb = await self._random_send_url(source, self._random_settings(), thumbnail=True)
+        if thumb and thumb != source:
+            logger.debug(f"签到卡片改用缩略图合成: {source} -> {thumb}")
+        return thumb or source
 
     async def _checkin_flow(self, event: AstrMessageEvent):
         """签到主流程：判定 → 取图 → 取句 → 卡片/轻量交付。

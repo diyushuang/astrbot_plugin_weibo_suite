@@ -39,7 +39,7 @@ except Exception:  # 兼容独立模块加载/本地自测环境
     logger = logging.getLogger("vector_search")
 
 try:
-    from ..shared.common import as_float, as_int, read_bytes
+    from ..shared.common import as_float, as_int, read_bytes, sanitize_error_text
     from ..shared.http import (
         HttpClientGetter,
         ResponseTooLargeError,
@@ -58,6 +58,7 @@ except ImportError:  # 兼容插件以独立模块方式加载
         as_float,
         as_int,
         read_bytes,
+        sanitize_error_text,
     )
     from astrbot_plugin_weibo_suite.shared.http import (  # type: ignore[no-redef]
         HttpClientGetter,  # type: ignore[no-redef]
@@ -101,6 +102,20 @@ class InvalidEmbeddingJSON(Exception):
     def __init__(self, message: str, position: int | None = None):
         super().__init__(message)
         self.position = position
+
+
+def _invalid_json_context(text: str, position: int | None, window: int = 80) -> tuple[str, str]:
+    """取解析失败位置前后各 window 字的片段，并复用用户可见文案的脱敏规则。
+
+    响应体可能来自反代/网关（HTML 错误页、带签名的跳转串），片段会写进
+    errors.log 并被 /errors 面板读出来，所以先走 ``sanitize_error_text``
+    隐藏 URL 与裸 IPv4，再按 window 截断。
+    """
+    body = str(text or "")
+    pos = len(body) if position is None else max(0, min(int(position), len(body)))
+    before = sanitize_error_text(body[max(0, pos - window) : pos], limit=window)
+    after = sanitize_error_text(body[pos : pos + window], limit=window)
+    return before, after
 
 
 def parse_embedding_response(text: str) -> list[float]:
@@ -459,14 +474,16 @@ class VectorEngine:
                     try:
                         emb = parse_embedding_response(text)
                     except InvalidEmbeddingJSON as exc:
-                        # 只记长度/状态/解析位置：响应片段可能含内网地址与
-                        # 请求体回显，进 errors.log 后会被 /errors 面板读出来
+                        # 只记长度/状态/解析位置与脱敏后的片段：响应体可能回显
+                        # 内网地址与请求内容，进 errors.log 后会被 /errors 面板读出来
+                        before, after = _invalid_json_context(text, exc.position)
                         logger.error(
                             "embedding 响应无效 JSON: "
                             f"响应长度={len(text)}, "
                             f"Content-Length={resp.headers.get('Content-Length', '<missing>')}, "
                             f"Content-Type={resp.headers.get('Content-Type', '<missing>')}, "
-                            f"解析位置={exc.position}, 错误={exc}"
+                            f"解析位置={exc.position}, 错误={exc}, "
+                            f"片段前={before!r}, 片段后={after!r}"
                         )
                         if attempt == 1:
                             await asyncio.sleep(2)

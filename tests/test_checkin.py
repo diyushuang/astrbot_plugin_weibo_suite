@@ -8,12 +8,16 @@ from pathlib import Path
 
 import pytest
 from PIL import Image as PILImage
+from PIL import ImageFont
 
 from astrbot_plugin_weibo_suite.trace.checkin_card import (
     DEFAULT_QUOTES,
+    POSTER_MAX_SIDE,
     QuoteLibrary,
     compose_poster,
     resolve_font_path,
+    strip_emoji,
+    wrap_text,
 )
 from astrbot_plugin_weibo_suite.trace.checkin_store import CheckinStore
 
@@ -266,3 +270,144 @@ async def test_checkin_import_writes_file(make_plugin, make_event, data_dir, tmp
     assert "已导入" in results[0].text
     assert "1 条文案" in results[0].text
     assert (Path(plugin.weibo_dir) / "微博原创文案.csv").is_file()
+
+
+def test_compose_poster_downscales_huge_jpeg_before_gate():
+    """超过 50MP 的 JPEG 要先 DCT 降采样再判闸门，不能整张跳过合成。
+
+    线上实测 8736×11648 的手机长图曾被防炸闸门直接拒掉，卡片静默降级成
+    没有边框的轻量模式；draft 之后同一张图能正常合成。
+    """
+    font = resolve_font_path("")
+    if font is None:
+        pytest.skip("当前环境没有可用的中文字体")
+
+    buffer = io.BytesIO()
+    # 7600×6700 = 50.92MP，刚超过 _MAX_LOAD_PIXELS；纯色图编解码都很快
+    PILImage.new("RGB", (7600, 6700), (200, 180, 160)).save(buffer, "JPEG", quality=60)
+
+    card = compose_poster(
+        buffer.getvalue(),
+        quote="长图也能合成",
+        footer="连续签到 3 天",
+        font_path=font,
+    )
+
+    assert card is not None, "降采样后应合成成功，而不是被像素闸门跳过"
+    with PILImage.open(io.BytesIO(card)) as image:
+        assert image.format == "JPEG"
+        assert image.width <= POSTER_MAX_SIDE + 300
+        assert image.width < 7600
+
+
+def test_wrap_text_treats_newline_as_hard_break():
+    """微博文案自带换行：先按物理行切段，再按像素折行，行数预算全局共享。"""
+    font = resolve_font_path("")
+    if font is None:
+        pytest.skip("当前环境没有可用的中文字体")
+    measured = ImageFont.truetype(font, 24)
+
+    lines = wrap_text("第一行\n第二行\n第三行", measured, 400, max_lines=3)
+    assert lines == ["第一行", "第二行", "第三行"]
+    assert all("\n" not in line for line in lines)
+
+    budgeted = wrap_text("第一行\n第二行\n第三行", measured, 400, max_lines=2)
+    assert len(budgeted) == 2
+    assert budgeted[-1].endswith("…")
+
+
+def test_compose_poster_strips_emoji_and_stays_within_line_budget():
+    """emoji 在中文字体上是豆腐块，合成前剔除；卡片高度不超过行数预算。"""
+    assert strip_emoji("坠入秋日棕调氛围里🍂") == "坠入秋日棕调氛围里"
+    assert strip_emoji("出门看海 🌊✨") == "出门看海"
+    # ★ ☀ 这类中文字体确实有字形的符号要保留
+    assert strip_emoji("★ 收藏") == "★ 收藏"
+
+    font = resolve_font_path("")
+    if font is None:
+        pytest.skip("当前环境没有可用的中文字体")
+
+    buffer = io.BytesIO()
+    PILImage.effect_noise((320, 240), 48).convert("RGB").save(buffer, "JPEG")
+
+    card = compose_poster(
+        buffer.getvalue(),
+        quote="坠入秋日棕调氛围里🍂\n第二段✅✨\n第三段",
+        footer="签到 3 天🎉",
+        quote_max_lines=3,
+        font_path=font,
+    )
+
+    assert card is not None
+    with PILImage.open(io.BytesIO(card)) as image:
+        assert image.format == "JPEG"
+        # 与 compose_poster 的排版契约对齐：3 行正文 + 2 行页脚是上限
+        border = max(12, round(320 * 0.045))
+        font_size = min(48, max(18, round(320 * 0.036)))
+        line_height = font_size + round(font_size * 0.45)
+        footer_size = max(14, round(font_size * 0.72))
+        footer_line_height = footer_size + round(footer_size * 0.35)
+        gap = max(8, round(font_size * 0.5))
+        budget = 240 + border * 3 + line_height * 3 + gap + footer_line_height * 2
+        assert 240 < image.height <= budget
+
+
+def _stub_checkin_thumbnail(monkeypatch, plugin, *, thumb: str | None) -> list[str]:
+    """让缩略图反查走真实对象、只固定返回的直链，记录被查询的 file id。"""
+    seen: list[str] = []
+
+    async def fake_thumb_url_for(file_id: str):
+        seen.append(file_id)
+        return thumb
+
+    monkeypatch.setattr(plugin.vector, "qdrant_ready", True)
+    monkeypatch.setattr(plugin.vector, "thumb_url_for", fake_thumb_url_for)
+    return seen
+
+
+async def test_checkin_card_source_forces_thumbnail_in_quote_mode(make_plugin, monkeypatch):
+    """quote 模式发送态是原图时，卡片合成必须改用缩略图替身。"""
+    plugin = make_plugin()
+    original = "https://img.example.com/file/x.jpg"
+    thumb = "https://img.example.com/file/thumbnails/1_x.jpg"
+    seen = _stub_checkin_thumbnail(monkeypatch, plugin, thumb=thumb)
+
+    source = await plugin._checkin_card_source(original, original)
+
+    assert seen == ["x.jpg"]
+    assert source == thumb
+
+
+async def test_checkin_card_source_falls_back_when_thumbnail_missing(make_plugin, monkeypatch):
+    """查不到缩略图时退回原图，绝不能让签到合成为此失败。"""
+    plugin = make_plugin()
+    original = "https://img.example.com/file/x.jpg"
+    _stub_checkin_thumbnail(monkeypatch, plugin, thumb=None)
+
+    assert await plugin._checkin_card_source(original, original) == original
+
+
+async def test_checkin_card_source_ignores_send_thumbnail_switch(make_plugin, monkeypatch):
+    """random_media.send_thumbnail=false 只影响 /随机图，签到照样用缩略图。"""
+    plugin = make_plugin(random_media={"send_thumbnail": False})
+    original = "https://img.example.com/file/x.jpg"
+    thumb = "https://img.example.com/file/thumbnails/1_x.jpg"
+    seen = _stub_checkin_thumbnail(monkeypatch, plugin, thumb=thumb)
+
+    assert plugin._random_settings()["send_thumbnail"] is False
+    assert await plugin._checkin_card_source(original, original) == thumb
+    assert seen == ["x.jpg"]
+
+
+async def test_random_send_url_default_keeps_send_thumbnail_switch(make_plugin, monkeypatch):
+    """/随机图 走默认口径：thumbnail=None 时仍尊重 send_thumbnail 开关。"""
+    plugin = make_plugin(random_media={"send_thumbnail": False})
+    original = "https://img.example.com/file/x.jpg"
+    thumb = "https://img.example.com/file/thumbnails/1_x.jpg"
+    seen = _stub_checkin_thumbnail(monkeypatch, plugin, thumb=thumb)
+    settings = plugin._random_settings()
+
+    assert await plugin._random_send_url(original, settings) == original
+    assert seen == []
+    assert await plugin._random_send_url(original, settings, thumbnail=True) == thumb
+    assert seen == ["x.jpg"]

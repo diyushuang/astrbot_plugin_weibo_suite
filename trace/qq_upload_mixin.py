@@ -437,15 +437,24 @@ class QQUploadMixin:
         except Exception as exc:
             logger.debug(f"qq_official 失败说明发送失败（忽略）: {exc}")
 
-    async def _random_send_url(self, media_url: str, settings: dict) -> str:
+    async def _random_send_url(
+        self, media_url: str, settings: dict, *, thumbnail: bool | None = None
+    ) -> str:
         """把随机到的原图换成它的缩略图直链；取不到替身就原样返回原图。
 
         缩略图与原图落在同一个 Qdrant 点上（点 id = UUID5(原图 id)），所以只要
         随机到的是内容目录里的原图，就能按 id 查出它的 thumb_url——不需要映射表，
         也不能靠文件名（图床给缩略图改过名）。整条链路都失败时静默退回原图：
         替身只是提速手段，绝不能因为它缺席而让 /随机图 发不出图。
+
+        thumbnail 是「这次要发哪一张」的显式口径：
+        - None（默认）= 按 random_media.send_thumbnail，/随机图、/随机视频 走这条；
+        - True = 调用方自带口径（/签到 的卡片合成图源），不受随机图开关影响。
+        两条链路共用同一段反查，判定来源各自独立，互不覆盖。
         """
-        if not settings.get("send_thumbnail", True):
+        if thumbnail is None:
+            thumbnail = bool(settings.get("send_thumbnail", True))
+        if not thumbnail:
             return media_url
         file_id = self._bed_file_id(media_url)
         if not file_id:
