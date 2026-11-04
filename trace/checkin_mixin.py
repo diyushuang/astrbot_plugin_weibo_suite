@@ -358,15 +358,20 @@ class CheckinMixin:
         quote_max_lines: int = 3,
         simple_text: str = "",
         card_source: str = "",
+        thumbnail_prechecked: bool = False,
     ):
         """签到统一交付：card 合成失败自动退回 simple；两类签到共用。
 
         card_source 供微博模式传本地预缓存缩略图路径；为空时走
         ``_checkin_card_source`` 反查缩略图替身（查不到再退回发送图）。
+        thumbnail_prechecked 由随机图链路传入：发送态已经按同一个 id 查过替身，
+        卡片合成不再重复查询（见 ``_checkin_card_source``）。
         """
         remember = [{"url": original_url, "file_name": block_name}] if original_url else []
         if settings["render_mode"] == "card":
-            source = card_source or await self._checkin_card_source(send_url, original_url)
+            source = card_source or await self._checkin_card_source(
+                send_url, original_url, thumbnail_prechecked=thumbnail_prechecked
+            )
             path = await self._checkin_card_path(
                 source,
                 quote,
@@ -399,7 +404,13 @@ class CheckinMixin:
         ):
             yield result
 
-    async def _checkin_card_source(self, send_url: str, original_url: str) -> str:
+    async def _checkin_card_source(
+        self,
+        send_url: str,
+        original_url: str,
+        *,
+        thumbnail_prechecked: bool = False,
+    ) -> str:
         """卡片合成专用图源：发送态是原图时先反查缩略图替身。
 
         卡片成品最长边只有 POSTER_MAX_SIDE，用原图合成没有收益——2026-11-02
@@ -411,11 +422,18 @@ class CheckinMixin:
         开关，合成都优先用缩略图替身，查不到再退回原图。反查复用
         ``_random_send_url`` 的 thumbnail=True 口径，但**不改**该开关的默认语义，
         /随机图 的发图选择不受影响。
+
+        ``thumbnail_prechecked=True``：发送链路已用同一个 id 查过替身，且发送态
+        仍是原图（说明确实没有替身）。此时结果不会变，直接回退原图，避免一次
+        签到对同一张图查两遍 Qdrant。此标记只由「随机图 → 发送态」链路传入，
+        微博模式没有查过，保持默认 False。
         """
         source = original_url or send_url
         if is_thumbnail_url(send_url):
             # 上游已经给的就是缩略图直链（图床随机目录指到了 thumbnails/）
             return send_url
+        if thumbnail_prechecked:
+            return source
         thumb = await self._random_send_url(source, self._random_settings(), thumbnail=True)
         if thumb and thumb != source:
             logger.debug(f"签到卡片改用缩略图合成: {source} -> {thumb}")
@@ -532,6 +550,7 @@ class CheckinMixin:
             block_name,
             settings,
             quote_max_lines=3,
+            thumbnail_prechecked=bool(random_settings.get("send_thumbnail", True)),
         ):
             yield result
 

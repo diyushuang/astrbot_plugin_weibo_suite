@@ -19,6 +19,17 @@
   现在记录解析位置前后各 80 字片段，片段复用 `sanitize_error_text` 隐藏 URL 与裸 IPv4，
   再进 `errors.log` / `/errors` 面板。
 
+### 审查补修（未发布）
+
+- **脱敏顺序错误导致签名漏进日志**（`trace/vector_search.py`）：原实现先切窗口再脱敏，
+  窗口起点落在长 URL 中间时前缀没有 scheme，`X-Amz-Signature` 等查询串会原样落进
+  `errors.log`。改为先整段脱敏、再用「原前缀脱敏长度」映射位置并切窗口。
+- **`strip_emoji` 误伤 Dingbats 符号**（`trace/checkin_card.py`）：`✓ ✔ ✂ ❤ ✉` 等
+  中文字体有字形的符号加入白名单保留；真 emoji、ZWJ 组合与变体选择符仍整体剔除。
+- **签到对同一张图重复反查缩略图**（`trace/checkin_mixin.py`）：发送链路已按同一
+  id 查过且没查到替身时，卡片合成直接回退原图，不再查第二遍 Qdrant；
+  `/随机图` 的 `send_thumbnail` 默认口径不变。
+
 ## v0.9.3 - 2026-11-04
 
 ### 新增

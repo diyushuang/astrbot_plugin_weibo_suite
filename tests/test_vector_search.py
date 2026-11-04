@@ -1068,6 +1068,28 @@ async def test_original_info_for_thumb_name_accepts_name_without_timestamp():
     assert info is not None and info["url"] == original
 
 
+def test_invalid_json_context_redacts_signature_inside_window():
+    """窗口起点落在长 URL 中间时也不能漏签名：必须先整段脱敏再切窗口。"""
+    query = (
+        "X-Amz-Credential=AKIAEXAMPLE%2F20261104&X-Amz-Signature=deadbeefcafebabe&X-Amz-Expires=60"
+    )
+    url = "https://internal.example.com/v1/embed?" + query
+    body = "prefix " + url + " suffix"
+    # 解析位置落在签名参数附近，按旧实现窗口起点会正好切进 URL 中间
+    position = body.index("X-Amz-Signature")
+
+    before, after = _invalid_json_context(body, position)
+
+    combined = before + after
+    assert "X-Amz-Signature" not in combined
+    assert "X-Amz-Credential" not in combined
+    assert "deadbeefcafebabe" not in combined
+    assert "internal.example.com" not in combined
+    assert "<地址已隐藏>" in combined
+    assert len(before) <= 80
+    assert len(after) <= 80
+
+
 def test_invalid_json_context_redacts_signed_url_and_truncates():
     """解析片段会进 /errors 面板：必须先脱敏 URL，再截到窗口长度。"""
     body = (

@@ -316,6 +316,15 @@ def test_wrap_text_treats_newline_as_hard_break():
     assert budgeted[-1].endswith("…")
 
 
+def test_strip_emoji_keeps_dingbat_whitelist_and_removes_zwj():
+    """Dingbats 白名单保留；真 emoji、ZWJ 组合与变体选择符仍整串剔除。"""
+    kept = "✓ ✔ ✂ ❤ ✉ ★"
+    assert strip_emoji(kept) == kept
+    assert strip_emoji("完成✅🎉") == "完成"
+    assert strip_emoji("👨‍👩‍👧‍👦 一家") == "一家"
+    assert strip_emoji("❤️ 喜欢") == "❤ 喜欢"
+
+
 def test_compose_poster_strips_emoji_and_stays_within_line_budget():
     """emoji 在中文字体上是豆腐块，合成前剔除；卡片高度不超过行数预算。"""
     assert strip_emoji("坠入秋日棕调氛围里🍂") == "坠入秋日棕调氛围里"
@@ -396,6 +405,24 @@ async def test_checkin_card_source_ignores_send_thumbnail_switch(make_plugin, mo
 
     assert plugin._random_settings()["send_thumbnail"] is False
     assert await plugin._checkin_card_source(original, original) == thumb
+    assert seen == ["x.jpg"]
+
+
+async def test_checkin_card_source_skips_duplicate_lookup_after_send_checked(
+    make_plugin, monkeypatch
+):
+    """发送态已查过替身且没查到：卡片链路不再查同一 id，仍回退原图。"""
+    plugin = make_plugin()  # random_media.send_thumbnail 默认 True
+    original = "https://img.example.com/file/x.jpg"
+    seen = _stub_checkin_thumbnail(monkeypatch, plugin, thumb=None)
+    settings = plugin._random_settings()
+
+    # 发送链路第一次查询：没有替身，返回原图
+    assert await plugin._random_send_url(original, settings) == original
+    # 卡片链路带着「已查过」标记：直接回退，不再查第二次
+    assert (
+        await plugin._checkin_card_source(original, original, thumbnail_prechecked=True) == original
+    )
     assert seen == ["x.jpg"]
 
 

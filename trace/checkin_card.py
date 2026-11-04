@@ -169,23 +169,31 @@ _EDGE_STRIP = " \t\r\n-—·…"
 # 中文字体（msyh / Noto CJK / 文泉驿）没有彩色 emoji 字形，直接绘制会变豆腐块
 # （实测「坠入秋日棕调氛围里🍂」在卡片上是「…里□」）。微博文案 emoji 极常见，
 # 卡片渲染前统一剔除；聊天消息里的原文不动。区间只覆盖真正的 emoji 区，
-# ★ ☀ ♪ 这类中文字体确实有字形的符号仍然保留。
+# 下面白名单里的 Dingbats 符号雅黑/黑体确实有字形，必须保留。
 _EMOJI_RANGES: tuple[tuple[int, int], ...] = (
     (0x1F000, 0x1FAFF),  # 表情 / 手势 / 交通 / 旗帜 / 补充符号
-    (0x2700, 0x27BF),  # 装饰符号（✅ ✂ ❤ 等）
+    (0x2700, 0x27BF),  # Dingbats 区：默认剔除，白名单见下
     (0xFE00, 0xFE0F),  # 变体选择符 VS1-VS16
     (0x200D, 0x200D),  # 零宽连接符（组合 emoji）
     (0x20E3, 0x20E3),  # 键帽组合符
     (0xE0020, 0xE007F),  # 标签字符（旗帜子序列）
 )
 
+# Dingbats 里雅黑/黑体有字形、又常被文案当装饰用的符号。★☆ 等虽然不在
+# 0x2700 区段，也一并列出，避免以后调整区段时误删。
+_DINGBAT_KEEP = frozenset("✓✔✂❤✉✈✎✏✒★☆☀☁☂☎☑")
+
 
 def strip_emoji(text: str) -> str:
-    """去掉字体渲染不出的 emoji，避免卡片上出现豆腐块。"""
+    """去掉字体渲染不出的 emoji，避免卡片上出现豆腐块。
+
+    ZWJ 组合（👨‍👩‍👧）与带变体选择符的符号会整串剔除；``_DINGBAT_KEEP``
+    里的字形保留。
+    """
     kept = [
         char
         for char in str(text or "")
-        if not any(low <= ord(char) <= high for low, high in _EMOJI_RANGES)
+        if char in _DINGBAT_KEEP or not any(low <= ord(char) <= high for low, high in _EMOJI_RANGES)
     ]
     return re.sub(r"[ \t]{2,}", " ", "".join(kept)).strip()
 
