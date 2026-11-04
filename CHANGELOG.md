@@ -20,9 +20,10 @@
 ### 修掉的真 bug
 
 - **图库哈希命中后不回填直链**（`weibo/pipeline.py`、`weibo/archive_db.py`）：命中分支
-  原只把状态推进到 `vector`，本行 `url` / `thumb_url` 仍是空——详情页与直链导出都看不到
-  这张图。现在命中时把图库里已有的 `image_url` / `thumb_url` 一并写回，空值不覆盖旧值、
-  缺缩略图时保留原值。
+  原只把状态推进到 `vector`，本行 `url` / `thumb_url` 不指向可用的图床直链——详情页与
+  直链导出都看不到这张图。现在命中时把图库记录的图床直链写回 `url` / `thumb_url`：
+  本行若已有源地址会被图床直链覆盖，源地址仍保留在 `alt_url`；缺缩略图时保留原值，
+  传入空值不覆盖已有内容。
 - **设置页保存后溯源域仍用旧配置**（`trace/main.py`、`main.py`、
   `views_backend/settings_api.py`）：`hash_size`、图床配置、`ImageBedClient`、
   `VectorEngine` 都是插件初始化时的快照，面板改完要重启才生效。现在保存落盘、镜像平铺

@@ -396,7 +396,7 @@
         "collapsed": true
       },
       "hash_size": {
-        "description": "【选填】感知哈希精度",
+        "description": "【选填】感知哈希精度。修改后旧图库记录（hex 长度不匹配）将不再参与检索，缓存需要重建。",
         "type": "int",
         "default": 16,
         "options": [
