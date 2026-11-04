@@ -389,6 +389,62 @@ async def test_library_hit_without_image_url_still_uploads(tmp_path):
     assert len(library.rows) == 2
 
 
+async def test_library_hit_backfills_url_and_keeps_existing_thumb(tmp_path):
+    """命中图库时把直链/缩略图写回本行；命中缺 thumb 时保留原值。"""
+    store = make_store(tmp_path)
+    items = add_post(store, tmp_path)
+    for index, item in enumerate(items):
+        store.mark_media(
+            MID, item["pid"], "downloaded", thumb_url=f"https://old.example/{index}.jpg"
+        )
+    path0 = store.get_media(MID, items[0]["pid"])["local_path"]
+    path1 = store.get_media(MID, items[1]["pid"])["local_path"]
+    library = FakeLibrary(
+        {
+            _phash_for(path0): {
+                "image_url": "https://cdn.example/dup-0.jpg",
+                "thumb_url": "https://cdn.example/thumb-0.jpg",
+            },
+            _phash_for(path1): {"image_url": "https://cdn.example/dup-1.jpg"},
+        }
+    )
+    bed, vector = FakeBed(), FakeVector()
+    host = make_host(tmp_path, store, services=make_services(bed, vector, library))
+    result = await host.pipeline_run_post(MID)
+
+    assert result["processed"] == 0
+    assert result["skipped"] == 2
+    assert bed.calls == []
+    assert vector.batches == []
+
+    first = store.get_media(MID, items[0]["pid"])
+    assert first["state"] == "vector"
+    assert first["url"] == "https://cdn.example/dup-0.jpg"
+    assert first["thumb_url"] == "https://cdn.example/thumb-0.jpg"
+
+    second = store.get_media(MID, items[1]["pid"])
+    assert second["state"] == "vector"
+    assert second["url"] == "https://cdn.example/dup-1.jpg"
+    assert second["thumb_url"] == "https://old.example/1.jpg", "命中缺 thumb 不能覆盖原值"
+
+
+async def test_run_post_does_not_retry_media_past_limit(tmp_path):
+    """达到重试上限的图不再被选中：不重算特征、不再试图上传。"""
+    store = make_store(tmp_path)
+    add_post(store, tmp_path, count=1, state="thumb", attempts=3)
+    bed, vector, library = FakeBed(), FakeVector(), FakeLibrary()
+    host = make_host(tmp_path, store, services=make_services(bed, vector, library))
+
+    result = await host.pipeline_run_post(MID)
+
+    assert result["processed"] == 0
+    assert result["failed"] == 0
+    assert result["exhausted"] == 1
+    assert bed.calls == []
+    assert vector.batches == []
+    assert store.list_media(MID)[0]["attempts"] == 3
+
+
 async def test_single_image_failure_does_not_stop_post(tmp_path):
     store = make_store(tmp_path)
     add_post(store, tmp_path)
@@ -663,3 +719,40 @@ def test_pipeline_stats_and_status_text(tmp_path):
     assert "插件写入" in text
     assert "缺口帖子：1 篇" in text
     assert "最近错误：上次失败" in text
+
+
+def test_pending_query_drops_posts_once_every_image_is_exhausted(tmp_path):
+    """达到上限的图按「已放弃」计入完成度：整帖跑完就不再被补跑选中。"""
+    store = make_store(tmp_path)
+    items = add_post(store, tmp_path, count=2, state="thumb")
+    for _ in range(3):
+        store.bump_media_attempt(MID, items[0]["pid"], "boom")
+
+    # 只放弃一张时整帖仍有缺口，仍会被选中
+    assert [row["mid"] for row in store.list_posts_for_pipeline(max_attempts=3)] == [MID]
+    assert store.media_stats(max_attempts=3)["abandoned"] == 1
+
+    for _ in range(3):
+        store.bump_media_attempt(MID, items[1]["pid"], "boom")
+
+    assert store.list_posts_for_pipeline(max_attempts=3) == []
+    assert store.media_stats(max_attempts=3)["abandoned"] == 2
+    # 不传上限时保持旧行为：只按 state 判定缺口，便于排查/手动补跑
+    assert [row["mid"] for row in store.list_posts_for_pipeline()] == [MID]
+
+
+def test_status_text_separates_retrying_from_abandoned(tmp_path):
+    store = make_store(tmp_path)
+    items = add_post(store, tmp_path, count=2, state="pending")
+    store.bump_media_attempt(MID, items[0]["pid"], "boom")
+    for _ in range(3):
+        store.bump_media_attempt(MID, items[1]["pid"], "boom")
+    host = make_host(tmp_path, store, services=make_services(), config={"enabled": True})
+
+    media = host.pipeline_stats()["media"]
+    assert media["failed"] == 1
+    assert media["abandoned"] == 1
+
+    text = host.format_pipeline_status()
+    assert "失败待重试：1 张" in text
+    assert "已放弃（达到重试上限）：1 张" in text

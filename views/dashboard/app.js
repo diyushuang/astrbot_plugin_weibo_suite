@@ -852,7 +852,12 @@ function renderArchive(data) {
     tile("归档帖子", data.posts || 0, "", enabled ? "ok" : "err"),
     tile("媒体", media.total || 0, `已下载 ${media.downloaded || 0}`),
     tile("图床完成", media.bed || 0, `缩略图 ${media.thumb || 0}`),
-    tile("向量完成", media.vector || 0, `失败 ${media.failed || 0}`, media.failed ? "err" : "ok"),
+    tile(
+      "向量完成",
+      media.vector || 0,
+      `失败 ${media.failed || 0} · 放弃 ${media.abandoned || 0}`,
+      media.failed || media.abandoned ? "err" : "ok"
+    ),
     tile("文案已清洗", copy.cleaned || 0, `共 ${copy.total || 0}`)
   );
   const rows = data.recent || [];

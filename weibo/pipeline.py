@@ -474,7 +474,19 @@ class PipelineMixin:
         max_attempts = max(1, self._pipeline_int("max_attempts", 3))
         limit = self._pipeline_int("images_per_post_limit", 0)
         stats["skipped"] = sum(1 for row in rows if _media_rank(row) >= _VECTOR_RANK)
-        pending_rows = [row for row in rows if _media_rank(row) < _VECTOR_RANK]
+        abandoned_rows = [
+            row
+            for row in rows
+            if _media_rank(row) < _VECTOR_RANK
+            and _pipeline_int(_row_get(row, "attempts", 0), 0) >= max_attempts
+        ]
+        stats["exhausted"] = len(abandoned_rows)
+        pending_rows = [
+            row
+            for row in rows
+            if _media_rank(row) < _VECTOR_RANK
+            and _pipeline_int(_row_get(row, "attempts", 0), 0) < max_attempts
+        ]
         if limit > 0:
             pending_rows = pending_rows[:limit]
         if not pending_rows:
@@ -531,7 +543,18 @@ class PipelineMixin:
                         # find_by_phash 会同步扫库，直接调会卡住事件循环
                         hit = await asyncio.to_thread(services.library.find_by_phash, phash)
                         if hit is not None and str(_row_get(hit, "image_url", "") or "").strip():
-                            await asyncio.to_thread(store.mark_media, mid, pid, "vector")
+                            # 复用图库已有图时把直链/缩略图回填到本行：否则本条归档
+                            # 永久缺 URL，详情页与直链导出都看不到这张图。
+                            hit_url = str(_row_get(hit, "image_url", "") or "").strip()
+                            hit_thumb = str(_row_get(hit, "thumb_url", "") or "").strip()
+                            await asyncio.to_thread(
+                                store.mark_media,
+                                mid,
+                                pid,
+                                "vector",
+                                image_url=hit_url,
+                                thumb_url=hit_thumb or None,
+                            )
                             stats["skipped"] += 1
                             continue
                     index = _pipeline_int(_row_get(row, "idx", position - 1), position - 1) + 1
@@ -789,7 +812,11 @@ class PipelineMixin:
         try:
             rows = list(
                 await asyncio.to_thread(
-                    store.list_posts_for_pipeline, None, done_state="vector", limit=limit
+                    store.list_posts_for_pipeline,
+                    None,
+                    done_state="vector",
+                    limit=limit,
+                    max_attempts=self._pipeline_int("max_attempts", 3),
                 )
                 or []
             )
@@ -823,12 +850,17 @@ class PipelineMixin:
         if store is None:
             return stats
         try:
-            rows = store.list_posts_for_pipeline(None, done_state="vector", limit=200)
+            rows = store.list_posts_for_pipeline(
+                None,
+                done_state="vector",
+                limit=200,
+                max_attempts=self._pipeline_int("max_attempts", 3),
+            )
             stats["posts"] = len(rows or [])
         except Exception as exc:
             stats["last_error"] = str(exc)[:200]
         try:
-            stats["media"] = store.media_stats()
+            stats["media"] = store.media_stats(max_attempts=self._pipeline_int("max_attempts", 3))
         except Exception as exc:
             stats["last_error"] = str(exc)[:200]
         return stats
@@ -848,5 +880,7 @@ class PipelineMixin:
             lines.append(f"媒体：共 {media.get('total', 0)} 张（{counts}）")
             if media.get("failed"):
                 lines.append(f"失败待重试：{media['failed']} 张")
+            if media.get("abandoned"):
+                lines.append(f"已放弃（达到重试上限）：{media['abandoned']} 张")
         lines.append(f"最近错误：{stats.get('last_error') or '无'}")
         return "\n".join(lines)

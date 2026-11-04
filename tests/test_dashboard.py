@@ -32,8 +32,16 @@ class FakeStore:
     def count_posts(self):
         return 3
 
-    def media_stats(self):
-        return {"total": 4, "downloaded": 3, "bed": 2, "thumb": 2, "vector": 1, "failed": 1}
+    def media_stats(self, uid=None, *, max_attempts=None):
+        return {
+            "total": 4,
+            "downloaded": 3,
+            "bed": 2,
+            "thumb": 2,
+            "vector": 1,
+            "failed": 1,
+            "abandoned": 0,
+        }
 
     def copy_stats(self):
         return {"total": 3, "cleaned": 2, "long": 1, "retweet": 0, "with_pics": 3}

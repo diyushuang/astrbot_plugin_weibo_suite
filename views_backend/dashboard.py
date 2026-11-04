@@ -1025,7 +1025,11 @@ class DashboardAPI:
             )
         try:
             posts = await asyncio.to_thread(store.count_posts)
-            media = await asyncio.to_thread(store.media_stats)
+            max_attempts = 3
+            read_limit = getattr(p, "_pipeline_int", None)
+            if callable(read_limit):
+                max_attempts = max(1, read_limit("max_attempts", 3))
+            media = await asyncio.to_thread(lambda: store.media_stats(max_attempts=max_attempts))
             copylib = await asyncio.to_thread(store.copy_stats)
             recent = await p.archive_query("", limit=8, offset=0)
         except Exception as exc:

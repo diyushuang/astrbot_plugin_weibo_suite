@@ -656,19 +656,35 @@ class ArchiveStore:
         return [_post_row_to_dict(row) for row in rows]
 
     def list_posts_for_pipeline(
-        self, uid: str | None = None, *, done_state: str = "vector", limit: int = 200
+        self,
+        uid: str | None = None,
+        *,
+        done_state: str = "vector",
+        limit: int = 200,
+        max_attempts: int | None = None,
     ) -> list[dict]:
         """列出「还有图没跑到 done_state」的帖子（图床管线补跑用）。
 
         只回帖子关键列与进度计数：media_total 为该帖入库图片数，media_done
         为已达到 done_state 的数量；两者相等即整帖跑完。按 created_at DESC
         排序——新帖先跑，用户能尽快在新内容上看到效果。
+
+        ``max_attempts`` 给定时，attempts 已达上限的图片按「已放弃」计入
+        media_done：整帖不会因为一张永远失败的图而被每轮重新选中重算。
         """
         rank = _MEDIA_STATE_RANK.get(str(done_state))
         if rank is None:
             raise ValueError(f"非法的媒体状态: {done_state}")
+        attempt_limit = max(0, _to_int(max_attempts, 0)) if max_attempts is not None else 0
         where = " WHERE p.uid = ?" if uid else ""
         params: list[Any] = [rank]
+        if attempt_limit:
+            done_expr = (
+                "COALESCE(SUM(CASE WHEN m.state_rank >= ? OR m.attempts >= ? THEN 1 ELSE 0 END), 0)"
+            )
+            params.append(attempt_limit)
+        else:
+            done_expr = "COALESCE(SUM(CASE WHEN m.state_rank >= ? THEN 1 ELSE 0 END), 0)"
         if uid:
             params.append(str(uid))
         params.append(max(1, _to_int(limit, 200)))
@@ -680,7 +696,7 @@ class ArchiveStore:
                 "SELECT p.mid AS mid, p.uid AS uid, p.author AS author,"
                 " p.created_at AS created_at, p.pic_total AS pic_total,"
                 " COUNT(m.pid) AS media_total,"
-                " COALESCE(SUM(CASE WHEN m.state_rank >= ? THEN 1 ELSE 0 END), 0)"
+                f" {done_expr}"
                 " AS media_done"
                 " FROM posts p JOIN media m ON m.mid = p.mid"
                 f"{where}"
@@ -1027,8 +1043,13 @@ class ArchiveStore:
         size: int | None = None,
         error: str | None = None,
         thumb_url: str | None = None,
+        image_url: str | None = None,
     ) -> None:
-        """推进媒体状态；rank 只前进不后退，状态推进时写对应时间戳列。"""
+        """推进媒体状态；rank 只前进不后退，状态推进时写对应时间戳列。
+
+        ``image_url`` 只用于「复用图库里已有的图」时回填直链：空串视为未提供，
+        不会把行上已有的 URL 覆盖成空。
+        """
         if state not in _MEDIA_STATE_RANK:
             raise ValueError(f"非法的媒体状态: {state}")
         new_rank = _MEDIA_STATE_RANK[state]
@@ -1064,6 +1085,11 @@ class ArchiveStore:
             if thumb_url is not None:
                 assignments.append("thumb_url = ?")
                 params.append(str(thumb_url))
+            if image_url is not None:
+                url = str(image_url).strip()
+                if url:
+                    assignments.append("url = ?")
+                    params.append(url)
             assignments.append("updated_at = ?")
             params.append(_utc_iso())
             params.extend([str(mid), str(pid)])
@@ -1094,29 +1120,54 @@ class ArchiveStore:
             connection.commit()
         return attempts
 
-    def media_stats(self, uid: str | None = None) -> dict:
-        """媒体状态计数（"达到或超过该 rank"），failed = pending 且 attempts>0。"""
+    def media_stats(self, uid: str | None = None, *, max_attempts: int | None = None) -> dict:
+        """媒体状态计数（"达到或超过该 rank"），failed = pending 且 attempts>0。
+
+        传入 ``max_attempts`` 时额外返回 abandoned：还没到 vector、但重试次数
+        已达上限的图片数；此时 failed 只统计「还在重试」的图（attempts 未达
+        上限），避免面板把同一张图同时算作「失败待重试」和「已放弃」。
+        """
+        attempt_limit = max(0, _to_int(max_attempts, 0)) if max_attempts is not None else 0
+        params: tuple[Any, ...] = ()
+        failed_sql = (
+            ", COALESCE(SUM(CASE WHEN m.state = 'pending' AND m.attempts > 0"
+            " THEN 1 ELSE 0 END), 0) AS failed"
+        )
+        abandoned_sql = ""
+        if attempt_limit:
+            failed_sql = (
+                ", COALESCE(SUM(CASE WHEN m.state = 'pending' AND m.attempts > 0"
+                " AND m.attempts < ? THEN 1 ELSE 0 END), 0) AS failed"
+            )
+            params = (attempt_limit,)
+            rank = _MEDIA_STATE_RANK["vector"]
+            abandoned_sql = (
+                ", COALESCE(SUM(CASE WHEN m.state_rank < ? AND m.attempts >= ?"
+                " THEN 1 ELSE 0 END), 0) AS abandoned"
+            )
+            params = (*params, rank, attempt_limit)
         if uid:
             source = " FROM media m JOIN posts p ON p.mid = m.mid WHERE p.uid = ?"
-            params: tuple[Any, ...] = (str(uid),)
+            params = (*params, str(uid))
         else:
             source = " FROM media m"
-            params = ()
         with self._lock:
             connection = self._connection()
             if connection is None:
-                return _empty_stats()
+                stats = _empty_stats()
+                if attempt_limit:
+                    stats["abandoned"] = 0
+                return stats
             row = connection.execute(
-                "SELECT COUNT(*) AS total, "
-                + _STATE_SEL
-                + ", COALESCE(SUM(CASE WHEN m.state = 'pending' AND m.attempts > 0"
-                " THEN 1 ELSE 0 END), 0) AS failed" + source,
+                "SELECT COUNT(*) AS total, " + _STATE_SEL + failed_sql + abandoned_sql + source,
                 params,
             ).fetchone()
         stats = {"total": _to_int(row["total"])}
         for state in MEDIA_STATES:
             stats[state] = _to_int(row[f"{state}_count"])
         stats["failed"] = _to_int(row["failed"])
+        if attempt_limit:
+            stats["abandoned"] = _to_int(row["abandoned"])
         return stats
 
     def media_file(self, mid: str, pid: str) -> Path | None:
