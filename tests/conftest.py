@@ -549,6 +549,14 @@ def data_dir(tmp_path, monkeypatch):
     所以真宿主下必须把它也指到 tmp_path。monkeypatch 负责还原。
     """
     _DATA_DIR["path"] = str(tmp_path)
+    # 插件配置文件的落盘位置也要隔离：`config is None` 时会按 schema 默认值造
+    # 一份可落盘的配置对象，真宿主下它默认写进程级 ASTRBOT_ROOT/data/config，
+    # 不隔离就会把"新装"用例互相污染（前一条写过 300，后一条读到的就不是默认值）。
+    import astrbot.core.utils.astrbot_path as host_path
+
+    monkeypatch.setattr(
+        host_path, "get_astrbot_config_path", lambda: str(tmp_path / "config"), raising=False
+    )
     if _REAL_HOST:
         from astrbot.api.star import StarTools
 

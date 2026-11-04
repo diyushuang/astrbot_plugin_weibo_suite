@@ -270,6 +270,12 @@ def test_schema_to_default_config_matches_host_algorithm():
     assert conf["image_delivery"] == {}
     assert conf["qq_upload"] == {}
 
+    # 插件侧按同一算法复刻的默认值（config 缺失时用来建可落盘的配置对象）必须
+    # 与宿主结果一致，否则"新装默认值"会和面板显示/宿主实际值分叉。
+    from astrbot_plugin_weibo_suite.weibo.plugin import _schema_default_config
+
+    assert _schema_default_config(_schema()) == conf
+
 
 def test_documented_config_key_count_matches_schema():
     """README 与配置手册里的「180 个配置键」必须与 schema 同步。

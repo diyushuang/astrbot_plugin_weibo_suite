@@ -113,11 +113,14 @@ def test_construct_with_context_only(data_dir):
 
     star_manager 只有在 data/config/<目录名>_config.json 已存在时才传 config，
     否则走 `star_cls_type(context=...)`；__init__ 把 config 写成必填参数会让
-    WebUI 只显示"插件加载失败"且不给原因。
+    WebUI 只显示"插件加载失败"且不给原因。缺失时也必须拿到按 schema 默认值
+    生成、可落盘的配置对象，不能退回空字典（否则设置页保存不落盘）。
     """
     plugin = WeiboSuitePlugin(_Context())
-    assert plugin.config == {}
-    assert plugin._trace_plugin is not None
+    assert plugin.config["monitor"]["poll_interval"] == 120
+    assert plugin.config["basic"]["hash_size"] == 16
+    assert plugin._trace_plugin.config is plugin.config, "两个域必须共用同一份配置对象"
+    assert callable(getattr(plugin.config, "save_config", None))
     assert plugin._weibo_initialized is False
     assert plugin._trace_initialized is False
 

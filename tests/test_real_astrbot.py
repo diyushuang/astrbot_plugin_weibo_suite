@@ -63,6 +63,7 @@ SMOKE = textwrap.dedent(
     """
     import asyncio
     import inspect
+    import os
 
     import astrbot
     from astrbot.api import web as web_api
@@ -105,8 +106,13 @@ SMOKE = textwrap.dedent(
 
     # 1) 宿主的"只传 context"路径：新装 / 配置文件被删时走这条
     plugin = WeiboSuitePlugin(Ctx())
-    assert plugin.config == {}, plugin.config
-    assert plugin._trace_plugin is not None
+    # 缺失配置时必须按 _conf_schema.json 默认值造一份可落盘的对象，不能退回
+    # {}（否则设置页 _save_config 没有 save_config() 可调，保存静默不落盘）。
+    assert plugin.config["monitor"]["poll_interval"] == 120, plugin.config
+    assert plugin._trace_plugin.config is plugin.config, "两个域必须共用同一份配置对象"
+    assert callable(getattr(plugin.config, "save_config", None))
+    # 真宿主下它就是 AstrBotConfig，构造时已按 schema 把默认配置写到 config_path
+    assert os.path.isfile(plugin.config.config_path), plugin.config.config_path
     assert plugin._weibo_initialized is False
     assert plugin._trace_initialized is False
 

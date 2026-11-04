@@ -27,7 +27,10 @@ class WeiboSuitePlugin(_WeiboMonitorPlugin, _SnsCommandsMixin):
         super().__init__(context, config)
         # Both domains use the suite's plugin_data directory but own separate
         # SQLite/cache handles and lifecycle resources.
-        self._trace_plugin = _ImageTracePlugin(context, config if config is not None else {})
+        # 溯源域必须复用微博域刚建的同一份配置：宿主没传 config 时 super() 已按
+        # schema 默认值造了可落盘的对象，这里再建一个 {} 会让设置页保存到前者、
+        # 重建读后者，面板改的值永远不生效。
+        self._trace_plugin = _ImageTracePlugin(context, self.config)
         self._trace_initialized = False
         self._weibo_initialized = False
 

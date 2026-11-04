@@ -38,12 +38,20 @@
 - **落盘失败回滚漏掉平铺键**（`views_backend/settings_api.py`）：分组原本不存在时回滚只
   `pop` 分组，`_sync_config_groups` 已写进平铺镜像键的新值会留在内存里。现在 `touched`
   同时快照对应平铺键的存在性与旧值，回滚时恢复或删除后再同步一次。
+- **新装 / 配置缺失时设置页存不了**（`weibo/plugin.py`、`main.py`）：宿主只在该插件的
+  `data/config/<目录名>_config.json` 已存在时才传 `AstrBotConfig`，新装或配置文件被删
+  时走"只传 context"的构造路径，原实现给微博域与溯源域各建了一个 `{}`。设置页的
+  `_save_config` 找不到 `save_config()` 可调，却照样返回保存成功，磁盘上什么都没写；
+  保存后的重建读的还是同一份空快照，面板改的值永远不生效。现在缺失时按
+  `_conf_schema.json` 的默认值构造与宿主同路径、支持 `save_config()` 的配置对象，
+  两个域共用同一引用，保存后重启与设置页重建都能读到新值。
 
 ### 文档与测试
 
 - 新增 `docs/SETTINGS_MAP.md`（由 `scripts/gen_settings_map.py` 从同一份目录生成）
   与 `tests/test_settings.py`：覆盖 180 键、默认值回环、secret 不回显、400 不落盘、
-  落盘失败回滚（含账号运行态）。
+  落盘失败回滚（含账号运行态），以及"新装无配置 → 设置页改一项 → 保存落盘 →
+  运行期与重建都读到新值"。
 
 ## v0.9.2 - 2026-11-02
 

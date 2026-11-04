@@ -17,8 +17,11 @@ from pathlib import Path
 
 import pytest
 
+from astrbot_plugin_weibo_suite.main import WeiboSuitePlugin
 from astrbot_plugin_weibo_suite.trace.features import phash_hex_len
 from astrbot_plugin_weibo_suite.views_backend import settings_api, settings_schema
+
+from .conftest import _Context
 
 
 class Resp:
@@ -397,6 +400,48 @@ async def test_settings_save_works_on_real_weibo_plugin(make_weibo_plugin, monke
     assert plugin.config["poll_interval"] == 600
     assert plugin.config["message_format"] == "测试模板 {name}"
     assert plugin.accounts["123456"]["name"] == "123456"
+
+
+async def test_new_install_without_config_can_save_and_reinit(data_dir, monkeypatch):
+    """新装（宿主只传 context）：设置页保存要真落盘，重建要读到新值。
+
+    之前 config 缺失时微博域与溯源域各建一个 `{}`，设置页的 `_save_config`
+    找不到 `save_config()` 只能静默返回成功，磁盘上什么都没写；重建再读同一份
+    空快照，面板改的值永远不生效。
+    """
+    plugin = WeiboSuitePlugin(_Context())
+    assert plugin.config["monitor"]["poll_interval"] == 120, "新装没有按 schema 默认值生成配置"
+    assert plugin._trace_plugin.config is plugin.config, "两个域必须共用同一份配置对象"
+
+    monkeypatch.setattr(settings_api, "_WEB_AVAILABLE", True)
+    monkeypatch.setattr(settings_api, "json_response", lambda payload: Resp(payload))
+    monkeypatch.setattr(
+        settings_api,
+        "error_response",
+        lambda message, status_code=400: Resp({"status": "error", "message": message}, status_code),
+    )
+    api = settings_api.SettingsAPI(plugin, "astrbot_plugin_weibo_suite", "v0.9.2")
+    monkeypatch.setattr(
+        settings_api,
+        "web_request",
+        FakeRequest({"values": {"monitor.poll_interval": 300, "basic.hash_size": 8}}),
+    )
+    response = await api.save_settings()
+
+    assert response.status_code == 200
+    assert response.payload["saved"] == 2
+    assert response.payload["reinit_ok"] is True
+
+    # 运行期读到新值；溯源域重建后也不是旧快照
+    assert plugin._int_cfg("poll_interval", 120) == 300
+    assert plugin.config["poll_interval"] == 300, "保存没有同步到微博域平铺镜像键"
+    assert plugin._trace_plugin.hash_size == 8
+
+    # 真落盘：配置对象绑定的宿主配置路径里确实写进了新值
+    target = getattr(plugin.config, "_config_path", None) or plugin.config.config_path
+    saved = json.loads(Path(target).read_text(encoding="utf-8-sig"))
+    assert saved["monitor"]["poll_interval"] == 300
+    assert saved["basic"]["hash_size"] == 8
 
 
 async def test_save_failure_keeps_runtime_account_state(make_weibo_plugin, monkeypatch):

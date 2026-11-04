@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import weakref
 
 from ..views_backend.dashboard import register_dashboard
@@ -72,6 +73,103 @@ WEIBO_CFG_PATHS: dict[str, tuple[str, str]] = {
 
 WEIBO_LAYOUT_VERSION = "1"
 
+_SCHEMA_PATH = Path(__file__).resolve().parents[1] / "_conf_schema.json"
+
+# 宿主 AstrBotConfig._config_schema_to_default_config 的 DEFAULT_VALUE_MAP：
+# schema 节点缺 default 时按类型取这个缺省值。保持同一份映射，避免面板显示
+# 的默认值与运行期实际值不一致。
+_SCHEMA_VALUE_MAP: dict[str, Any] = {
+    "string": "",
+    "text": "",
+    "int": 0,
+    "float": 0.0,
+    "bool": False,
+    "list": [],
+    "dict": {},
+    "template_list": [],
+    "file": [],
+}
+
+
+def _schema_default_config(node: dict) -> dict:
+    """复刻宿主生成默认配置的算法（object 走 items 递归，其余取 default）。"""
+    conf: dict = {}
+    for key, field in node.items():
+        if not isinstance(field, dict) or "type" not in field:
+            continue
+        kind = field.get("type")
+        if kind == "object":
+            conf[key] = _schema_default_config(field.get("items") or {})
+        elif "default" in field:
+            conf[key] = copy.deepcopy(field["default"])
+        else:
+            conf[key] = copy.deepcopy(_SCHEMA_VALUE_MAP.get(kind))
+    return conf
+
+
+def _plugin_config_path() -> Path | None:
+    """宿主给本插件分配的配置文件路径（data/config/<插件目录名>_config.json）。"""
+    try:
+        from astrbot.core.utils.astrbot_path import get_astrbot_config_path
+
+        return Path(get_astrbot_config_path()) / f"{PLUGIN_NAME}_config.json"
+    except Exception:
+        pass
+    try:
+        from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+
+        return Path(get_astrbot_data_path()) / "config" / f"{PLUGIN_NAME}_config.json"
+    except Exception as exc:  # 极端环境（测试桩/裁剪版宿主）下退化为内存配置
+        logger.warning(f"{PLUGIN_NAME} 无法解析插件配置路径（改动只在内存生效）: {exc!r}")
+        return None
+
+
+class _SchemaDefaultConfig(dict):
+    """宿主没传配置对象时的兜底：schema 默认值 + 与宿主同路径的 save_config()。
+
+    正常宿主（AstrBot 4.28/4.29）会先构造 `AstrBotConfig(<data>/config/<插件目录
+    名>_config.json, schema=_conf_schema.json)` 再传进来；只有配置对象构造失败
+    （schema 缺失等异常）才会走到这里。保持 dict 语义，按宿主同一路径写 JSON，
+    设置页保存后重启仍能读到，不会再"保存成功但磁盘没动"。
+    """
+
+    def __init__(self, data: dict, path: Path | None):
+        super().__init__(data)
+        self._config_path = path
+
+    def save_config(self, *_args: Any, **_kwargs: Any) -> None:
+        if self._config_path is None:
+            logger.warning(
+                f"{PLUGIN_NAME} 插件配置没有可写路径，本次改动只保存在内存（重启会丢失）"
+            )
+            return
+        self._config_path.parent.mkdir(parents=True, exist_ok=True)
+        self._config_path.write_text(
+            json.dumps(dict(self), ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+
+def _default_config() -> dict:
+    """`config is None` 时的配置对象：优先造宿主同款 AstrBotConfig，失败再兜底。
+
+    宿主签名已按 AstrBot 4.29 源码核对：`AstrBotConfig(config_path,
+    default_config=DEFAULT_CONFIG, schema=None)`；传 schema 时默认值由宿主按
+    schema 生成，文件不存在时宿主会自己写入，`save_config()` 与宿主共用同一
+    实现。拿不到宿主类时退回 `_SchemaDefaultConfig`，保证设置页仍能落盘。
+    """
+    try:
+        schema = json.loads(_SCHEMA_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning(f"{PLUGIN_NAME} 读取 _conf_schema.json 失败，配置兜底为空: {exc!r}")
+        schema = {}
+    path = _plugin_config_path()
+    if path is not None:
+        try:
+            return AstrBotConfig(str(path), schema=schema)
+        except Exception as exc:
+            logger.debug(f"{PLUGIN_NAME} 构造宿主配置对象失败，改用 schema 默认值兜底: {exc!r}")
+    return _SchemaDefaultConfig(_schema_default_config(schema), path)
+
 
 def _resolve_data_dir() -> Path | None:
     """插件数据目录；取不到就返回 None，绝不用当前工作目录顶上。
@@ -109,8 +207,11 @@ class WeiboMonitorPlugin(
         super().__init__(context)
         # 保持传入对象的原样引用，不要 dict(config) 拷贝一份：加载器给的是
         # AstrBotConfig，面板改配置后要靠它自身的 save_config() 落盘，拷贝成
-        # 纯 dict 会把这条回写通路切断（配置改了但重启即丢）。
-        self.config: dict = config if config is not None else {}
+        # 纯 dict 会把这条回写通路切断（配置改了但重启即丢）。宿主没传配置时
+        # 不能退回 {}：那样设置页的 _save_config 没有 save_config() 可调，会
+        # 静默"保存成功"而磁盘上什么都没写。按 schema 默认值造一份与宿主同路径、
+        # 可落盘的配置对象，两个域共用这一份引用。
+        self.config: dict = config if config is not None else _default_config()
         self._http: aiohttp.ClientSession | None = None
         self._poll_task: asyncio.Task | None = None
         self._checking = False
