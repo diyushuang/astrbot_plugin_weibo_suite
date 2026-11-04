@@ -1090,6 +1090,46 @@ def test_invalid_json_context_redacts_signature_inside_window():
     assert len(after) <= 80
 
 
+def test_invalid_json_context_anchor_survives_bare_secret_redaction():
+    """同一段响应里既有 URL 又有裸 query：位置映射仍把锚点落在原文位置附近。"""
+    head = "a" * 100
+    tail = "z" * 100
+    body = (
+        head
+        + " https://internal.example.com/v1/embed?X-Amz-Signature=deadbeefcafebabe"
+        + " access_token=ghp_secretvalue_and_more "
+        + tail
+    )
+    # 解析位置落在裸 query 的值中间：前缀里没有完整 key=value，映射要能补正
+    position = body.index("ghp_") + 8
+
+    before, after = _invalid_json_context(body, position)
+
+    combined = before + after
+    assert "X-Amz-Signature" not in combined
+    assert "deadbeefcafebabe" not in combined
+    assert "ghp_secretvalue_and_more" not in combined
+    assert "internal.example.com" not in combined
+    assert "access_token=" in combined
+    assert "<凭据已隐藏>" in combined
+    assert len(before) <= 80
+    assert len(after) <= 80
+    # 锚点被占位符覆盖时挪到占位符之后，后窗口仍从原文位置往后读
+    assert after.lstrip().startswith("z")
+
+
+def test_invalid_json_context_keeps_tail_when_bare_secret_expands_text():
+    """裸凭据替换会加长文本：按原文长度截断会把尾部片段切掉。"""
+    body = "x" * 120 + " password=abcd"
+
+    before, after = _invalid_json_context(body, None)
+
+    combined = before + after
+    assert "password=<凭据已隐藏>" in combined
+    assert "abcd" not in combined
+    assert not combined.endswith("…")
+
+
 def test_invalid_json_context_redacts_signed_url_and_truncates():
     """解析片段会进 /errors 面板：必须先脱敏 URL，再截到窗口长度。"""
     body = (

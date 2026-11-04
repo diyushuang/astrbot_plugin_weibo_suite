@@ -29,6 +29,12 @@
 - **签到对同一张图重复反查缩略图**（`trace/checkin_mixin.py`）：发送链路已按同一
   id 查过且没查到替身时，卡片合成直接回退原图，不再查第二遍 Qdrant；
   `/随机图` 的 `send_thumbnail` 默认口径不变。
+- **无 scheme 的裸 query 不脱敏**（`shared/common.py`）：URL 规则只认 `scheme://`，
+  网关回显进异常文本的 `X-Amz-Signature=...`、`access_token=...` 等会原样落进
+  `errors.log`、`/errors` 面板与 embedding 诊断片段。现在 `sanitize_error_text`
+  在 URL/IP 之后追加保守的 `key=value` 规则：只替换等号右侧的值（≥4 字符才打码，
+  短值视为占位示例），键名保留便于诊断；`key: value` 与非白名单键不动，避免误伤。
+  该规则会加长文本，`limit=None` 供需要按原文位置对照窗口的调用方绕过截断。
 
 ## v0.9.3 - 2026-11-04
 

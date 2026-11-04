@@ -13,15 +13,15 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
-from .common import sanitize_error_text
+from .common import ADDRESS_PLACEHOLDER, CREDENTIAL_PLACEHOLDER, sanitize_error_text
 
 ERRLOG_BUFFER = 2000
 ERRLOG_MAX_BYTES = 512 * 1024
 PLUGIN_THREAD_TAG = "weibo-suite"
 
 # 面板/日志回放的错误文本统一脱敏：采集侧存的是完整异常，常带图床 URL、
-# 带签名的查询串和代理凭据。URL 与裸 IP 复用 common.sanitize_error_text 的
-# 口径（同一个占位符），这里只补它没覆盖的几类。
+# 带签名的查询串和代理凭据。URL、裸 IP 与裸 key=value 复用
+# common.sanitize_error_text 的口径（统一占位符），这里只补它没覆盖的几类。
 _QUERY_SECRET_RE = re.compile(
     r"(?i)([?&](?:token|access_token|auth|authcode|sign|signature|key|secret|password|passwd)=)[^&\s'\"<>]+"
 )
@@ -56,9 +56,9 @@ def _redact_error_msg(value: Any, limit: int = ERRLOG_MSG_LIMIT) -> str:
         return ""
     # 先按既有口径隐藏 URL / IP。limit 给足长度：截断后再匹配会把 URL 剩半截
     text = sanitize_error_text(raw, limit=max(len(raw), 1))
-    text = _QUERY_SECRET_RE.sub(r"\1<凭据已隐藏>", text)
-    text = _PROXY_USERINFO_RE.sub("<凭据已隐藏>", text)
-    text = _BARE_FILE_PATH_RE.sub("<地址已隐藏>", text)
+    text = _QUERY_SECRET_RE.sub(rf"\1{CREDENTIAL_PLACEHOLDER}", text)
+    text = _PROXY_USERINFO_RE.sub(CREDENTIAL_PLACEHOLDER, text)
+    text = _BARE_FILE_PATH_RE.sub(ADDRESS_PLACEHOLDER, text)
     if len(text) > limit:
         text = text[:limit].rstrip() + "…"
     return text

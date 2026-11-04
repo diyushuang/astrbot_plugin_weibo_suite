@@ -136,23 +136,69 @@ def as_float(value: Any, default: float) -> float:
 
 
 # 用户可见文案里的 URL / 裸 IPv4：错误详情只进日志，不能把内网地址带进群聊
+ADDRESS_PLACEHOLDER = "<地址已隐藏>"
+CREDENTIAL_PLACEHOLDER = "<凭据已隐藏>"
 _URL_IN_TEXT_RE = re.compile(r"(?:https?|ftp)://[^\s'\"<>，。；：、）】]+", re.IGNORECASE)
 _IPV4_IN_TEXT_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?\b")
 
+# 裸 key=value（没有 scheme 的签名串、被网关回显进异常文本的 token）：URL 规则
+# 只认 scheme，`X-Amz-Signature=...` 这类纯文本串会整段漏过去。这里只打等号右侧
+# 的值、保留键名，便于定位是哪一项凭据。键名白名单保持保守，且只认 `=`——
+# `key: value` 多是正常叙述（如 "auth: failed"），按冒号匹配误伤面太大。
+_SECRET_KEY_NAMES = (
+    "x-amz-signature",
+    "x-amz-credential",
+    "x-amz-security-token",
+    "access_token",
+    "refresh_token",
+    "api_key",
+    "apikey",
+    "signature",
+    "sign",
+    "secret",
+    "password",
+    "pwd",
+    "token",
+    "auth",
+)
+# 值至少 4 个字符才打码：1-3 字符基本是 `token=x` 这类占位/示例，打掉只会让
+# 诊断信息消失，也扛不住真正的凭据熵。
+_SECRET_KV_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9_-])(" + "|".join(_SECRET_KEY_NAMES) + r")="
+    r"(?:'([^'\s<>]{4,})'|\"([^\"\s<>]{4,})\"|([^\s&'\"<>，。；：、）】]{4,}))"
+)
 
-def sanitize_error_text(value: Any, limit: int = 200) -> str:
-    """把异常文本收敛成可进群聊的短句：隐藏 URL 与 IP，并截断长度。
+
+def _hide_secret_value(match: re.Match[str]) -> str:
+    """保留键名与引号，只替换等号右侧的值。"""
+    key = match.group(1)
+    if match.group(2) is not None:
+        return f"{key}='{CREDENTIAL_PLACEHOLDER}'"
+    if match.group(3) is not None:
+        return f'{key}="{CREDENTIAL_PLACEHOLDER}"'
+    return f"{key}={CREDENTIAL_PLACEHOLDER}"
+
+
+def sanitize_error_text(value: Any, limit: int | None = 200) -> str:
+    """把异常文本收敛成可进群聊的短句：隐藏 URL、IP 与裸凭据键值，并截断长度。
 
     仅用于**用户可见**的错误提示；完整异常仍应写日志。管理员配置的图床
     地址可能含内网 IP 或带签名的查询串，异常字符串常把它们原样拼进去。
+    顺序固定为「URL/IP → 裸 key=value」：先整条隐藏带 scheme 的地址，键值规则
+    就不会再把它切碎成占位符套占位符的形状。
+
+    ``limit=None`` 供需要按原文长度对照位置的调用方使用（如 embedding 诊断
+    片段）：裸凭据替换会改写文本长度，按原文长度截断会切掉尾部、让位置映射
+    落空。
     """
     text = str(value or "").strip()
     if not text:
         return "未知错误（详情见机器人日志）"
-    text = _URL_IN_TEXT_RE.sub("<地址已隐藏>", text)
-    text = _IPV4_IN_TEXT_RE.sub("<地址已隐藏>", text)
+    text = _URL_IN_TEXT_RE.sub(ADDRESS_PLACEHOLDER, text)
+    text = _IPV4_IN_TEXT_RE.sub(ADDRESS_PLACEHOLDER, text)
+    text = _SECRET_KV_RE.sub(_hide_secret_value, text)
     text = re.sub(r"\s+", " ", text).strip()
-    if len(text) > limit:
+    if limit is not None and len(text) > limit:
         text = text[:limit].rstrip() + "…"
     return text
 

@@ -39,7 +39,14 @@ except Exception:  # 兼容独立模块加载/本地自测环境
     logger = logging.getLogger("vector_search")
 
 try:
-    from ..shared.common import as_float, as_int, read_bytes, sanitize_error_text
+    from ..shared.common import (
+        ADDRESS_PLACEHOLDER,
+        CREDENTIAL_PLACEHOLDER,
+        as_float,
+        as_int,
+        read_bytes,
+        sanitize_error_text,
+    )
     from ..shared.http import (
         HttpClientGetter,
         ResponseTooLargeError,
@@ -55,6 +62,8 @@ except ImportError:  # 兼容插件以独立模块方式加载
     from random_media import strip_thumbnail_prefix  # type: ignore[no-redef]
 
     from astrbot_plugin_weibo_suite.shared.common import (  # type: ignore[no-redef]
+        ADDRESS_PLACEHOLDER,
+        CREDENTIAL_PLACEHOLDER,
         as_float,
         as_int,
         read_bytes,
@@ -104,20 +113,31 @@ class InvalidEmbeddingJSON(Exception):
         self.position = position
 
 
-_REDACTION_TOKEN = "<地址已隐藏>"
+_PLACEHOLDER_TOKENS = (ADDRESS_PLACEHOLDER, CREDENTIAL_PLACEHOLDER)
 
 
 def _sanitized_position(body: str, position: int, sanitized_len: int) -> int:
     """把原文位置映射到整段脱敏后的文本位置。
 
-    跨窗口边界的长 URL 在「整段脱敏」与「只脱敏前缀」时都会被整体替换成同一个
-    占位符，长度差只可能来自边界处空白折叠，属于几个字符的误差，对诊断窗口足够。
-    前缀为空（全是空白）时直接钳到 0，避免 empty 输入拿到「未知错误」占位文本。
+    跨窗口边界的长 URL 或裸 ``key=value`` 在「整段脱敏」与「只脱敏前缀」时都会
+    被整体替换成同一占位符，长度差只可能来自边界处空白折叠，属于几个字符的
+    误差，对诊断窗口足够。前缀为空（全是空白）时直接钳到 0，避免 empty 输入
+    拿到「未知错误」占位文本。
     """
     if position <= 0 or not body[:position].strip():
         return 0
-    prefix = sanitize_error_text(body[:position], limit=len(body))
+    # limit=None：裸凭据替换会加长文本，按原文长度截断会切掉尾部、让映射落空
+    prefix = sanitize_error_text(body[:position], limit=None)
     return max(0, min(len(prefix), sanitized_len))
+
+
+def _align_past_placeholder(sanitized: str, anchor: int) -> int:
+    """锚点落在占位符内部时挪到它后面，避免窗口从半个占位符开始。"""
+    for token in _PLACEHOLDER_TOKENS:
+        start = sanitized.rfind(token, 0, anchor + len(token))
+        if start != -1 and start + len(token) > anchor:
+            anchor = start + len(token)
+    return anchor
 
 
 def _invalid_json_context(text: str, position: int | None, window: int = 80) -> tuple[str, str]:
@@ -127,19 +147,16 @@ def _invalid_json_context(text: str, position: int | None, window: int = 80) -> 
     errors.log 并被 /errors 面板读出来，所以**先整段脱敏、再切窗口**：
     窗口起点一旦落在长 URL 中间，片段里没有 scheme，正则匹配不到，
     ``X-Amz-Signature`` 之类的查询串会原样落进日志（审查时已实测复现）。
-    脱敏会改写长度（URL → 占位符），因此位置先用原前缀长度映射，再把锚点
-    对齐到占位符之后，避免窗口从半个占位符开始。
+    脱敏会改写长度（URL / 裸 ``key=value`` → 占位符），因此位置先用原前缀长度
+    映射，再把锚点对齐到占位符之后，避免窗口从半个占位符开始。
     """
     body = str(text or "")
     if not body:
         return "", ""
     pos = len(body) if position is None else max(0, min(int(position), len(body)))
-    sanitized = sanitize_error_text(body, limit=len(body))
-    anchor = _sanitized_position(body, pos, len(sanitized))
-    token_start = sanitized.rfind(_REDACTION_TOKEN, 0, anchor + len(_REDACTION_TOKEN))
-    if token_start != -1 and token_start + len(_REDACTION_TOKEN) > anchor:
-        # 锚点落在占位符内部：挪到它后面，让前后窗口各拿完整的半段
-        anchor = token_start + len(_REDACTION_TOKEN)
+    # limit=None：裸凭据替换会加长文本，按原文长度截断会切掉尾部
+    sanitized = sanitize_error_text(body, limit=None)
+    anchor = _align_past_placeholder(sanitized, _sanitized_position(body, pos, len(sanitized)))
     start = max(0, anchor - window)
     end = min(len(sanitized), anchor + window)
     return sanitized[start:anchor], sanitized[anchor:end]
