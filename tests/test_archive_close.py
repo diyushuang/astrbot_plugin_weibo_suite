@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 from astrbot_plugin_weibo_suite.weibo import archive as archive_mod
 
@@ -69,3 +70,58 @@ async def test_worker_exits_on_stop_sentinel_not_by_cancel(make_weibo_plugin):
 
     assert seen == ["m1"], "哨兵之后的 mid 不应被处理"
     assert not task.cancelled(), "必须是 return 退出而不是被 cancel"
+
+
+async def test_paused_mid_is_requeued_and_processed_after_recovery(make_weibo_plugin):
+    """磁盘暂停不是"这条做完了"：当前 mid 重投回队列，恢复后继续处理。"""
+    plugin = make_weibo_plugin()
+    plugin._archive = _FakeStore()
+    seen: list[str] = []
+    recovered = False
+    done = asyncio.Event()
+
+    async def download(mid):
+        if not recovered:
+            return {"mid": mid, "paused": "disk"}
+        seen.append(mid)
+        done.set()
+        return {"mid": mid}
+
+    async def wait_disk_free():
+        nonlocal recovered
+        recovered = True
+
+    plugin.archive_download_post = download  # type: ignore[method-assign]
+    plugin._archive_wait_disk_free = wait_disk_free  # type: ignore[method-assign]
+    queue = plugin._archive_queue()
+    task = asyncio.create_task(plugin._archive_worker())
+    queue.put_nowait("m1")
+
+    await asyncio.wait_for(done.wait(), timeout=1)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert seen == ["m1"], "暂停期间取出的 mid 必须保留并最终处理"
+
+
+async def test_paused_worker_does_not_consume_remaining_queue_on_shutdown(make_weibo_plugin):
+    """关闭时仍在磁盘暂停：不再消费剩余队列，也不靠 task_done 掩盖丢弃。"""
+    plugin = make_weibo_plugin()
+    plugin._archive = _FakeStore()
+    plugin._archive_stop_requested = True
+    tried: list[str] = []
+
+    async def download(mid):
+        tried.append(mid)
+        return {"mid": mid, "paused": "disk"}
+
+    plugin.archive_download_post = download  # type: ignore[method-assign]
+    queue = plugin._archive_queue()
+    queue.put_nowait("m1")
+    queue.put_nowait("m2")
+    task = asyncio.create_task(plugin._archive_worker())
+    await asyncio.wait_for(task, timeout=1)
+
+    assert tried == ["m1"], "暂停后必须停止本轮消费，不能继续空转吃队列"
+    assert queue.qsize() == 2, "当前 mid 已重投，剩余队列必须保留"

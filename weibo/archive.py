@@ -27,6 +27,9 @@ ARCHIVE_SCAN_LIMIT = 5000  # 对账扫描帖子上限（防御性，避免一次
 ARCHIVE_SCAN_PAGE = 200
 # 关闭哨兵：worker 读到它就干净退出（不当作待下载的 mid）
 _ARCHIVE_STOP = object()
+# 磁盘余量不足时 worker 暂停消费的轮询间隔。必须明显小于
+# ARCHIVE_CLOSE_GRACE_SECONDS，否则关闭时会在等待里耗掉整个宽限再被硬取消。
+_ARCHIVE_PAUSE_POLL_SECONDS = 2.0
 
 
 def _archive_int(value, default: int = 0) -> int:
@@ -133,6 +136,9 @@ class ArchiveMixin:
                 self._archive = store
             task = getattr(self, "_archive_worker_task", None)
             if task is None or task.done():
+                # 复用同一实例重新开库时，上一次关闭留下的停止标记必须清掉，
+                # 否则新 worker 会在磁盘暂停时立刻把自己当成"收尾中"
+                self._archive_stop_requested = False
                 self._archive_worker_task = asyncio.create_task(self._archive_worker())
             logger.info("归档已就绪：%s", getattr(self._archive, "db_path", ARCHIVE_DB_NAME))
         except Exception as e:
@@ -148,6 +154,9 @@ class ArchiveMixin:
         task = getattr(self, "_archive_worker_task", None)
         self._archive_worker_task = None
         if task is not None and not task.done():
+            # 磁盘暂停中的 worker 正卡在轮询等待里，看不到队列里的停止哨兵；
+            # 用显式标记让它尽快返回，避免白白耗完宽限再被硬取消
+            self._archive_stop_requested = True
             stopped = False
             try:
                 self._archive_queue().put_nowait(_ARCHIVE_STOP)
@@ -440,7 +449,13 @@ class ArchiveMixin:
     # 原图下载 worker
     # ------------------------------------------------------------------
     async def _archive_worker(self) -> None:
-        """单 worker 串行消费 mid 队列；每项必须 task_done，取消即退出。"""
+        """单 worker 串行消费 mid 队列；每项必须 task_done，取消即退出。
+
+        磁盘余量不足时 ``archive_download_post`` 会带 ``paused`` 返回：此刻
+        当前 mid 与队列里的剩余项都必须保留，worker 停止本轮消费、等余量恢复
+        再继续。以前这里无视返回值，余量不足期间每条都会立刻"暂停返回"，
+        worker 空转把整条队列消费一遍，队列空了也就等于把待下载项丢了。
+        """
         queue = self._archive_queue()
         while True:
             try:
@@ -451,18 +466,56 @@ class ArchiveMixin:
                 with contextlib.suppress(Exception):
                     queue.task_done()
                 return
+            paused = False
             try:
-                await self.archive_download_post(str(mid))
+                result = await self.archive_download_post(str(mid))
+                paused = isinstance(result, dict) and bool(result.get("paused"))
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 logger.warning(f"归档原图下载失败（mid={mid}）: {e}")
             finally:
+                if paused:
+                    # 暂停不是"这条做完了"：当前 mid 重投回队列，恢复后继续，
+                    # 不靠 task_done 掩盖丢弃；队列满就退回有界待办
+                    self._archive_requeue(str(mid), queue)
                 with contextlib.suppress(Exception):
                     queue.task_done()
-                # 队列腾出空位就把"满了被拒"的 mid 重投回来
-                with contextlib.suppress(Exception):
-                    self._archive_drain_retry(queue)
+                if not paused:
+                    # 队列腾出空位就把"满了被拒"的 mid 重投回来
+                    with contextlib.suppress(Exception):
+                        self._archive_drain_retry(queue)
+            if paused:
+                await self._archive_wait_disk_free()
+                if getattr(self, "_archive_stop_requested", False):
+                    # 关闭中且磁盘仍不足：剩余项在停机期间无法下载，交给重启后
+                    # 的媒体 pending 状态/对账兜底，这里不再空转
+                    return
+
+    def _archive_requeue(self, mid: str, queue: asyncio.Queue) -> None:
+        """暂停时把取出的 mid 放回队列；队列满退回有界待办，绝不静默丢。"""
+        if not mid:
+            return
+        try:
+            queue.put_nowait(mid)
+            return
+        except asyncio.QueueFull:
+            pass
+        except Exception:
+            return
+        pending = self._archive_pending_retry()
+        if len(pending) >= ARCHIVE_PENDING_RETRY_MAX:
+            pending.popitem(last=False)
+        pending[mid] = None
+
+    async def _archive_wait_disk_free(self) -> None:
+        """磁盘余量恢复前不消费队列；余量未知（None）时按"可继续"处理。"""
+        media_root = self._archive_media_root()
+        while not getattr(self, "_archive_stop_requested", False):
+            free_bytes = await asyncio.to_thread(_archive_free_bytes, media_root)
+            if free_bytes is None or free_bytes >= DISK_FLOOR_MB * 1048576:
+                return
+            await asyncio.sleep(_ARCHIVE_PAUSE_POLL_SECONDS)
 
     def archive_enqueue_download(self, mid: str) -> bool:
         """入队一个 mid 的原图下载；未就绪 / 队列满返回 False，不抛。

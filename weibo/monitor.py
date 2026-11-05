@@ -202,10 +202,23 @@ class MonitorMixin:
                 # 多账号之间留随机间隔错开请求；最后一个账号之后没必要再等
                 if pos < len(entries) - 1:
                     await asyncio.sleep(random.uniform(1.0, 3.0))
-            flushed = await self._flush_pending()
-            self.last_check_ts = time.time()
-            if state_dirty or flushed:
-                self._save_state()
+            # 推送可能把条目移出内存队列（已送达的不落盘就会重启重发），
+            # 所以 _flush_pending 抛异常时同样要落盘；无变化的常规轮次
+            # 仍保持"不脏不写"，不额外放大 state.json 的写次数。
+            flushed = False
+            save_needed = state_dirty
+            try:
+                flushed = await self._flush_pending()
+            except asyncio.CancelledError:
+                save_needed = True
+                raise
+            except Exception:
+                save_needed = True
+                raise
+            finally:
+                self.last_check_ts = time.time()
+                if save_needed or flushed:
+                    await self._save_state_async()
             return new_count
         finally:
             self._checking = False

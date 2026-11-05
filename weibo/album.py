@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from .runtime import *
 
+# 媒体 CDN 对这些状态码的拒绝是鉴权/风控类的确定性结论：同一时刻换候选地址
+# 继续请求只会继续触雷、放大风控，因此遇到它们就终止这张图，不再换地址。
+_MEDIA_ABORT_STATUSES = frozenset({401, 403, 407, 418, 429, 432})
+
 
 class AlbumMixin:
     def _album_tmp_root(self) -> Path:
@@ -403,7 +407,11 @@ class AlbumMixin:
                         f"单个媒体 {declared / 1048576:g}MB 超过 {max_bytes / 1048576:g}MB 上限",
                         declared,
                     )
-                with dest.open("wb") as fh:
+                # 打开/逐块写/flush/close 全是阻塞 syscall，慢盘或 NAS 上直接
+                # await 会把整个事件循环拖住（轮询、WebUI、其它群推送全排在后面）。
+                # 统一丢线程池，保持"边下边写、超限立即停"的语义。
+                handle = await asyncio.to_thread(dest.open, "wb")
+                try:
                     async for chunk in resp.content.iter_chunked(65536):
                         got += len(chunk)
                         if got > max_bytes:
@@ -413,7 +421,12 @@ class AlbumMixin:
                                 else max_bytes / 1048576
                             )
                             raise MediaTooLarge(f"单个媒体超过 {limit_mb:g}MB 上限", got)
-                        fh.write(chunk)
+                        await asyncio.to_thread(handle.write, chunk)
+                    await asyncio.to_thread(handle.flush)
+                finally:
+                    # 取消/超限/unlink 都由上层决定，这里只保证句柄一定关掉
+                    with contextlib.suppress(OSError):
+                        await asyncio.to_thread(handle.close)
                 if declared and got < declared:
                     raise WeiboFetchError(f"下载被截断：收到 {got}B / 应有 {declared}B")
                 return got
@@ -422,28 +435,51 @@ class AlbumMixin:
     async def _download_pic(self, pic: dict[str, str], dest: Path) -> Path:
         """下载一张微博图：先取 /large/ 原图，失败退回接口给的原始地址。
 
-        这里按 ``WeiboFetchError`` 一族统一兜住即可——超限的 ``MediaTooLarge``
-        是它的子类，图片档位上"这张原图太大"和"这个地址下不动"的处理没区别，
-        都是换下一个候选地址再试，不像视频那样需要区分确定性/瞬时性。
+        失败分三类处理：
+
+        - ``WeiboFetchError`` 一族（含超限的 ``MediaTooLarge``、HTML 伪装、截断、
+          风控冷却）：换下一个候选地址再试，全失败后统一抛 ``WeiboFetchError``；
+        - 鉴权/风控类 HTTP 状态码（401/403/407/418/429/432）：换地址只会继续
+          触雷，直接终止本图；
+        - 其余瞬时故障（``aiohttp.ClientError`` / 超时 / ``OSError``，含 404
+          过期签名、5xx 抖动）：当作该候选不可用，继续下一个候选。
+
+        每次失败都清掉 ``.part``，成功才原子改名，绝不把半截文件当成品。
         """
         last = ""
+        # 候选轮换共用同一个残件名；任何失败路径都清掉它，避免下一次把
+        # 上一轮留下的半截文件误当成品
+        part = dest.with_name(dest.name + ".part")
         for url in (pic.get("url"), pic.get("alt_url")):
             if not url:
                 continue
-            part = dest.with_name(dest.name + ".part")
             try:
                 await self._validate_media_url(url)
                 await self._stream_to_file(url, part)
             except WeiboFetchError as e:
                 last = str(e)
-                part.unlink(missing_ok=True)
+                await asyncio.to_thread(part.unlink, missing_ok=True)
                 continue
-            size = part.stat().st_size if part.is_file() else 0
+            except aiohttp.ClientResponseError as e:
+                # raise_for_status 的非 2xx：状态码是"该不该换地址"的判据
+                last = f"HTTP {e.status}"
+                await asyncio.to_thread(part.unlink, missing_ok=True)
+                if e.status in _MEDIA_ABORT_STATUSES:
+                    raise WeiboFetchError(
+                        f"图片下载被鉴权/风控拒绝（HTTP {e.status}）: {url}"
+                    ) from e
+                continue
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+                last = f"{type(e).__name__}: {e}"
+                await asyncio.to_thread(part.unlink, missing_ok=True)
+                continue
+            size = await asyncio.to_thread(lambda p=part: p.stat().st_size if p.is_file() else 0)
             if size > 1024:
-                part.replace(dest)
+                await asyncio.to_thread(part.replace, dest)
                 return dest
             last = f"HTTP 响应过小（{size}B）"
-            part.unlink(missing_ok=True)
+            await asyncio.to_thread(part.unlink, missing_ok=True)
+        await asyncio.to_thread(part.unlink, missing_ok=True)
         raise WeiboFetchError(f"图片下载失败 {pic.get('pid') or pic.get('url')}: {last}")
 
     async def _to_gif(self, mp4: Path, gif: Path) -> bool:
@@ -490,22 +526,29 @@ class AlbumMixin:
         try:
             await self._validate_media_url(pic.get("video_url") or "")
             await self._stream_to_file(str(pic.get("video_url") or ""), mp4)
-        except WeiboFetchError:
-            mp4.unlink(missing_ok=True)
+        except asyncio.CancelledError:
+            raise
+        except (WeiboFetchError, aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+            # 瞬态故障也要兑现"回落封面"：以前只兜 WeiboFetchError，一次断连/
+            # 超时就会把整批相册下载打成异常
+            logger.info(f"{PLUGIN_NAME} 实况图视频段下载失败，改用封面静图: {e!r}")
+            await asyncio.to_thread(mp4.unlink, missing_ok=True)
             return None
         try:
             ok = await self._to_gif(mp4, gif)
         except (OSError, ValueError) as e:
             logger.info(f"{PLUGIN_NAME} 实况图转 GIF 失败，改用封面静图: {e!r}")
             ok = False
-        mp4.unlink(missing_ok=True)
-        if ok and gif.is_file() and gif.stat().st_size > GIF_MAX_BYTES:
+        await asyncio.to_thread(mp4.unlink, missing_ok=True)
+        size = await asyncio.to_thread(lambda: gif.stat().st_size if gif.is_file() else 0)
+        if ok and size > GIF_MAX_BYTES:
             # 超大 GIF 走 base64 时在途内存会放大到百 MB 级，单张超载荷预算还会
             # 空闸直行——宁可回落封面静图也不让它把小服务器顶穿
             logger.info(f"{PLUGIN_NAME} 实况图 GIF 超 {GIF_MAX_BYTES // 1048576}MB，改用封面静图")
             ok = False
         if not ok:
-            gif.unlink(missing_ok=True)  # 超限/失败的产物不留进批次目录
+            # 超限/失败的产物不留进批次目录
+            await asyncio.to_thread(gif.unlink, missing_ok=True)
             return None
         return gif
 
@@ -547,8 +590,15 @@ class AlbumMixin:
                 path = folder / f"{_pic_stem(pic)}.{ext}"
                 try:
                     await self._download_pic(pic, path)
+                except asyncio.CancelledError:
+                    raise
                 except WeiboFetchError as e:
                     logger.info(f"相册图片下载失败，跳过: {e}")
+                    return None
+                except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+                    # _download_pic 已把这三类归一成 WeiboFetchError；这里兜住
+                    # 是为了不让任何单个候选的瞬态故障升级成整批异常
+                    logger.info(f"相册图片下载瞬时故障，跳过: {e!r}")
                     return None
                 return pic, path
 
