@@ -268,7 +268,12 @@ class PipelineMixin:
         return task
 
     def pipeline_start(self) -> None:
-        """建队列 + 起单 worker；幂等，initialize 调用（无事件循环时安全跳过）。"""
+        """建队列 + 起单 worker；幂等，initialize 调用（无事件循环时安全跳过）。
+
+        队列只在内存里，进程重启即丢；worker 起来后再异步回灌一次归档缺口，
+        避免"上一轮没跑完的帖子永远没人再处理"。回灌放在独立 task 里，不阻塞
+        initialize 主链，也不和 worker 争同一个协程。
+        """
         self._pipeline_queue_ref()
         if self._pipeline_worker_task() is not None:
             self._pipeline_started = True
@@ -285,10 +290,46 @@ class PipelineMixin:
             self._pipeline_started = False
             self._pipeline_last_error = str(exc)[:200]
             logger.warning(f"图床管线 worker 启动失败：{exc}")
+            return
+        self._pipeline_refill_task = None
+        try:
+            if self.pipeline_enabled():
+                self._pipeline_refill_task = loop.create_task(
+                    self._pipeline_refill_pending(), name="weibo-pipeline-refill"
+                )
+        except Exception as exc:
+            # 回灌失败只影响存量缺口，worker 仍可处理新帖
+            self._pipeline_last_error = str(exc)[:200]
+            logger.warning(f"图床管线启动回灌失败：{exc}")
+
+    async def _pipeline_refill_pending(self) -> None:
+        """启动时把「还没跑到 vector」的帖子回灌队列（按 enabled_uids 过滤）。"""
+        try:
+            result = await self.pipeline_backfill(limit=200)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._pipeline_last_error = str(exc)[:200]
+            logger.warning(f"图床管线启动回灌失败：{exc}")
+            return
+        queued = int(result.get("queued", 0) or 0) if isinstance(result, dict) else 0
+        if queued:
+            logger.info(f"图床管线启动回灌：重新排队 {queued} 条未完成帖子")
 
     async def pipeline_stop(self) -> None:
-        """停止 worker 并丢弃残留队列；幂等，可重复 await。"""
+        """停止 worker 并清理残留队列；幂等，可重复 await。
+
+        停机残留不再静默丢弃：先记一条带数量的日志，并保留在
+        ``_pipeline_stop_residue`` 里到进程结束，便于面板/日志排查；
+        真正不丢的是下次启动的回灌——归档里的缺口仍在，会重新入队。
+        """
         self._pipeline_started = False
+        refill = getattr(self, "_pipeline_refill_task", None)
+        self._pipeline_refill_task = None
+        if refill is not None and not refill.done():
+            refill.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await refill
         task = getattr(self, "_pipeline_task", None)
         self._pipeline_task = None
         if task is not None and not task.done():
@@ -299,11 +340,19 @@ class PipelineMixin:
         queue = getattr(self, "_pipeline_queue", None)
         if queue is None:
             return
+        residue: list[str] = []
         while not queue.empty():
             with contextlib.suppress(asyncio.QueueEmpty):
-                queue.get_nowait()
+                item = queue.get_nowait()
+                residue.append(str(item))
                 with contextlib.suppress(ValueError):
                     queue.task_done()
+        self._pipeline_stop_residue = residue
+        if residue:
+            logger.info(
+                "图床管线停机：队列残留 %d 条，下次启动将按归档缺口重新回灌",
+                len(residue),
+            )
 
     def pipeline_enqueue(self, mid: str) -> bool:
         """把帖子放进串行队列；未启用 / 未启动 / 队列满 / 已排队 → False。"""
@@ -381,32 +430,79 @@ class PipelineMixin:
             return ""
         return str(_row_get(post, "uid", "") or "") if post else ""
 
+    def _pipeline_fail_map(self) -> dict[str, int]:
+        """当前处于重投等待的 mid → 连续失败次数；成功后立即弹出。"""
+        counts = getattr(self, "_pipeline_fail_counts", None)
+        if not isinstance(counts, dict):
+            counts = {}
+            self._pipeline_fail_counts = counts
+        return counts
+
     async def _pipeline_worker(self) -> None:
-        """单 worker：串行消费队列；异常指数退避（5s→60s），成功即重置。"""
+        """单 worker：串行消费队列；失败按退避重投，连续失败到上限才放弃。
+
+        重投前先把 mid 重新占回 pending：其它入口（归档回调/补跑）看到 pending
+        里有它就不会重复入队，避免同一帖子在重试窗口里被塞进队列多次。重投由
+        定时器放到队尾而不是队首，让其它帖先跑，避免一条坏帖把整条队列堵死。
+        """
         queue = self._pipeline_queue_ref()
         pending = self._pipeline_pending_ref()
+        fail_map = self._pipeline_fail_map()
+        loop = asyncio.get_running_loop()
         delay = _BACKOFF_MIN
+        max_attempts = max(1, self._pipeline_int("max_attempts", 3))
         while True:
             mid = await queue.get()
-            pending.discard(str(mid))
+            key = str(mid)
+            pending.discard(key)
             failed = False
             try:
-                result = await self.pipeline_run_post(str(mid))
+                result = await self.pipeline_run_post(key)
                 failed = isinstance(result, dict) and bool(result.get("error"))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 failed = True
                 self._pipeline_last_error = str(exc)[:200]
-                logger.warning(f"图床管线单帖失败（mid={mid}）：{exc}")
+                logger.warning(f"图床管线单帖失败（mid={key}）：{exc}")
             finally:
                 with contextlib.suppress(ValueError):
                     queue.task_done()
-            if failed:
-                await asyncio.sleep(delay)
-                delay = min(_BACKOFF_MAX, delay * 2)
-            else:
+            if not failed:
+                fail_map.pop(key, None)
                 delay = _BACKOFF_MIN
+                continue
+            count = int(fail_map.get(key, 0)) + 1
+            if count >= max_attempts:
+                fail_map.pop(key, None)
+                # 达到上限就停止重投，避免同一帖在队列里无限热循环；
+                # 媒体条目的尝试次数已在归档库累计，补跑会按上限跳过
+                logger.warning("图床管线单帖连续失败 %d 次，停止重投（mid=%s）", count, key)
+                delay = _BACKOFF_MIN
+                continue
+            fail_map[key] = count
+            pending.add(key)
+            # call_later 而不是立刻 put：退避期间不占用 worker，队列里其它
+            # 帖子先跑；pending 已占位，生产者不会重复入队。
+            loop.call_later(delay, self._pipeline_retry_pending, key)
+            await asyncio.sleep(delay)
+            delay = min(_BACKOFF_MAX, delay * 2)
+
+    def _pipeline_retry_pending(self, key: str) -> None:
+        """退避到点后把失败的 mid 放回队尾；停机/已被清出 pending 则放弃。"""
+        pending = self._pipeline_pending_ref()
+        if key not in pending or not getattr(self, "_pipeline_started", False):
+            return
+        queue = self._pipeline_queue_ref()
+        try:
+            queue.put_nowait(key)
+        except asyncio.QueueFull:
+            # 队列又被生产者填满：放弃本轮重投，但保留 pending 之外的失败
+            # 计数没有意义——后续补跑仍会从归档缺口里重新选中它
+            pending.discard(key)
+            self._pipeline_fail_map().pop(key, None)
+            self._pipeline_last_error = f"管线重投队列已满，等待补跑：{key}"
+            logger.warning("图床管线重投失败（队列已满），mid=%s 改为等待补跑", key)
 
     # ---------- 单帖流程 ----------
 
@@ -455,7 +551,15 @@ class PipelineMixin:
 
     async def _pipeline_ensure_local(self, mid: str, store: Any, rows: list) -> None:
         """CFB 模式：只保证原图已落盘（最多补下载一次）。"""
-        if all(self._pipeline_local_path(store, mid, row) is not None for row in rows):
+        # 逐个 to_thread：本地路径存在性检查与 media_file 都可能落在 NAS 上，
+        # 掉线时同步 stat 会把事件循环整个卡住。
+        missing = False
+        for row in rows:
+            found = await asyncio.to_thread(self._pipeline_local_path, store, mid, row)
+            if found is None:
+                missing = True
+                break
+        if not missing:
             return
         download = getattr(self, "archive_download_post", None)
         if not callable(download):
@@ -506,7 +610,12 @@ class PipelineMixin:
         thumb_size = max(1, self._pipeline_int("thumb_size", 720))
         thumb_quality = min(100, max(1, self._pipeline_int("thumb_quality", 72)))
 
-        if any(self._pipeline_local_path(store, mid, row) is None for row in pending_rows):
+        local_missing = False
+        for row in pending_rows:
+            if await asyncio.to_thread(self._pipeline_local_path, store, mid, row) is None:
+                local_missing = True
+                break
+        if local_missing:
             await self._pipeline_ensure_local(mid, store, pending_rows)
             pending_rows = await self._pipeline_reload_rows(store, mid, pending_rows)
 
@@ -519,7 +628,7 @@ class PipelineMixin:
             for position, row in enumerate(pending_rows, start=1):
                 pid = str(_row_get(row, "pid", ""))
                 try:
-                    local = self._pipeline_local_path(store, mid, row)
+                    local = await asyncio.to_thread(self._pipeline_local_path, store, mid, row)
                     if local is None:
                         raise RuntimeError("原图缺失")
                     # 分步幂等：上一次可能已经传完原图/缩略图才失败，补跑时

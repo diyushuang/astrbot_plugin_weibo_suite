@@ -143,6 +143,12 @@ class FakePlugin:
     def _save_config(self):
         self.saved += 1
 
+    def _update_config(self, mutate) -> bool:
+        """与真实插件的批量写法保持一致：改完后只落盘一次。"""
+        mutate(self.config)
+        self._save_config()
+        return True
+
     def copylib_status(self):
         return {"ok": True, "enabled": True, "total": 3, "cleaned": 2}
 

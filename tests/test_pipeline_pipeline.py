@@ -756,3 +756,82 @@ def test_status_text_separates_retrying_from_abandoned(tmp_path):
     text = host.format_pipeline_status()
     assert "失败待重试：1 张" in text
     assert "已放弃（达到重试上限）：1 张" in text
+
+
+# ---------------------------------------------------------------- 失败重投 / 启动回灌
+
+
+async def test_worker_requeues_failed_post_once_then_succeeds(monkeypatch, tmp_path):
+    """瞬态失败不该把帖子丢掉：退避后重新入队，第二次成功即清空失败计数。"""
+    monkeypatch.setattr(pipeline_mod, "_BACKOFF_MIN", 0.01)
+    monkeypatch.setattr(pipeline_mod, "_BACKOFF_MAX", 0.01)
+    host = make_host(
+        tmp_path, make_store(tmp_path), services=make_services(), config={"enabled": True}
+    )
+    host._pipeline_started = True
+    calls = []
+
+    async def fake_run(mid):
+        calls.append(mid)
+        if len(calls) == 1:
+            raise RuntimeError("瞬时失败")
+        return {"mid": mid}
+
+    host.pipeline_run_post = fake_run
+    task = asyncio.create_task(host._pipeline_worker())
+    try:
+        assert host.pipeline_enqueue(MID) is True
+        await wait_until(lambda: len(calls) == 2)
+        await wait_until(lambda: host.pipeline_queue_size() == 0)
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    assert calls == [MID, MID]
+    assert host._pipeline_pending == set()
+    assert host._pipeline_fail_map() == {}
+
+
+async def test_worker_stops_retrying_after_max_attempts(monkeypatch, tmp_path):
+    """连续失败到上限后不再空转：队列清空，worker 回到等待而不是热循环。"""
+    monkeypatch.setattr(pipeline_mod, "_BACKOFF_MIN", 0.01)
+    monkeypatch.setattr(pipeline_mod, "_BACKOFF_MAX", 0.01)
+    host = make_host(
+        tmp_path,
+        make_store(tmp_path),
+        services=make_services(),
+        config={"enabled": True, "max_attempts": 2},
+    )
+    host._pipeline_started = True
+    calls = []
+
+    async def fake_run(mid):
+        calls.append(mid)
+        raise RuntimeError("持续失败")
+
+    host.pipeline_run_post = fake_run
+    task = asyncio.create_task(host._pipeline_worker())
+    try:
+        assert host.pipeline_enqueue(MID) is True
+        await wait_until(lambda: len(calls) >= 2)
+        await asyncio.sleep(0.1)
+        assert len(calls) == 2, "达到 max_attempts 后不应继续重投"
+        assert host.pipeline_queue_size() == 0
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    assert host._pipeline_fail_map() == {}
+
+
+async def test_pipeline_start_refills_pending_posts_from_archive(tmp_path):
+    """重启后内存队列是空的：启动回灌应把归档里没跑到 vector 的帖子重新入队。"""
+    store = make_store(tmp_path)
+    add_post(store, tmp_path)
+    host = make_host(tmp_path, store, services=make_services(), config={"enabled": True})
+    host.pipeline_start()
+    try:
+        await wait_until(lambda: store.media_stats()["vector"] == 2)
+        assert host.pipeline_queue_size() == 0
+    finally:
+        await host.pipeline_stop()

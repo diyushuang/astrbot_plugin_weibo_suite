@@ -125,17 +125,19 @@ class SnsAPI:
         raw = str(text or "").strip().lower()
         return C.PLATFORM_ALIAS.get(raw, raw if raw in C.PLATFORMS else "")
 
-    def _set_cfg(self, key: str, value: Any) -> None:
-        """写进 `sns` 分组并落盘（组是唯一定义面，见 sns_cfg 的说明）。"""
-        config = self.p.config
+    @staticmethod
+    def _apply_cfg(config: Any, updates: dict[str, Any]) -> None:
+        """把整批键写进 `sns` 分组（组是唯一定义面，见 sns_cfg 的说明）。
+
+        只改内存，落盘由插件的 `_update_config` 统一做一次：面板一次提交
+        十几个字段时逐键 save_config 会写十几次盘，中途失败还会留下
+        「内存改了、磁盘只写了一半」的混合态。
+        """
         group = config.get(C.CFG_GROUP)
         if not isinstance(group, dict):
             group = {}
             config[C.CFG_GROUP] = group
-        group[key] = value
-        saver = getattr(config, "save_config", None)
-        if callable(saver):
-            saver()
+        group.update(updates)
 
     # ------------------------------------------------------------ 读
 
@@ -347,7 +349,7 @@ class SnsAPI:
             "at_all_keywords": list,
             "at_all_uids": list,
         }
-        changed: list[str] = []
+        updates: dict[str, Any] = {}
         for key, caster in allowed.items():
             if key not in body:
                 continue
@@ -373,11 +375,12 @@ class SnsAPI:
                 return error_response(f"{key} 的值不合法：{raw!r}", status_code=400)
             if key == "fetch_mode" and value not in ("browser", "http", "rss"):
                 return error_response("fetch_mode 只能是 browser / http / rss", status_code=400)
-            self._set_cfg(key, value)
-            changed.append(key)
-        if not changed:
+            updates[key] = value
+        if not updates:
             return error_response("没有可更新的字段", status_code=400)
-        return json_response({"status": "ok", "changed": changed})
+        if not self.p._update_config(lambda cfg: self._apply_cfg(cfg, updates)):
+            return error_response("配置保存失败（已回滚），请检查磁盘空间或权限", status_code=500)
+        return json_response({"status": "ok", "changed": list(updates)})
 
     async def check_now(self):
         """立刻跑一轮（平台为空则跑全部到点的订阅）。"""

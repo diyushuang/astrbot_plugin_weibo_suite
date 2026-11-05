@@ -225,6 +225,12 @@ class WeiboMonitorPlugin(
         self.sns: Any = None
         self._state_dirty = False
         self._state_save_task: asyncio.Task | None = None
+        # 事件循环路径把 state.json/visitor 的写盘丢线程池后，可能有重叠的
+        # 落盘请求；用锁串行化，避免两个线程同时写 tmp 文件互相覆盖
+        self._state_write_lock = asyncio.Lock()
+        # to_thread 被取消时线程并不会停，asyncio 锁已经释放而旧线程还在写同一
+        # 个 tmp；文件级串行只能用线程锁：后一次写等前一次真正写完再动 tmp
+        self._state_file_lock = threading.Lock()
         # 游客身份 cookie（仅 .weibo.cn 匿名游客，非用户账号）；UA 与身份绑定
         self._visitor_cookies: dict[str, str] = {}
         self._visitor_ts = 0.0
@@ -333,7 +339,10 @@ class WeiboMonitorPlugin(
         # 服务由入口 main.py 注入（溯源域的 bed/vector/library）；未注入时管线整体降级
         self._pipeline_services: Any | None = None
         self._pipeline_queue: asyncio.Queue[str] | None = None
-        self._pipeline_worker_task: asyncio.Task | None = None
+        # 注意：不能叫 _pipeline_worker_task——pipeline.py 里有同名方法，
+        # 实例属性会把方法遮蔽，导致 pipeline_start 调 None 直接 TypeError。
+        self._pipeline_task: asyncio.Task | None = None
+        self._pipeline_refill_task: asyncio.Task | None = None
         self._pipeline_pending: set[str] = set()
         self._pipeline_last_error: str = ""
         self._pipeline_backoff: float = 0.0
@@ -543,7 +552,7 @@ class WeiboMonitorPlugin(
             with contextlib.suppress(asyncio.CancelledError):
                 await self._state_save_task
             self._state_save_task = None
-        self._save_state()
+        await self._save_state_async()
         if self._http and not self._http.closed:
             await self._http.close()
         self._http = None
@@ -561,6 +570,27 @@ class WeiboMonitorPlugin(
         saver = getattr(self.config, "save_config", None)
         if callable(saver):
             saver()
+
+    def _update_config(self, mutate) -> bool:
+        """批量改配置后只落盘一次；写失败把内存恢复成原样。
+
+        面板一次请求可能同时改多个字段/分组键，逐键 save_config 时中途失败
+        会留下"内存改了、磁盘只写了一半"的混合态。这里先深拷贝原配置，改完
+        统一保存，失败整体回滚，调用方据返回值给用户明确报错。
+        """
+        snapshot = copy.deepcopy(self.config)
+        try:
+            mutate(self.config)
+            self._save_config()
+            return True
+        except Exception as exc:
+            # 恢复必须尽力而为：即便恢复失败也要让调用方拿到 False，
+            # 不能把"保存失败"伪装成成功
+            with contextlib.suppress(Exception):
+                self.config.clear()
+                self.config.update(snapshot)
+            logger.warning(f"{PLUGIN_NAME} 配置保存失败，已回滚内存改动: {exc}")
+            return False
 
     def _cfg_group(self, group: str) -> dict:
         value = self.config.get(group)
@@ -920,15 +950,10 @@ class WeiboMonitorPlugin(
         self._at_all_quota_used()  # 顺带清掉已过窗口的时间戳
         self._prune_stats()
 
-    def _save_state(self):
-        if self._data_dir is None:
-            return
-        scheduled = self._state_save_task
-        if scheduled and not scheduled.done() and scheduled is not asyncio.current_task():
-            scheduled.cancel()
-            self._state_save_task = None
+    def _state_payload(self) -> dict:
+        """在内存里拼出 state.json 的内容；不做任何磁盘 I/O。"""
         self._prune_stats()
-        state = {
+        return {
             "version": 2,
             "accounts": {
                 uid: {
@@ -954,7 +979,15 @@ class WeiboMonitorPlugin(
             # 一次性升级迁移标记：重启/重载后据此不再重复迁移
             "migrations": sorted(self._migrations),
         }
-        # 身份文件独立落盘：即使下面 state.json 写失败也不能连累它
+
+    def _write_state_file(self, state: dict) -> None:
+        """身份文件 + state.json 的实际落盘；阻塞调用，供同步/线程路径复用。"""
+        # 线程级串行：asyncio 侧锁在取消时会提前释放，但 to_thread 的线程仍
+        # 在写同一个 state.json.tmp。没有这把锁，两次落盘可能写坏临时文件。
+        with self._state_file_lock:
+            self._write_state_file_locked(state)
+
+    def _write_state_file_locked(self, state: dict) -> None:
         self._save_visitor_state()
         try:
             # 先写临时文件再原子替换：进程恰好死在写入中途不会留下截断的
@@ -971,6 +1004,32 @@ class WeiboMonitorPlugin(
             logger.warning(f"{PLUGIN_NAME} 保存 state.json 失败（稍后重试）: {e}")
             with contextlib.suppress(OSError):
                 tmp.unlink(missing_ok=True)
+
+    def _save_state(self):
+        if self._data_dir is None:
+            return
+        scheduled = self._state_save_task
+        if scheduled and not scheduled.done() and scheduled is not asyncio.current_task():
+            scheduled.cancel()
+            self._state_save_task = None
+        self._write_state_file(self._state_payload())
+
+    async def _save_state_async(self) -> None:
+        """事件循环专用：把 state.json/visitor 的完整写盘移到线程池。
+
+        state.json 含待推送队列与去重记录，慢盘/NAS 掉线时同步写会直接卡住
+        轮询与 WebUI；cancel 定时任务等循环内的簿记仍留在当前线程完成，只有
+        纯磁盘 I/O 进线程，并用锁串行化避免重叠写。
+        """
+        if self._data_dir is None:
+            return
+        scheduled = self._state_save_task
+        if scheduled and not scheduled.done() and scheduled is not asyncio.current_task():
+            scheduled.cancel()
+            self._state_save_task = None
+        state = self._state_payload()
+        async with self._state_write_lock:
+            await asyncio.to_thread(self._write_state_file, state)
 
     def _save_state_debounced(self) -> None:
         """Mark state dirty and coalesce high-frequency writes into one save."""
@@ -991,7 +1050,7 @@ class WeiboMonitorPlugin(
         try:
             await asyncio.sleep(STATE_SAVE_DEBOUNCE)
             if self._state_dirty:
-                self._save_state()
+                await self._save_state_async()
         finally:
             if self._state_save_task is asyncio.current_task():
                 self._state_save_task = None

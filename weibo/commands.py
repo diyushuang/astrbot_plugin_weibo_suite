@@ -125,7 +125,7 @@ class CommandsMixin:
         }
         self._set_cfg("monitored_uids", list(self.accounts.keys()))
         self._save_config()
-        self._save_state()
+        await self._save_state_async()
         name = self.accounts[uid]["name"]
         extra = "" if nickname else "（未能获取昵称，下轮检查会自动补齐，请留意确认 uid 正确）"
         yield event.plain_result(
@@ -143,7 +143,7 @@ class CommandsMixin:
         name = self.accounts.pop(uid)["name"]
         self._set_cfg("monitored_uids", list(self.accounts.keys()))
         self._save_config()
-        self._save_state()
+        await self._save_state_async()
         yield event.plain_result(f"已取消监控：{name}（{uid}）")
 
     async def weibo_list(self, event: AstrMessageEvent):

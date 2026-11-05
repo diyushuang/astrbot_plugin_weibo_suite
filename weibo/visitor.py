@@ -122,7 +122,7 @@ class VisitorMixin:
             await self._get_text(WEIBO_HOME_URL, {}, self._base_headers(), collect=cookies)
             if cookies:
                 self._visitor_cookies.update(cookies)
-                self._save_state()
+                await self._save_state_async()
                 logger.info(f"{PLUGIN_NAME} 启动预热完成（{sorted(cookies)}）")
         except asyncio.CancelledError:
             raise
@@ -171,7 +171,7 @@ class VisitorMixin:
                 raise
             self._renew_fail_count = 0
             self._renew_fail_until = 0.0
-            self._save_state()
+            await self._save_state_async()
 
     async def _do_renew(self):
         assert self._http is not None

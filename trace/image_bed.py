@@ -430,7 +430,8 @@ class ImageBedClient:
         ext = os.path.splitext(src_path)[1].lower() or ".jpg"
         name = f"{time.strftime('%Y%m%d')}_{secrets.token_hex(8)}{ext}"
         dest_dir = self._local_subdir(folder)
-        os.makedirs(dest_dir, exist_ok=True)
+        # mkdir 也是阻塞 syscall：网络图床主机/慢盘上同样会卡事件循环
+        await asyncio.to_thread(os.makedirs, dest_dir, exist_ok=True)
         dest = os.path.join(dest_dir, name)
         # 文件复制放到线程里避免阻塞事件循环；大小上游已校验
         await asyncio.to_thread(shutil.copyfile, src_path, dest)

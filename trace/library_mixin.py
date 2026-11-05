@@ -225,7 +225,7 @@ class LibraryMixin:
 
     async def status(self, event: AstrMessageEvent):
         """查看图库统计与插件配置摘要"""
-        stats = self.library.stats()
+        stats = await asyncio.to_thread(self.library.stats)
         scan_dirs = self._scan_dirs()
         lines = [f"📚 图片溯源图库状态：共 {stats['total']} 条（索引 {stats['indexed']}）"]
         if stats["skipped"]:

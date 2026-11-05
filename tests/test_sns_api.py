@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
 
@@ -28,6 +29,18 @@ class FakePlugin:
         self.config = FakeConfig()
         self._data_dir = data_dir
         self.sns = None
+
+    def _update_config(self, mutate) -> bool:
+        """与 `weibo/plugin.py::_update_config` 同语义：整批改完只落盘一次。"""
+        snapshot = copy.deepcopy(self.config)
+        try:
+            mutate(self.config)
+            self.config.save_config()
+            return True
+        except Exception:
+            self.config.clear()
+            self.config.update(snapshot)
+            return False
 
     def _sessions(self):
         return ["aiocqhttp:GroupMessage:12345"]
@@ -184,6 +197,32 @@ def test_guard_post_persists_changed_values(api):
     assert instance.p.config["sns"]["base_interval_douyin"] == 600
     # 真的生效，而不只是存进了配置
     assert instance.service().base_interval("douyin") >= 600
+
+
+def test_guard_post_batches_multiple_keys_into_one_save(api):
+    """一次提交十几个字段只该写一次盘：逐键 save_config 既慢又会留下半截配置。"""
+    instance, body = api
+    saves = []
+    config = instance.p.config
+    real_save = config.save_config
+
+    def counting_save():
+        saves.append(1)
+        real_save()
+
+    config.save_config = counting_save
+    body["payload"] = {
+        "base_interval_douyin": 600,
+        "cooldown_base_seconds": 900,
+        "max_images": 6,
+    }
+
+    out = _run(instance.guard())
+
+    assert out["status"] == "ok"
+    assert set(out["changed"]) == {"base_interval_douyin", "cooldown_base_seconds", "max_images"}
+    assert len(saves) == 1, "多键提交必须只落盘一次"
+    assert instance.p.config["sns"]["max_images"] == 6
 
 
 def test_guard_post_rejects_bad_fetch_mode(api):

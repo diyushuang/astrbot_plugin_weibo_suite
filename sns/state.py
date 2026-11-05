@@ -10,10 +10,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -63,6 +65,9 @@ class SnsState:
         # 是否成功读过盘。没读过就写，等于用一个空状态盖掉用户的订阅名单——
         # 这是本文件最不可接受的失败，所以 save() 会拒绝。
         self._loaded = False
+        # save_async 把落盘丢线程池后，同步 save()（add_account/remove_account
+        # 这类同步入口）可能与线程里的写并发；两处都写同一个 .tmp，必须串行
+        self._file_lock = threading.Lock()
         # 构造即加载：状态对象在任何使用点都应该是"磁盘上的那个状态"，而不是
         # 一个空壳。以前只有 `SnsService.start()` 会 load，于是
         # `sns.enabled=false` 时面板/指令拿到的是空状态，一次 save 就把用户的
@@ -143,17 +148,8 @@ class SnsState:
             self.retry_queue = [row for row in retry if _valid_retry(row)][-C.RETRY_QUEUE_LIMIT :]
         self._loaded = True
 
-    def save(self) -> bool:
-        """原子落盘，返回是否真的写下去了。
-
-        护栏：从没成功 load() 过（例如状态文件读坏且备份失败）时拒绝写——
-        用空状态盖掉用户的订阅名单，比"这次没保存"严重得多。写失败也不再
-        静默：日志里必须留痕，否则用户以为订阅存下了。
-        """
-        if not self._loaded:
-            logger.error("[sns] 状态尚未成功加载，拒绝写盘（否则会覆盖用户已有订阅）")
-            return False
-        state = {
+    def _snapshot(self) -> dict:
+        return {
             "version": self.VERSION,
             "created_ts": self.created_ts,
             "accounts": [a.to_dict() for a in self.accounts.values()],
@@ -163,7 +159,14 @@ class SnsState:
             "platform_paused_until": self.platform_paused_until,
             "retry_queue": self.retry_queue[-C.RETRY_QUEUE_LIMIT :],
         }
+
+    def _write_file(self, state: dict) -> bool:
+        """把快照原子落盘（含 fsync）；纯阻塞 I/O，供同步/线程路径复用。"""
         tmp = self.path.with_suffix(".json.tmp")
+        with self._file_lock:
+            return self._write_file_locked(state, tmp)
+
+    def _write_file_locked(self, state: dict, tmp: Path) -> bool:
         try:
             self.data_dir.mkdir(parents=True, exist_ok=True)
             payload = json.dumps(state, ensure_ascii=False, indent=2)
@@ -181,6 +184,30 @@ class SnsState:
                 tmp.unlink(missing_ok=True)
             logger.warning(f"[sns] 状态写入失败（{exc.__class__.__name__}: {exc}），本次改动未落盘")
             return False
+
+    def save(self) -> bool:
+        """原子落盘，返回是否真的写下去了。
+
+        护栏：从没成功 load() 过（例如状态文件读坏且备份失败）时拒绝写——
+        用空状态盖掉用户的订阅名单，比"这次没保存"严重得多。写失败也不再
+        静默：日志里必须留痕，否则用户以为订阅存下了。
+        """
+        if not self._loaded:
+            logger.error("[sns] 状态尚未成功加载，拒绝写盘（否则会覆盖用户已有订阅）")
+            return False
+        return self._write_file(self._snapshot())
+
+    async def save_async(self) -> bool:
+        """事件循环专用：快照在当前线程取，fsync/rename 丢线程池。
+
+        快照只读一次内存结构，线程里拿到的已经是纯 dict，不会与后续订阅
+        变更抢同一个对象；写盘本身串行化交给磁盘。
+        """
+        if not self._loaded:
+            logger.error("[sns] 状态尚未成功加载，拒绝写盘（否则会覆盖用户已有订阅）")
+            return False
+        state = self._snapshot()
+        return await asyncio.to_thread(self._write_file, state)
 
     # ------------------------------------------------------------ 便捷访问
 

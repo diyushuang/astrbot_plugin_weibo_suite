@@ -953,7 +953,7 @@ class PusherMixin:
                     # 直接搬进保留区
                     if self._finalize_cancel(item):
                         changed = True
-                        self._save_state()
+                        await self._save_state_async()
                     continue
                 if self._is_expired(item.get("created_ts", 0.0)):
                     logger.info(f"待推送微博 {item['post_id']} 已超过时效上限，自动清除")
@@ -1096,7 +1096,7 @@ class PusherMixin:
                     # 会话，群里就重复了，所以那种情况落到下面的正常记账里
                     self._finalize_cancel(item)
                     changed = True
-                    self._save_state()
+                    await self._save_state_async()
                     continue
                 if cancel_late:
                     item.pop("_cancel_requested", None)
@@ -1133,7 +1133,7 @@ class PusherMixin:
                     )
                     changed = True
                     # 重试名单与已送达名单必须跨重启存活，媒体也要留着补发
-                    self._save_state()
+                    await self._save_state_async()
                     last_save = time.monotonic()
                     if delay and idx < total - 1:
                         await asyncio.sleep(delay)
@@ -1193,7 +1193,7 @@ class PusherMixin:
                 changed = True
                 now_mono = time.monotonic()
                 if now_mono - last_save >= STATE_SAVE_DEBOUNCE:
-                    self._save_state()
+                    await self._save_state_async()
                     last_save = now_mono
                 # 多条之间留间隔防刷屏；最后一条之后无需再等
                 if delay and idx < total - 1:

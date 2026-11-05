@@ -184,7 +184,7 @@ class SnsService:
         if browser is not None:
             await browser.stop()
         with contextlib.suppress(Exception):
-            self.state.save()
+            await self.state.save_async()
 
     def _make_browser(self) -> BrowserSession:
         root = str(self.cfg("browser_profile_dir") or "").strip()
@@ -256,7 +256,7 @@ class SnsService:
             created_ts=now,
         )
         self.state.accounts[key] = account
-        self.state.save()
+        await self.state.save_async()
         return True, f"已订阅 RSS：{account.label}", account
 
     @staticmethod
@@ -473,7 +473,7 @@ class SnsService:
             # 每轮结束（含异常退出）都要落盘：mark_seen/补发队列只改了内存，
             # 丢了就会重复推送（而且 N 次异常退出后就是 N 次重复）。
             with contextlib.suppress(Exception):
-                self.state.save()
+                await self.state.save_async()
 
     async def _check_account(self, account: SnsAccount) -> dict[str, Any]:
         """检查单个订阅：取数 → 比对 → 更新状态 → 决定是否推送。"""

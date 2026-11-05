@@ -592,6 +592,11 @@ class DashboardAPI:
                 raise
             except Exception as e:
                 self._log.info(f"面板添加账号 {uid} 拉取昵称失败: {e!r}")
+            remaining = [k for k in p.accounts if k != uid]
+            if not p._update_config(lambda _cfg: p._set_cfg("monitored_uids", [*remaining, uid])):
+                return error_response(
+                    "配置保存失败（已回滚），请检查磁盘空间或权限", status_code=500
+                )
             p.accounts[uid] = {
                 "name": nickname or uid,
                 "seen_ids": [],
@@ -599,9 +604,7 @@ class DashboardAPI:
                 "fail_count": 0,
                 "next_retry_ts": 0.0,
             }
-            p._set_cfg("monitored_uids", list(p.accounts.keys()))
-            p._save_config()
-            p._save_state()
+            await p._save_state_async()
             name = p._account_name(uid)
             p._record_event("info", uid=uid, name=name, detail="通过面板添加监控")
             result = {"uid": uid, "name": name, "nickname_ok": bool(nickname)}
@@ -613,10 +616,13 @@ class DashboardAPI:
             p._sync_accounts_from_config()
             if uid not in p.accounts:
                 return error_response(f"账号 {uid} 不在监控列表中")
+            remaining = [k for k in p.accounts if k != uid]
+            if not p._update_config(lambda _cfg: p._set_cfg("monitored_uids", remaining)):
+                return error_response(
+                    "配置保存失败（已回滚），请检查磁盘空间或权限", status_code=500
+                )
             name = str(p.accounts.pop(uid).get("name") or uid)
-            p._set_cfg("monitored_uids", list(p.accounts.keys()))
-            p._save_config()
-            p._save_state()
+            await p._save_state_async()
             p._record_event("info", uid=uid, name=name, detail="通过面板取消监控")
             return json_response({"removed": uid, "name": name})
         return error_response("不支持的操作")
@@ -636,15 +642,16 @@ class DashboardAPI:
                 return error_response(f"账号 {uid} 不在监控列表中，请先添加监控")
             if uid in current:
                 return error_response(f"账号 {uid} 已在 @全体名单中")
-            p._set_cfg("at_all_uids", [*current, uid])
+            new_uids = [*current, uid]
         elif action == "remove":
             # 移出不要求仍在监控列表：取消监控后留在名单里的 uid 也该能从面板清掉
             if uid not in current:
                 return error_response(f"账号 {uid} 不在 @全体名单中")
-            p._set_cfg("at_all_uids", [u for u in current if u != uid])
+            new_uids = [u for u in current if u != uid]
         else:
             return error_response("不支持的操作")
-        p._save_config()
+        if not p._update_config(lambda _cfg: p._set_cfg("at_all_uids", new_uids)):
+            return error_response("配置保存失败（已回滚），请检查磁盘空间或权限", status_code=500)
         name = p._account_name(uid)
         on = action == "add"
         p._record_event(
@@ -668,8 +675,10 @@ class DashboardAPI:
             if "value" not in body:
                 return error_response("缺少 value（true 开启 / false 关闭）")
             on = bool(body.get("value"))
-            p._set_cfg("at_all", on)
-            p._save_config()
+            if not p._update_config(lambda _cfg: p._set_cfg("at_all", on)):
+                return error_response(
+                    "配置保存失败（已回滚），请检查磁盘空间或权限", status_code=500
+                )
             p._record_event("info", detail=f"面板{'开启' if on else '关闭'} @全体成员总开关")
             return json_response({"at_all": on})
         if action in ("add_keyword", "remove_keyword"):
@@ -685,12 +694,15 @@ class DashboardAPI:
                     return error_response(f"关键词「{kw}」已在限定列表中")
                 if len(kws) >= AT_ALL_KEYWORD_MAX_COUNT:
                     return error_response(f"关键词最多 {AT_ALL_KEYWORD_MAX_COUNT} 个，先删些再添加")
-                p._set_cfg("at_all_keywords", [*kws, kw])
+                new_kws = [*kws, kw]
             else:
                 if kw not in kws:
                     return error_response(f"关键词「{kw}」不在限定列表中")
-                p._set_cfg("at_all_keywords", [k for k in kws if k != kw])
-            p._save_config()
+                new_kws = [k for k in kws if k != kw]
+            if not p._update_config(lambda _cfg: p._set_cfg("at_all_keywords", new_kws)):
+                return error_response(
+                    "配置保存失败（已回滚），请检查磁盘空间或权限", status_code=500
+                )
             p._record_event(
                 "info", detail=f"面板{'加入' if adding else '移除'} @全体关键词「{kw}」"
             )
@@ -712,8 +724,10 @@ class DashboardAPI:
             if umo in sessions:
                 return error_response("该会话已在推送列表中")
             sessions.append(umo)
-            p._set_cfg("push_sessions", sessions)
-            p._save_config()
+            if not p._update_config(lambda _cfg: p._set_cfg("push_sessions", sessions)):
+                return error_response(
+                    "配置保存失败（已回滚），请检查磁盘空间或权限", status_code=500
+                )
             p._record_event("info", detail=f"通过面板新增推送目标 {umo}")
             return json_response({"added": umo})
         if action == "remove":
@@ -721,8 +735,10 @@ class DashboardAPI:
             if umo not in sessions:
                 return error_response("该会话不在推送列表中")
             sessions.remove(umo)
-            p._set_cfg("push_sessions", sessions)
-            p._save_config()
+            if not p._update_config(lambda _cfg: p._set_cfg("push_sessions", sessions)):
+                return error_response(
+                    "配置保存失败（已回滚），请检查磁盘空间或权限", status_code=500
+                )
             p._record_event("info", detail=f"通过面板移除推送目标 {umo}")
             return json_response({"removed": umo})
         return error_response("不支持的操作")
@@ -744,8 +760,11 @@ class DashboardAPI:
                 return error_response(f"账号 {uid} 不在监控列表中，请先添加监控")
             rules = p._album_rules()
             rules[(uid, gid)] = album
-            p._set_cfg("album_rules", [f"{u}:{g}:{a}" for (u, g), a in rules.items()])
-            p._save_config()
+            rule_list = [f"{u}:{g}:{a}" for (u, g), a in rules.items()]
+            if not p._update_config(lambda _cfg: p._set_cfg("album_rules", rule_list)):
+                return error_response(
+                    "配置保存失败（已回滚），请检查磁盘空间或权限", status_code=500
+                )
             p._record_event(
                 "info",
                 uid=uid,
@@ -760,8 +779,11 @@ class DashboardAPI:
             if (uid, gid) not in rules:
                 return error_response("该规则不存在（可能已被移除）")
             rules.pop((uid, gid))
-            p._set_cfg("album_rules", [f"{u}:{g}:{a}" for (u, g), a in rules.items()])
-            p._save_config()
+            rule_list = [f"{u}:{g}:{a}" for (u, g), a in rules.items()]
+            if not p._update_config(lambda _cfg: p._set_cfg("album_rules", rule_list)):
+                return error_response(
+                    "配置保存失败（已回滚），请检查磁盘空间或权限", status_code=500
+                )
             p._record_event("info", uid=uid, detail=f"面板移除相册绑定：群 {gid}")
             return json_response({"removed": f"{uid}:{gid}"})
         return error_response("不支持的操作")
@@ -800,11 +822,11 @@ class DashboardAPI:
                     break
             else:
                 rules.append((uid, keyword, gid, album))
-            p._set_cfg(
-                "album_keyword_rules",
-                [f"{u}:{k}:{g}:{a}" if u else f"{k}:{g}:{a}" for u, k, g, a in rules],
-            )
-            p._save_config()
+            rule_texts = [f"{u}:{k}:{g}:{a}" if u else f"{k}:{g}:{a}" for u, k, g, a in rules]
+            if not p._update_config(lambda _cfg: p._set_cfg("album_keyword_rules", rule_texts)):
+                return error_response(
+                    "配置保存失败（已回滚），请检查磁盘空间或权限", status_code=500
+                )
             scope = f"博主 {uid}" if uid else "全局"
             p._record_event(
                 "info",
@@ -821,11 +843,11 @@ class DashboardAPI:
             if not any(u == uid and k == keyword and g == gid for u, k, g, _ in rules):
                 return error_response("该规则不存在（可能已被移除）")
             rules = [r for r in rules if not (r[0] == uid and r[1] == keyword and r[2] == gid)]
-            p._set_cfg(
-                "album_keyword_rules",
-                [f"{u}:{k}:{g}:{a}" if u else f"{k}:{g}:{a}" for u, k, g, a in rules],
-            )
-            p._save_config()
+            rule_texts = [f"{u}:{k}:{g}:{a}" if u else f"{k}:{g}:{a}" for u, k, g, a in rules]
+            if not p._update_config(lambda _cfg: p._set_cfg("album_keyword_rules", rule_texts)):
+                return error_response(
+                    "配置保存失败（已回滚），请检查磁盘空间或权限", status_code=500
+                )
             scope = f"博主 {uid}" if uid else "全局"
             p._record_event(
                 "info",
@@ -1142,15 +1164,15 @@ class DashboardAPI:
 
     async def pipeline_status(self):
         try:
-            stats = self.p.pipeline_stats()
+            # 统计要读归档库/SQLite，同步调用在 NAS 上会卡住整个事件循环
+            stats = await asyncio.to_thread(self.p.pipeline_stats)
         except Exception as exc:
             return error_response(f"读取管线状态失败：{self._safe_error(exc)}", status_code=500)
         return json_response(
             {
                 "status": stats,
                 "queue_worker": bool(
-                    getattr(self.p, "_pipeline_worker_task", None)
-                    and not self.p._pipeline_worker_task.done()
+                    getattr(self.p, "_pipeline_task", None) and not self.p._pipeline_task.done()
                 ),
             }
         )
@@ -1181,15 +1203,23 @@ class DashboardAPI:
                 return error_response("目录模板与文件名模板不能为空")
             if not isinstance(categories, dict):
                 return error_response("categories 必须是 JSON 对象")
-            group["naming_directory"] = directory
-            group["naming_file"] = filename
-            group["categories"] = {
+            new_group = dict(group)
+            new_group["naming_directory"] = directory
+            new_group["naming_file"] = filename
+            new_group["categories"] = {
                 str(key).strip(): str(value).strip()
                 for key, value in categories.items()
                 if str(key).strip() and str(value).strip()
             }
-            config["pipeline"] = group
-            self.p._save_config()
+
+            def _apply(cfg: MutableMapping) -> None:
+                cfg["pipeline"] = new_group
+
+            if not self.p._update_config(_apply):
+                return error_response(
+                    "配置保存失败（已回滚），请检查磁盘空间或权限", status_code=500
+                )
+            group = new_group
             self._record_unified("更新图床命名模板与博主分类")
         return json_response(
             {
@@ -1206,7 +1236,7 @@ class DashboardAPI:
     # ---------------- P6：文案库 ----------------
 
     async def copylib_overview(self):
-        stats = self.p.copylib_status()
+        stats = await asyncio.to_thread(self.p.copylib_status)
         if not stats.get("ok"):
             return error_response(stats.get("error", "文案库不可用"), status_code=409)
         return json_response(stats)
@@ -1219,7 +1249,7 @@ class DashboardAPI:
             limit = max(1, min(50, int(body.get("limit") or 10)))
         except (TypeError, ValueError):
             return error_response("limit 必须为整数")
-        rows = self.p.copylib_list(uid, keyword, limit)
+        rows = await asyncio.to_thread(self.p.copylib_list, uid, keyword, limit)
         return json_response({"uid": uid, "keyword": keyword, "items": rows})
 
     async def copylib_import(self):
