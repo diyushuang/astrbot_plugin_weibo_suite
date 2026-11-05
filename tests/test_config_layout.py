@@ -278,7 +278,7 @@ def test_schema_to_default_config_matches_host_algorithm():
 
 
 def test_documented_config_key_count_matches_schema():
-    """README 与配置手册里的「180 个配置键」必须与 schema 同步。
+    """README 与配置手册里的「179 个配置键」必须与 schema 同步。
 
     配置手册自己声明「以 `_conf_schema.json` 当前内容为准，改 schema 时这份计数
     要一起改」——既然规则写出来了，就交给用例守。计数口径与手册一致：每个配置

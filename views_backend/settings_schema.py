@@ -235,9 +235,6 @@ FIELD_META: dict[str, dict[str, Any]] = {
     "archive.auto_archive": _f("监控命中后自动归档"),
     "archive.page_delay": _f("回填页间间隔", unit="秒", min=0, max=60, step=0.5, advanced=True),
     "archive.since": _f("回填默认起始日期", placeholder="YYYY-MM-DD"),
-    "archive.download_concurrency": _f(
-        "原图下载并发", unit="并发", min=1, max=10, step=1, advanced=True
-    ),
     # ---------------- pipeline ----------------
     "pipeline.enabled": _f("启用图床管线", danger=True),
     "pipeline.naming_directory": _f("目录模板"),
@@ -478,7 +475,7 @@ def visible_schema_groups(schema: dict[str, Any] | None = None) -> dict[str, dic
     """返回 15 个可见分组（object 且有 items，且没有 invisible 标记）。
 
     旧布局的顶层镜像键是标量或 dict，不在此列；`invisible` 的隐藏镜像也不在
-    此列。这样设置页只处理真正面向用户的 180 个分组键。
+    此列。这样设置页只处理真正面向用户的 179 个分组键。
     """
     data = schema if schema is not None else load_schema()
     groups = {

@@ -1,4 +1,4 @@
-/* 设置页：按后端下发的 schema 目录动态渲染 180 个配置项。
+/* 设置页：按后端下发的 schema 目录动态渲染 179 个配置项。
  *
  * 设计约束：
  * - 数据只来自 `GET settings`，写回只走 `POST settings/save`（批量）。
@@ -27,6 +27,8 @@ const state = {
   values: {},
   secrets: {},
   dirty: new Map(),
+  // Ctrl+S 不经过按钮禁用态：没有这个标记，连按两次会并发两次保存
+  saving: false,
   activePage: "",
   filter: "",
   generatedTs: 0,
@@ -724,7 +726,7 @@ function renderAboutPage(page) {
     "secret 字段只显示「是否已配置」，任何响应都不包含原值；输入框留空表示保持不变，点「清除」才会写空串。",
     "配置文件本身仍是明文。备份、截图、发 issue 前请剔除 Cookie、Token、Access Key 与代理账号。",
     "面板写入等同于聊天指令的管理操作；面板访问权限完全由 AstrBot WebUI 登录会话决定，插件侧没有额外 token。",
-    "这些设置写入 schema 已声明的 180 个分组键；旧布局的顶层镜像键不在此页展示，保存后由插件同步为运行期平铺键。",
+    "这些设置写入 schema 已声明的 179 个分组键；旧布局的顶层镜像键不在此页展示，保存后由插件同步为运行期平铺键。",
     "少数项需要重载插件才生效（例如面板路由、ffmpeg 探测、已缓存的并发与浏览器目录）。",
   ]) {
     list.append(el("li", "", text));
@@ -908,6 +910,7 @@ function collectChanges() {
 }
 
 async function saveSettings() {
+  if (state.saving) return;
   if (!state.dirty.size) {
     state.hooks.status("没有未保存的改动", "warning");
     return;
@@ -933,6 +936,7 @@ async function saveSettings() {
   }
   nodes.save.disabled = true;
   nodes.reload.disabled = true;
+  state.saving = true;
   state.hooks.status("正在保存设置…", "");
   try {
     const data = await api().apiPost("settings/save", { values: payload });
@@ -963,6 +967,7 @@ async function saveSettings() {
       "error"
     );
   } finally {
+    state.saving = false;
     nodes.save.disabled = false;
     nodes.reload.disabled = false;
   }

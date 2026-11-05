@@ -272,11 +272,6 @@
         "type": "string",
         "default": "",
         "description": "回填默认起始日期（YYYY-MM-DD，空为到底）"
-      },
-      "download_concurrency": {
-        "type": "int",
-        "default": 1,
-        "description": "归档原图下载并发（1 = 串行，最稳）"
       }
     }
   },

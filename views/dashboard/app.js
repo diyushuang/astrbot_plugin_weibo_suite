@@ -1120,7 +1120,30 @@ function wireUnified() {
   });
 }
 
+// 轮询与 visibilitychange 共用同一个调度器：一轮还没结束时再来的刷新请求
+// 只记一个「补跑」标记，等当前轮结束再跑。否则慢请求返回的旧快照会覆盖
+// 刚渲染的新状态（例如刚改完命名规则又被 20 秒前的响应刷回旧值）。
+let loadInFlight = false;
+let loadQueued = false;
+
 async function load() {
+  if (loadInFlight) {
+    loadQueued = true;
+    return;
+  }
+  loadInFlight = true;
+  try {
+    await loadAll();
+  } finally {
+    loadInFlight = false;
+    if (loadQueued) {
+      loadQueued = false;
+      setTimeout(load, 0);
+    }
+  }
+}
+
+async function loadAll() {
   try {
     const data = await window.__bridge.apiGet("overview");
     renderOverview(data);

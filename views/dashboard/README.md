@@ -4,7 +4,7 @@
 
 - `index.html`：页签导航与各卡片的表单骨架。
 - `app.js`：运行面板逻辑（原生 JavaScript，ES module），通过插件桥接对象的 `apiGet()` / `apiPost()` 调后端，并负责页内确认框与 20 秒自动刷新。
-- `settings.js`：设置页渲染与交互（180 键目录、搜索、脏检查、批量保存、secret 脱敏输入）。
+- `settings.js`：设置页渲染与交互（179 键目录、搜索、脏检查、批量保存、secret 脱敏输入）。
 - `style.css`：面板样式，跟随 AstrBot 主题在明暗之间切换。
 - `logo.svg` 与 `icon-*.svg`：插件标识与设置页主题图标（根目录 `logo.png` 由 `logo.svg` 导出）。
 

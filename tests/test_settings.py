@@ -1,8 +1,8 @@
-"""设置页：180 键全覆盖、默认值回显、类型校验、secret 不回显与落盘。
+"""设置页：179 键全覆盖、默认值回显、类型校验、secret 不回显与落盘。
 
 这组用例守三件事：
 
-1. `_conf_schema.json` 的 15 个可见分组、180 个键，每一个都在设置目录里，
+1. `_conf_schema.json` 的 15 个可见分组、179 个键，每一个都在设置目录里，
    都有控件、短标签和可写标记；没有重复、没有漏项。
 2. 空配置时 GET 回显 schema 默认值；把默认值原样 POST 回去能写入所有分组，
    再 GET 仍然一致。
@@ -100,13 +100,13 @@ def test_catalog_covers_every_visible_schema_key_exactly_once():
     fields = _catalog_fields()
     keys = [field["key"] for field in fields]
 
-    assert len(keys) == len(set(keys)) == 180, "设置目录有重复键或漏项"
+    assert len(keys) == len(set(keys)) == 179, "设置目录有重复键或漏项"
     assert set(keys) == _visible_keys(), "设置目录与 schema 的可见键不一致"
     assert catalog["counts"] == {
         "pages": 5,
         "groups": 15,
-        "keys": 180,
-        "writable": 180,
+        "keys": 179,
+        "writable": 179,
         "secrets": 16,
     }
 
@@ -492,7 +492,7 @@ def test_generated_settings_map_lists_every_key():
         encoding="utf-8"
     )
     rows = [line for line in mapping.splitlines() if line.startswith("| ") and "`" in line]
-    assert len(rows) == 180, f"映射表应有 180 行配置项，实际 {len(rows)}"
+    assert len(rows) == 179, f"映射表应有 179 行配置项，实际 {len(rows)}"
     for key in _visible_keys():
         assert f"`{key}`" in mapping, f"映射表缺少 {key}"
 
