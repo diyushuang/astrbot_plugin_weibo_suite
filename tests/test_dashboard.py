@@ -626,6 +626,14 @@ def test_safe_error_masks_authorization_bearer_header(api):
     assert "authorization: <凭据已隐藏>" in text
 
 
+def test_safe_error_masks_cookie_header_value(api):
+    """面板错误响应与 errors.log 用同一套 Cookie 头口径。"""
+    safe = api._safe_error("请求失败 Cookie: session=abc123; theme=dark")
+    assert "abc123" not in safe
+    assert "session=<凭据已隐藏>" in safe
+    assert "theme=dark" in safe
+
+
 def test_safe_error_keeps_plain_text_and_does_not_cut_placeholder(api):
     assert api._safe_error("解析失败：缺少字段 title") == "解析失败：缺少字段 title"
 

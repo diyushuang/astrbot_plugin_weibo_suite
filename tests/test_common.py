@@ -242,3 +242,56 @@ def test_sanitize_error_text_masks_authorization_inside_url():
         assert "TOKEN" not in safe
         assert "dXNlcjpwYXNz" not in safe
         assert "<地址已隐藏><凭据已隐藏>" not in safe
+
+
+def test_sanitize_error_text_masks_cookie_header_pairs():
+    """Cookie 头只遮凭据值，非密钥键与分号/空格风格原样保留。"""
+    raw = "Cookie: session=abc123; theme=dark; token=xyz"
+    safe = sanitize_error_text(raw, limit=200)
+    assert "abc123" not in safe
+    assert "session=<凭据已隐藏>" in safe
+    assert "theme=dark" in safe
+    assert safe.startswith("Cookie: ")
+
+    spaced = "Cookie: session = abc123 ; theme = dark"
+    spaced_safe = sanitize_error_text(spaced, limit=200)
+    assert "abc123" not in spaced_safe
+    assert "session = <凭据已隐藏>" in spaced_safe
+    assert "theme = dark" in spaced_safe
+
+    quoted = 'Cookie: session="abc123"; theme=dark'
+    quoted_safe = sanitize_error_text(quoted, limit=200)
+    assert 'session="<凭据已隐藏>"' in quoted_safe
+    assert "theme=dark" in quoted_safe
+
+
+def test_sanitize_error_text_masks_set_cookie_and_keeps_attributes():
+    """Set-Cookie 的 Path/HttpOnly/Expires 是属性，不是凭据；session 不能漏。"""
+    raw = "Set-Cookie: session=xyz; Path=/; HttpOnly; Expires=Wed, 21 Oct 2015 07:28:00 GMT"
+    safe = sanitize_error_text(raw, limit=300)
+    assert "xyz" not in safe
+    assert "session=<凭据已隐藏>" in safe
+    assert "Path=/" in safe
+    assert "HttpOnly" in safe
+    assert "Expires=Wed, 21 Oct 2015 07:28:00 GMT" in safe
+
+
+def test_sanitize_error_text_session_whitelist_uses_weak_key_rules():
+    """裸 session= 与 session_token 并列，按弱键判据：真凭据遮、状态词保留。"""
+    hidden = "session=abcdef123456 session=abc123"
+    safe = sanitize_error_text(hidden, limit=200)
+    for value in ("abcdef123456", "abc123"):
+        assert value not in safe
+    assert safe.count(CREDENTIAL_PLACEHOLDER) == 2
+    assert "session=" in safe
+
+    kept = "session=short session=ready"
+    assert sanitize_error_text(kept, limit=200) == kept
+
+    # session_token 仍然生效，且不会被 session 分支重复替换
+    token_safe = sanitize_error_text("session_token=st_abcdef123456", limit=200)
+    assert token_safe == "session_token=<凭据已隐藏>"
+
+    # 无冒号的 cookie= 走通用规则，整段值（含内层 sessionid=）一起遮
+    cookie_safe = sanitize_error_text("cookie=sessionid=abcdef123456", limit=200)
+    assert cookie_safe == "cookie=<凭据已隐藏>"

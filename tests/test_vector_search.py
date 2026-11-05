@@ -1167,6 +1167,19 @@ def test_invalid_json_context_redacts_authorization_bearer_token():
     assert len(after) <= 80
 
 
+def test_invalid_json_context_redacts_cookie_header_value():
+    """诊断窗口里的 Cookie 头同样要脱敏，非密钥属性保留。"""
+    body = "prefix Cookie: session=abc123; theme=dark suffix"
+    position = body.index("abc123")
+
+    before, after = _invalid_json_context(body, position)
+
+    combined = before + after
+    assert "abc123" not in combined
+    assert "<凭据已隐藏>" in combined
+    assert "theme=dark" in combined
+
+
 async def test_original_info_for_thumb_name_tolerates_duplicate_points():
     """同一张图在库里被重复入库（多份缩略图副本）时，按原图直链去重后取其一。
 

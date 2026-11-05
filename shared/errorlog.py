@@ -27,8 +27,18 @@ _QUERY_SECRET_RE = re.compile(
 )
 _PROXY_USERINFO_RE = re.compile(r"\b[\w.+-]+:[^\s@/'\"<>]+@[\w.-]+(?::\d+)?")
 _BARE_FILE_PATH_RE = re.compile(r"(?:^|(?<=[\s（(【]))/file/[^\s'\"<>，。；：、）】]+")
-# 面板每条错误最多展示这么多字符；完整原文仍在 errors.log 里
+# 面板每条错误最多展示这么多字符（按字符计，中文与 ASCII 都算 1 个字）。
+# 这是「展示长度」上限，只作用于 snapshot() 回放；与下面的落盘上限是两件事。
 ERRLOG_MSG_LIMIT = 1000
+# 落盘单条上限（UTF-8 字节）：errors.log 的轮转与单批大小都按字节判定，单条
+# 记录必须远小于 ERRLOG_MAX_BYTES，否则一次追加就能把文件顶过阈值，轮转时
+# 这条超大记录会被整条丢掉。取 32768（32 KiB），正好是单批上限
+# _BATCH_MAX_BYTES（ERRLOG_MAX_BYTES // 4）的 1/4，一批能装 3 条左右，轮转
+# 砍半后也仍能保留多条可读记录。
+# 按字节而不是字符：中文一个字占 3 字节，32K 字符的中文约 96 KiB，已接近
+# 单批上限，轮转时反而更容易被整条丢弃；按字节才能和 ERRLOG_MAX_BYTES 的
+# 口径直接比较。截断点落在多字节字符中间时回退到完整字符边界。
+ERRLOG_DISK_MSG_LIMIT = 32768
 # 写盘/轮转失败的上报间隔：磁盘满时每批都失败，不限制会把日志刷成瀑布
 _WRITE_FAIL_LOG_INTERVAL = 60.0
 # 专门用于"留存本身失败"的 logger：关掉 propagate 断开与插件日志器的链路，
@@ -51,8 +61,9 @@ def _redact_error_msg(value: Any, limit: int | None = None) -> str:
     `<凭据已隐藏>`。额外覆盖它没管的裸 `/file/...`、`?token=...&sign=...`
     和 `user:pass@host` 三种形态。
 
-    ``limit=None`` 表示不截断：`errors.log` 落盘要保留完整原文，供事后排查；
-    面板回放由 `snapshot()` 显式传面板上限，截断只发生在展示侧。
+    ``limit`` 是按字符计的展示截断；``limit=None`` 表示本函数不截断。落盘体积
+    由 `emit()` 另行用 `_truncate_disk_msg()` 按字节限制，面板回放则由
+    `snapshot()` 显式传 `ERRLOG_MSG_LIMIT` 截断，两个上限互不替代。
     """
     raw = str(value or "").strip()
     if not raw:
@@ -66,6 +77,24 @@ def _redact_error_msg(value: Any, limit: int | None = None) -> str:
     if limit is not None and len(text) > limit:
         text = text[:limit].rstrip() + "…"
     return text
+
+
+def _truncate_disk_msg(text: str) -> str:
+    """按 `ERRLOG_DISK_MSG_LIMIT` 截断落盘文本，并在末尾加省略号。
+
+    上限按 UTF-8 字节计（理由见常量注释）。先按字节切片，若切点落在多字节
+    字符中间，则回退到能完整解码的最长前缀，避免把半个汉字写进 JSONL；
+    截断后的省略号不占上限，所以 ASCII 文本会得到 32769 个字符。
+    """
+    if len(text.encode("utf-8")) <= ERRLOG_DISK_MSG_LIMIT:
+        return text
+    clipped = text.encode("utf-8")[:ERRLOG_DISK_MSG_LIMIT]
+    while clipped:
+        try:
+            return clipped.decode("utf-8").rstrip() + "…"
+        except UnicodeDecodeError:
+            clipped = clipped[:-1]
+    return "…"
 
 
 class _ErrorLogStore(logging.Handler):
@@ -245,11 +274,12 @@ class _ErrorLogStore(logging.Handler):
     # ---------------- logging.Handler ----------------
 
     def emit(self, record: logging.LogRecord) -> None:
-        """只过滤 + 脱敏 + 进缓冲 + 入待写队列，不碰磁盘。
+        """只过滤 + 脱敏 + 限长 + 进缓冲 + 入待写队列，不碰磁盘。
 
         脱敏放在入口而不是只在 snapshot() 出口：errors.log 也是可读文件，
         令牌/URL 落盘同样是泄漏；入口脱敏后缓冲、写盘、面板三者拿到的都是
-        同一份清洗结果。
+        同一份清洗结果。脱敏之后再按 `ERRLOG_DISK_MSG_LIMIT`（字节）截断，
+        缓冲与磁盘都拿到受限长度，单条不会再大到在轮转时被整条丢掉。
         """
         try:
             if self._src_root:
@@ -260,7 +290,7 @@ class _ErrorLogStore(logging.Handler):
                 "ts": record.created,
                 "level": record.levelname,
                 "src": f"{record.funcName}:{record.lineno}",
-                "msg": _redact_error_msg(record.getMessage()),
+                "msg": _truncate_disk_msg(_redact_error_msg(record.getMessage())),
             }
             line = json.dumps(entry, ensure_ascii=False) + "\n"
         except Exception:
@@ -330,8 +360,9 @@ class _ErrorLogStore(logging.Handler):
 
         返回前逐条脱敏：留存的是完整异常，常带图床 URL、带签名的查询串和
         代理凭据，面板会原样展示，不能直接交出去。字段名保持不变，调用方
-        拿到的结构不受影响，只清洗 msg。展示侧按 `ERRLOG_MSG_LIMIT` 截断，
-        磁盘里的完整原文不受影响（emit() 落盘时刻意不截断）。
+        拿到的结构不受影响，只清洗 msg。展示侧按 `ERRLOG_MSG_LIMIT`（字符）
+        截断；磁盘侧的原文由 `emit()` 按 `ERRLOG_DISK_MSG_LIMIT`（字节）限长，
+        两个上限相互独立。
         """
         with self._lock:
             items = list(self._buf)

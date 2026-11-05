@@ -192,7 +192,7 @@ terminate()
 ├── sns/browser/<platform>/ # Playwright 持久化 profile（每个平台一个）
 ├── copylib/                # 文案导出（正文是真实原创内容，绝不入库）
 ├── webui_uploads/          # 面板上传的临时文件（6 小时 TTL，最多留 50 个）
-└── errors.log              # 错误留存（面板 /errors 读它，返回前统一脱敏）
+└── errors.log              # 错误留存（面板 /errors 读它，返回前统一脱敏；单条落盘上限 32 KiB）
 ```
 
 写盘纪律：
@@ -208,9 +208,9 @@ terminate()
 | 模块 | 能力 |
 | --- | --- |
 | `shared/http.py` | SSRF 防护：DNS 钉扎、逐跳校验、私网/回环/元数据地址拒绝、受限流式下载 |
-| `shared/errorlog.py` | 告警/错误留存与脱敏（URL、查询串凭据、代理账号） |
+| `shared/errorlog.py` | 告警/错误留存（入口复用 `sanitize_error_text` 脱敏；单条落盘上限 32 KiB） |
 | `shared/napcat.py` | NapCat/OneBot 错误分类与载荷构造 |
-| `shared/common.py` | 小工具与常量 |
+| `shared/common.py` | 小工具、常量与脱敏规则（URL/裸 IP/认证头/Cookie 头/裸键值） |
 
 **所有外部 URL 下载必须走 `shared/http.py`**，不允许自己 `aiohttp.get`。
 媒体下载的额外规则见 `weibo/album.py::_media_pace()`：它用独立的

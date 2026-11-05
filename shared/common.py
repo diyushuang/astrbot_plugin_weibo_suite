@@ -153,6 +153,7 @@ _SECRET_KEY_NAMES = (
     "accesstoken",
     "refresh_token",
     "session_token",
+    "session",
     "client_secret",
     "api_key",
     "apikey",
@@ -188,6 +189,22 @@ _AUTH_HEADER_RE = re.compile(
     r"(" + "|".join(_AUTH_SCHEMES) + r")(\s+)([^\s'\"&]+)(['\"]?)"
 )
 
+# Cookie 头是「一个头里带多条键值对」的敏感形态：
+# `Cookie: session=abc123; theme=dark`、`Set-Cookie: session=xyz; Path=/; HttpOnly`。
+# 不能交给通用 key=value 规则：它的值字符集包含 ASCII 分号，会把 `abc123;`
+# 连分隔符一起吞掉，破坏原有的分号/空格风格；`Path=`、`Expires=` 这类属性
+# 又不在白名单里，逐个匹配容易误判。这里先整头匹配，再对 tail 逐对处理，
+# 只遮白名单里的键，其余字符（分号、空格、引号、属性）原样保留。
+# Cookie 头里的 `session` 键位置本身就说明它是会话标识，不像裸文本里的
+# `session=short` 那样可能是状态词，因此非空值即遮；其余键沿用通用白名单
+# 与弱键判据。
+_COOKIE_CREDENTIAL_KEYS = frozenset({"session", "session_token"})
+_COOKIE_HEADER_RE = re.compile(r"(?i)(?<![A-Za-z0-9_-])((?:set-)?cookie)(:)([ \t]*)([^\r\n]*)")
+_COOKIE_PAIR_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9_-])([A-Za-z][A-Za-z0-9_.-]*)([ \t]*=)"
+    r"(?:'([^']*)'|\"([^\"]*)\"|([^;'\"]*))"
+)
+
 # 认证头出现在 URL 查询串里时（`?authorization=Bearer TOKEN`），上一条规则先把
 # 键、scheme 与令牌换成 `<凭据已隐藏>`，URL 规则随后只能遮到它前面的地址，
 # 两个占位符会紧贴在一起。这里把它们（含中间空白/标点）合并成一个地址占位符，
@@ -211,16 +228,18 @@ def _hide_auth_header(match: re.Match[str]) -> str:
     return f"{key}{sep}{spaces}{open_quote}{CREDENTIAL_PLACEHOLDER}{close_quote}"
 
 
-# `sign` / `token` / `authorization` 是弱键：值经常是 expired / invalid /
-# positive / none / disabled 这类排障状态词，整键打码会让错误失去可读性。
-# 只有值「像凭据」才打码，判据三条：
+# `sign` / `token` / `authorization` / `session` 是弱键：值经常是 expired /
+# invalid / positive / none / disabled / short / ready 这类排障状态词，整键
+# 打码会让错误失去可读性。只有值「像凭据」才打码，判据三条：
 #   1) 长度 ≥ 12——随机 token 的常见量级；
 #   2) 长度 ≥ 6 且是纯十六进制——摘要/签名段（如 `abcdef`、`deadbeefcafebabe`）；
 #   3) 含数字或凭据分隔符（_ - + / = %）——`ghp_xxx`、`abc12345` 这类。
 # `expired`/`invalid`/`positive`/`disabled`/`None` 都是无数字的字母词，
 # 三条都不满足，因此保持可读；真实 `Bearer/Basic <token>` 形态由上一条
-# 认证头规则整段吃掉，不依赖这里的判据。
-_WEAK_SECRET_KEYS = frozenset({"sign", "token", "authorization", "proxy-authorization"})
+# 认证头规则整段吃掉，不依赖这里的判据。`session=abcdef123456` 这类真会话
+# 标识会被三条判据命中；Cookie 头里的 `session` 另按 `_COOKIE_CREDENTIAL_KEYS`
+# 处理（键位置已说明语义，非空即遮）。
+_WEAK_SECRET_KEYS = frozenset({"sign", "token", "authorization", "proxy-authorization", "session"})
 _WEAK_VALUE_HINT_RE = re.compile(r"\d|[_\-+/=%]")
 _HEX_VALUE_RE = re.compile(r"[0-9a-fA-F]+")
 
@@ -250,16 +269,60 @@ def _hide_secret_value(match: re.Match[str]) -> str:
     return f"{key}={CREDENTIAL_PLACEHOLDER}"
 
 
+def _cookie_value_needs_mask(key: str, value: str) -> bool:
+    """Cookie 头里的一对键值是否要遮。
+
+    `_COOKIE_CREDENTIAL_KEYS` 覆盖 `session` 这类键位置即语义的会话标识；
+    其余键沿用通用白名单：强键 ≥4 字符即遮，弱键只在值像凭据时遮，
+    `theme=dark`、`Path=/` 这类非白名单属性一律原样保留。
+    """
+    lowered = key.casefold()
+    if lowered in _COOKIE_CREDENTIAL_KEYS:
+        return bool(value)
+    if lowered not in _SECRET_KEY_NAMES:
+        return False
+    if lowered in _WEAK_SECRET_KEYS:
+        return _looks_like_credential(value)
+    return len(value) >= 4
+
+
+def _hide_cookie_pair(match: re.Match[str]) -> str:
+    """只替换 Cookie 头里的凭据值，保留键名、等号、引号与首尾空白。"""
+    key, sep, single, double, bare = match.groups()
+    if single is not None:
+        value, quote, lead, trail = single, "'", "", ""
+    elif double is not None:
+        value, quote, lead, trail = double, '"', "", ""
+    else:
+        raw = bare or ""
+        value = raw.strip(" \t")
+        lead = raw[: len(raw) - len(raw.lstrip(" \t"))]
+        trail = raw[len(raw.rstrip(" \t")) :]
+        quote = ""
+    if not value or not _cookie_value_needs_mask(key, value):
+        return match.group(0)
+    return f"{key}{sep}{quote}{lead}{CREDENTIAL_PLACEHOLDER}{trail}{quote}"
+
+
+def _hide_cookie_header(match: re.Match[str]) -> str:
+    """整头匹配后，只对 tail 里的键值对逐个处理，分隔符不动。"""
+    key, sep, spaces, tail = match.groups()
+    return f"{key}{sep}{spaces}{_COOKIE_PAIR_RE.sub(_hide_cookie_pair, tail)}"
+
+
 def sanitize_error_text(value: Any, limit: int | None = 200) -> str:
     """把异常文本收敛成可进群聊的短句：隐藏 URL、IP 与裸凭据键值，并截断长度。
 
     仅用于**用户可见**的错误提示；完整异常仍应写日志。管理员配置的图床
     地址可能含内网 IP 或带签名的查询串，异常字符串常把它们原样拼进去。
-    顺序固定为「认证头 → URL/IP → 裸 key=value → 占位符合并」：
+    顺序固定为「认证头 → Cookie 头 → URL/IP → 裸 key=value → 占位符合并」：
     认证头的值带空格，必须在 URL 规则与通用键值规则之前整段处理；若先跑 URL
     规则，URL 会在空格处截断，把 `?authorization=Bearer` 吃掉、令牌留在外面。
-    URL 先于裸键值规则，是为了不让键值规则把整条地址切碎；最后把 URL 规则与
-    认证头规则各自产生的相邻占位符合并，避免 `<地址已隐藏><凭据已隐藏>`。
+    Cookie 头紧跟认证头，是因为通用键值规则的值字符集包含 ASCII 分号，
+    `session=abc123;` 会被连分隔符一起吞掉；先按头整体处理才能保留分号/空格。
+    URL 先于裸键值规则，是为了不让键值规则把整条地址切碎；Cookie 值里的
+    URL（非密钥键）仍由随后的 URL 规则遮掉。最后把 URL 规则与认证头规则
+    各自产生的相邻占位符合并，避免 `<地址已隐藏><凭据已隐藏>`。
 
     ``limit=None`` 供需要按原文长度对照位置的调用方使用（如 embedding 诊断
     片段、errors.log 落盘）：裸凭据替换会改写文本长度，按原文长度截断会切掉
@@ -269,6 +332,7 @@ def sanitize_error_text(value: Any, limit: int | None = 200) -> str:
     if not text:
         return "未知错误（详情见机器人日志）"
     text = _AUTH_HEADER_RE.sub(_hide_auth_header, text)
+    text = _COOKIE_HEADER_RE.sub(_hide_cookie_header, text)
     text = _URL_IN_TEXT_RE.sub(ADDRESS_PLACEHOLDER, text)
     text = _IPV4_IN_TEXT_RE.sub(ADDRESS_PLACEHOLDER, text)
     text = _SECRET_KV_RE.sub(_hide_secret_value, text)

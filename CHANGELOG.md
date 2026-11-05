@@ -64,9 +64,30 @@
   `authorization=disabled` 这类没有「scheme + 令牌」的诊断值不动。
   `authorization` / `proxy-authorization` 在通用规则里按弱键处理，避免把
   `disabled` / `None` 当成凭据打码；`/errors` 的记录在 `shared/errorlog.py` 的
-  `emit()` 入口即脱敏，`errors.log` 保留完整原文（不截断），面板回放才按展示
-  上限截断。升级前已存在的 `errors.log` 明文不会被回写，只在 `/errors` 面板
-  回放时脱敏，彻底清理需在面板「清空错误留存」。
+  `emit()` 入口即脱敏，`errors.log` 落盘保存脱敏后的文本（超过
+  `ERRLOG_DISK_MSG_LIMIT` 时截断，见下一条），面板回放再按展示上限截断。
+  升级前已存在的 `errors.log` 明文不会被回写，只在 `/errors` 面板回放时脱敏，
+  彻底清理需在面板「清空错误留存」。
+- **错误留存单条落盘没有上限**（`shared/errorlog.py`）：上一轮为保留完整原文把
+  `emit()` 改成不截断后，单条记录可以远超 512 KiB 的轮转阈值：下一次写入触发
+  轮转时，`_rotate_if_needed()` 的后半段切分与尾部裁剪会把这条超大记录整条丢
+  掉（实测 1 MB 记录轮转后文件只剩 `bytes: 96, lines: 1`）。新增
+  `ERRLOG_DISK_MSG_LIMIT = 32768`（按 UTF-8 字节），`emit()` 在脱敏后按上限截
+  断并追加 `…`，内存缓冲与磁盘都拿到受限长度；面板回放仍按 `ERRLOG_MSG_LIMIT`
+  （1000 字符）截断，两个上限相互独立。按字节计是因为轮转与单批大小都以字节
+  判定：中文一字 3 字节，32K 字的中文约 96 KiB，已接近单批上限；按字节截断时
+  切点会回退到完整字符边界，不会写出半个汉字。32 KiB 是单批上限
+  （`ERRLOG_MAX_BYTES // 4`，128 KiB）的 1/4，轮转后仍能保留多条可读记录。
+- **裸 `session=` 与 Cookie / Set-Cookie 头内的键值未脱敏**（`shared/common.py`）：
+  `session` 与 `session_token` 并列加入通用白名单，并按弱键处理——
+  `session=abcdef123456` 打码，`session=short` / `session=ready` 这类状态词保留。
+  新增 `Cookie:` / `Set-Cookie:` 头解析：整头匹配后只逐对处理白名单里的键，
+  `session` / `session_token` 在头内非空即遮；`theme`、`Path`、`HttpOnly`、
+  `Expires` 等未列入白名单的键原样保留，分号、空格与引号风格不动。规则插在
+  认证头之后、URL 规则之前：认证头必须最先处理带空格的值，而通用 key=value
+  规则的值字符集包含 ASCII 分号，若先跑会把 `session=abc123;` 的分号一起吞掉。
+  `cookie=sessionid=...` 不带冒号，仍由通用规则整段遮值。全角冒号按既有结论
+  不匹配，未放宽。
 - **弱键判据的已有边界**（`shared/common.py`）：阈值仍为 ≥12，没有收紧——
   `token=authenticated` 这类 12 字符以上的纯字母状态词会被误判成凭据打码；
   `token=abcdefghijk`（11 位纯字母）这类真凭据会漏打。这是「优先保住排障词
