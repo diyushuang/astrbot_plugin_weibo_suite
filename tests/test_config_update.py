@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import threading
+
 
 class CountingConfig(dict):
     def __init__(self, data=None, *, fail=False):
@@ -42,3 +44,20 @@ def test_update_config_batch_writes_disk_once(make_weibo_plugin):
     assert plugin.config.saves == 1
     assert plugin.config["push"]["at_all"] is True
     assert plugin.config["monitor"] == {"poll_interval": 300}
+
+
+def test_update_config_snapshot_failure_returns_false(make_weibo_plugin):
+    """配置含不可深拷贝对象时只返回 False，不把异常抛到面板成 500。"""
+    plugin = make_weibo_plugin()
+    plugin.config = CountingConfig({"push": {"at_all": False}})
+    plugin.config["lock"] = threading.Lock()
+    mutated = []
+
+    def mutate(cfg):
+        mutated.append(True)
+
+    assert plugin._update_config(mutate) is False
+    # 快照失败发生在 mutate 之前：内存配置与磁盘都没有被动过
+    assert mutated == []
+    assert plugin.config["push"] == {"at_all": False}
+    assert plugin.config.saves == 0

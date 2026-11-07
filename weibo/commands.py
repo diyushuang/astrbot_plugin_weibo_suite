@@ -83,8 +83,9 @@ class CommandsMixin:
             yield event.plain_result("本群已在推送列表中，无需重复绑定")
             return
         sessions.append(umo)
-        self._set_cfg("push_sessions", sessions)
-        self._save_config()
+        if not self._update_config(lambda _cfg: self._set_cfg("push_sessions", sessions)):
+            yield event.plain_result("保存配置失败，本群尚未绑定，请稍后重试或到面板检查配置")
+            return
         logger.info(f"{PLUGIN_NAME} 新增推送目标: {umo}")
         yield event.plain_result("绑定成功，本群将接收微博更新推送")
 
@@ -96,8 +97,9 @@ class CommandsMixin:
             yield event.plain_result("本群尚未绑定推送")
             return
         sessions.remove(umo)
-        self._set_cfg("push_sessions", sessions)
-        self._save_config()
+        if not self._update_config(lambda _cfg: self._set_cfg("push_sessions", sessions)):
+            yield event.plain_result("保存配置失败，本群仍在推送列表中，请稍后重试或到面板检查配置")
+            return
         logger.info(f"{PLUGIN_NAME} 移除推送目标: {umo}")
         yield event.plain_result("解绑成功，本群不再接收推送")
 
@@ -123,8 +125,13 @@ class CommandsMixin:
             "fail_count": 0,
             "next_retry_ts": 0.0,
         }
-        self._set_cfg("monitored_uids", list(self.accounts.keys()))
-        self._save_config()
+        if not self._update_config(
+            lambda _cfg: self._set_cfg("monitored_uids", list(self.accounts.keys()))
+        ):
+            # 配置没落盘就不能留下"内存里有、重启后没有"的账号
+            self.accounts.pop(uid, None)
+            yield event.plain_result("保存配置失败，账号未添加，请稍后重试或到面板检查配置")
+            return
         await self._save_state_async()
         name = self.accounts[uid]["name"]
         extra = "" if nickname else "（未能获取昵称，下轮检查会自动补齐，请留意确认 uid 正确）"
@@ -140,9 +147,13 @@ class CommandsMixin:
         if not uid or uid not in self.accounts:
             yield event.plain_result(f"账号 {uid or '(空)'} 不在监控列表中，请用 微博列表 查看")
             return
-        name = self.accounts.pop(uid)["name"]
-        self._set_cfg("monitored_uids", list(self.accounts.keys()))
-        self._save_config()
+        name = self.accounts[uid]["name"]
+        new_uids = [key for key in self.accounts if key != uid]
+        if not self._update_config(lambda _cfg: self._set_cfg("monitored_uids", new_uids)):
+            # 先落盘再摘账号：保存失败时监控列表保持原样，不留半截态
+            yield event.plain_result("保存配置失败，账号仍在监控列表中，请稍后重试或到面板检查配置")
+            return
+        self.accounts.pop(uid, None)
         await self._save_state_async()
         yield event.plain_result(f"已取消监控：{name}（{uid}）")
 
@@ -225,8 +236,10 @@ class CommandsMixin:
             return
         rules = self._album_rules()
         rules[(uid, str(gid))] = album_name
-        self._set_cfg("album_rules", [album_rule_token(u, g, a) for (u, g), a in rules.items()])
-        self._save_config()
+        cfg_rules = [album_rule_token(u, g, a) for (u, g), a in rules.items()]
+        if not self._update_config(lambda _cfg: self._set_cfg("album_rules", cfg_rules)):
+            yield event.plain_result("保存配置失败，本次相册绑定未生效，请稍后重试或到面板检查配置")
+            return
         name = self.accounts[uid]["name"]
         tip = (
             ""
@@ -252,8 +265,10 @@ class CommandsMixin:
             return
         for key in targets:
             rules.pop(key, None)
-        self._set_cfg("album_rules", [album_rule_token(u, g, a) for (u, g), a in rules.items()])
-        self._save_config()
+        cfg_rules = [album_rule_token(u, g, a) for (u, g), a in rules.items()]
+        if not self._update_config(lambda _cfg: self._set_cfg("album_rules", cfg_rules)):
+            yield event.plain_result("保存配置失败，本次解除未生效，请稍后重试或到面板检查配置")
+            return
         logger.info(f"{PLUGIN_NAME} 相册解绑: {uid} -> {targets}")
         yield event.plain_result(
             f"已解除 {len(targets)} 条绑定（群：{'、'.join(g for _, g in targets)}）"
@@ -333,8 +348,12 @@ class CommandsMixin:
             return
         rules = self._album_keyword_rules()
         overwritten = keyword_rules_upsert(rules, None, kw, target_gid, album)
-        self._set_cfg("album_keyword_rules", _keyword_rules_to_cfg(rules))
-        self._save_config()
+        cfg_rules = _keyword_rules_to_cfg(rules)
+        if not self._update_config(lambda _cfg: self._set_cfg("album_keyword_rules", cfg_rules)):
+            yield event.plain_result(
+                "保存配置失败，本次关键词路由未生效，请稍后重试或到面板检查配置"
+            )
+            return
         logger.info(f"{PLUGIN_NAME} 关键词路由(全局): 「{kw}」 -> 群 {target_gid} 相册「{album}」")
         tip = "（已覆盖同关键词同群的原规则）" if overwritten else ""
         yield event.plain_result(
@@ -357,8 +376,10 @@ class CommandsMixin:
             )
             return
         rules = [r for r in rules if not (r[0] is None and r[1] == kw)]
-        self._set_cfg("album_keyword_rules", _keyword_rules_to_cfg(rules))
-        self._save_config()
+        cfg_rules = _keyword_rules_to_cfg(rules)
+        if not self._update_config(lambda _cfg: self._set_cfg("album_keyword_rules", cfg_rules)):
+            yield event.plain_result("保存配置失败，本次删除未生效，请稍后重试或到面板检查配置")
+            return
         logger.info(f"{PLUGIN_NAME} 关键词路由移除(全局): 「{kw}」 -> {removed}")
         yield event.plain_result(
             f"已删除 {len(removed)} 条全局规则："
@@ -406,8 +427,12 @@ class CommandsMixin:
             return
         rules = self._album_keyword_rules()
         overwritten = keyword_rules_upsert(rules, uid, kw, target_gid, album)
-        self._set_cfg("album_keyword_rules", _keyword_rules_to_cfg(rules))
-        self._save_config()
+        cfg_rules = _keyword_rules_to_cfg(rules)
+        if not self._update_config(lambda _cfg: self._set_cfg("album_keyword_rules", cfg_rules)):
+            yield event.plain_result(
+                "保存配置失败，本次关键词路由未生效，请稍后重试或到面板检查配置"
+            )
+            return
         name = self.accounts[uid]["name"]
         logger.info(
             f"{PLUGIN_NAME} 关键词路由(博主 {uid}): 「{kw}」 -> 群 {target_gid} 相册「{album}」"
@@ -434,8 +459,10 @@ class CommandsMixin:
             )
             return
         rules = [r for r in rules if not (r[0] == uid and r[1] == kw)]
-        self._set_cfg("album_keyword_rules", _keyword_rules_to_cfg(rules))
-        self._save_config()
+        cfg_rules = _keyword_rules_to_cfg(rules)
+        if not self._update_config(lambda _cfg: self._set_cfg("album_keyword_rules", cfg_rules)):
+            yield event.plain_result("保存配置失败，本次删除未生效，请稍后重试或到面板检查配置")
+            return
         logger.info(f"{PLUGIN_NAME} 关键词路由移除(博主 {uid}): 「{kw}」 -> {removed}")
         yield event.plain_result(
             f"已删除 {len(removed)} 条规则：" + "、".join(f"群 {g} 相册「{a}」" for g, a in removed)

@@ -578,17 +578,21 @@ class WeiboMonitorPlugin(
         会留下"内存改了、磁盘只写了一半"的混合态。这里先深拷贝原配置，改完
         统一保存，失败整体回滚，调用方据返回值给用户明确报错。
         """
-        snapshot = copy.deepcopy(self.config)
+        snapshot = None
         try:
+            # 深拷贝也放进 try：配置里混入不可深拷贝的对象时，异常只会让
+            # 本次保存返回 False，不会一路抛到面板变成 500。
+            snapshot = copy.deepcopy(self.config)
             mutate(self.config)
             self._save_config()
             return True
         except Exception as exc:
             # 恢复必须尽力而为：即便恢复失败也要让调用方拿到 False，
             # 不能把"保存失败"伪装成成功
-            with contextlib.suppress(Exception):
-                self.config.clear()
-                self.config.update(snapshot)
+            if snapshot is not None:
+                with contextlib.suppress(Exception):
+                    self.config.clear()
+                    self.config.update(snapshot)
             logger.warning(f"{PLUGIN_NAME} 配置保存失败，已回滚内存改动: {exc}")
             return False
 
