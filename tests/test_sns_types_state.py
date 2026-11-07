@@ -197,21 +197,20 @@ def test_identity_status_and_missing_keys():
     assert missing_required_keys("instagram", "") == ["sessionid"]
 
 
-def test_identity_store_persists_cookie_and_login_state(tmp_path):
+def test_identity_store_persists_login_state(tmp_path):
     store = IdentityStore(tmp_path)
-    assert store.stored_cookie("xhs") == ""
-    store.save_cookie("xhs", "a1=1; web_session=2")
-    assert store.stored_cookie("xhs") == "a1=1; web_session=2"
+    store.mark_login("xhs", True, note="手动登录")
+    assert store.login_state("xhs")["logged_in"] is True
+    assert store.login_state("xhs")["note"] == "手动登录"
 
     fresh = IdentityStore(tmp_path)
-    assert fresh.stored_cookie("xhs") == "a1=1; web_session=2"
-    fresh.mark_login("xhs", True, note="手动登录")
     assert fresh.login_state("xhs")["logged_in"] is True
-    assert fresh.login_state("xhs")["note"] == "手动登录"
 
-    summary = fresh.summary("xhs", "")
+    # Cookie 只从配置项读：summary 只认传进来的 cookie_from_config
+    summary = fresh.summary("xhs", "a1=1; web_session=2")
     assert summary["cookie_configured"] is True
     assert summary["logged_in"] is True
+    assert fresh.summary("xhs", "")["cookie_configured"] is False
     assert "web_session=2" not in json.dumps(summary)
     # P2-7 回归：摘要里**不能**再有本机绝对路径（它会经 /sns/overview 原样
     # 回传到浏览器）；面板只需要"目录建了没"这一个比特。
@@ -220,8 +219,5 @@ def test_identity_store_persists_cookie_and_login_state(tmp_path):
     assert isinstance(summary["has_profile"], bool)
     assert os.sep + C.SNS_BROWSER_DIR not in json.dumps(summary)
     assert not any(isinstance(v, str) and os.path.isabs(v) for v in summary.values())
-    # Cookie 文件不该对所有用户可读
-    cred = fresh.credentials_path
-    assert cred.exists()
-    if os.name != "nt":
-        assert (cred.stat().st_mode & 0o777) == 0o600
+    # 插件不再读写任何凭据文件
+    assert not (fresh.root / "credentials.json").exists()

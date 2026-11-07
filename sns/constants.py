@@ -76,9 +76,6 @@ JITTER_RATIO: dict[str, float] = {"douyin": 0.20, "xhs": 0.25, "instagram": 0.20
 # 平台级并发上限（同时最多几个账号在抓）
 PLATFORM_CONCURRENCY: dict[str, int] = {"douyin": 2, "xhs": 1, "instagram": 1}
 
-# 单账号并发恒为 1：同一身份同时打两个请求是最典型的风控特征
-ACCOUNT_CONCURRENCY = 1
-
 # 首屏只要这么多条：翻页越多越像爬虫，而且我们只需要"有没有新的"
 FETCH_POST_LIMIT = 12
 
@@ -199,18 +196,13 @@ def signal_label(signal: str) -> str:
     return SIGNALS.get(signal, (OUTCOME_NETWORK, 0.0, signal))[2]
 
 
-# 明确"正常但没有内容"的信号（空列表本身不是错，只是这次没东西）
-EMPTY_SIGNALS = frozenset({"ok.empty"})
-
 # ---------------------------------------------------------------- 存储布局
 
-# 全部落在 <data_dir>/sns/ 下：状态、凭据、浏览器 profile 各自分开，
+# 全部落在 <data_dir>/sns/ 下：状态与浏览器 profile 各自分开，
 # 这样"清空浏览器登录"和"删除订阅"是两件互不影响的事。
 SNS_DIR_NAME = "sns"
 SNS_STATE_FILE = "sns_state.json"
-SNS_CREDENTIALS_FILE = "credentials.json"
 SNS_BROWSER_DIR = "browser"
-SNS_SESSIONS_FILE = "sessions.json"
 
 # ---------------------------------------------------------------- 配置键
 

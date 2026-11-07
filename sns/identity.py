@@ -6,9 +6,9 @@
   记录"这个平台上次登录成功是什么时候"，**不读、不写、不落盘任何 Cookie**。
   这是保号的关键：Cookie 一旦被导出成文本，就等于把可以无限重放的凭证复制到
   了插件数据目录，泄漏面从"一个浏览器 profile"扩大到"任何能读文件的东西"。
-- **M2（HTTP + 导出 Cookie）**：Cookie 从配置项或 `credentials.json` 读，
-  文件权限 0600，面板只显示 `已配置 / 长度 / 前 6 位…`，日志里一律走
-  `redact_cookie()`。
+- **M2（HTTP + 导出 Cookie）**：Cookie **只从配置项读**（`<platform>_cookie`），
+  插件不读、也不写任何凭据文件；面板只显示 `已配置 / 长度 / 前 6 位…`，日志里
+  一律走 `redact_cookie()`。
 
 `parse_cookie_string()` / `redact_cookie()` 都是纯函数，测试直接断言字符串。
 """
@@ -17,15 +17,11 @@ from __future__ import annotations
 
 import contextlib
 import json
-import logging
-import os
 import time
 from pathlib import Path
 from typing import Any
 
 from . import constants as C
-
-logger = logging.getLogger("astrbot_plugin_weibo_suite.sns")
 
 # 平台登录态的粗判：M1 用页面特征，M2 用 Cookie 里必须存在的字段
 REQUIRED_COOKIE_KEYS: dict[str, tuple[str, ...]] = {
@@ -86,17 +82,13 @@ def missing_required_keys(platform: str, cookie: str) -> list[str]:
 
 
 class IdentityStore:
-    """`<data>/sns/` 下的凭据与登录态文件（M2 才真正存 Cookie）。"""
+    """`<data>/sns/` 下的登录态文件与浏览器 profile 目录（不落任何 Cookie 文本）。"""
 
     def __init__(self, data_dir: Path):
         self.root = Path(data_dir) / C.SNS_DIR_NAME
         self._session_cache: dict[str, Any] | None = None
 
     # ------------------------------------------------------------ 路径
-
-    @property
-    def credentials_path(self) -> Path:
-        return self.root / C.SNS_CREDENTIALS_FILE
 
     @property
     def sessions_path(self) -> Path:
@@ -109,39 +101,6 @@ class IdentityStore:
 
     def profile_dir(self, platform: str) -> Path:
         return self.profile_root / platform
-
-    # ------------------------------------------------------------ 凭据
-
-    def _load_credentials(self) -> dict[str, Any]:
-        try:
-            data = json.loads(self.credentials_path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-        return data if isinstance(data, dict) else {}
-
-    def stored_cookie(self, platform: str) -> str:
-        return str(self._load_credentials().get(platform) or "")
-
-    def save_cookie(self, platform: str, cookie: str) -> None:
-        data = self._load_credentials()
-        text = str(cookie or "").strip()
-        if text:
-            data[platform] = text
-        else:
-            data.pop(platform, None)
-        self.root.mkdir(parents=True, exist_ok=True)
-        try:
-            tmp = self.credentials_path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(self.credentials_path)
-            _restrict(self.credentials_path)
-        except Exception as exc:
-            with contextlib.suppress(OSError):
-                self.credentials_path.with_suffix(".json.tmp").unlink(missing_ok=True)
-            # 只报平台与异常类型：绝不把 Cookie 值写进日志（它会随日志被转发/上报）。
-            logger.warning(
-                f"[sns] 保存 {platform} 的 Cookie 失败（{exc.__class__.__name__}）：{exc}"
-            )
 
     # ------------------------------------------------------------ 登录态（M1）
 
@@ -184,7 +143,7 @@ class IdentityStore:
 
     def summary(self, platform: str, cookie_from_config: str = "") -> dict[str, Any]:
         """面板用的一份完整状态：M1 登录态 + M2 凭据是否就绪。"""
-        cookie = str(cookie_from_config or "") or self.stored_cookie(platform)
+        cookie = str(cookie_from_config or "")
         state = self.login_state(platform)
         info = identity_status(cookie)
         missing = missing_required_keys(platform, cookie)
@@ -199,14 +158,6 @@ class IdentityStore:
             "cookie_preview": info["preview"],
             "missing_keys": missing,
             # 只回"目录建了没"的布尔：本机绝对路径一旦进 JSON 就会经
-            # `/sns/overview` 回传到浏览器（91c4913 只修了 credentials 一处）。
+            # `/sns/overview` 回传到浏览器。
             "has_profile": self.profile_dir(platform).is_dir(),
         }
-
-
-def _restrict(path: Path) -> None:
-    """POSIX 上把权限收紧到仅属主；Windows 的 chmod 不支持 0600 语义，跳过。"""
-    if os.name == "nt":
-        return
-    with contextlib.suppress(OSError, NotImplementedError):
-        os.chmod(path, 0o600)

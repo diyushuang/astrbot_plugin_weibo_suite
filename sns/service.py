@@ -325,9 +325,6 @@ class SnsService:
         self._browser_error = ""
         return True, f"已打开{C.PLATFORM_LABEL.get(platform, platform)}登录窗口：{url}"
 
-    def mark_logged_in(self, platform: str, note: str = "") -> None:
-        self.identity.mark_login(platform, True, note=note)
-
     # ------------------------------------------------------------ 主循环
 
     async def _poll_loop(self) -> None:
@@ -654,10 +651,8 @@ class SnsService:
     # ------------------------------------------------------------ 取数
 
     def _cookie_for(self, platform: str) -> str:
-        configured = str(self.cfg(f"{platform}_cookie", "") or "").strip()
-        if configured:
-            return configured
-        return self.identity.stored_cookie(platform)
+        """Cookie 只从配置项读：插件不读任何凭据文件。"""
+        return str(self.cfg(f"{platform}_cookie", "") or "").strip()
 
     async def _fetch_with_deadline(self, account: SnsAccount) -> FetchResult:
         """给单账号取数加一层硬截止，避免一个卡死的源拖住整轮检查。
