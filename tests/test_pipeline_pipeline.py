@@ -624,27 +624,30 @@ async def test_pipeline_stop_is_idempotent(tmp_path):
     host = make_host(tmp_path, store, services=make_services(), config={"enabled": True})
     host.pipeline_start()
     host.pipeline_enqueue(MID)
+    # 停机前人为留一个失败计数与一个未到点的退避句柄
+    host._pipeline_fail_map()["stuck"] = 2
+    handle = asyncio.get_running_loop().call_later(3600, lambda: None)
+    host._pipeline_retry_handles_ref().add(handle)
     await host.pipeline_stop()
     assert host.pipeline_queue_size() == 0
     assert host._pipeline_pending == set()
     assert host._pipeline_task is None
+    # #6：失败计数随停机关闭，重启后不应继承上一轮的次数
+    assert host._pipeline_fail_map() == {}
+    # #7：未触发的退避定时器要被取消并清空句柄集合
+    assert handle.cancelled() is True
+    assert host._pipeline_retry_handles_ref() == set()
     await host.pipeline_stop()  # 二次调用不再抛
     assert host.pipeline_queue_size() == 0
 
 
-async def test_worker_backs_off_exponentially_and_resets(monkeypatch, tmp_path):
-    delays = []
+async def test_worker_backs_off_per_post_and_resets(monkeypatch, tmp_path):
+    scheduled = []
 
-    async def fake_sleep(delay):
-        delays.append(delay)
+    def fake_schedule(host, key, delay):
+        scheduled.append((key, delay))
 
-    class Shim:
-        def __getattr__(self, name):
-            return getattr(asyncio, name)
-
-        sleep = staticmethod(fake_sleep)
-
-    monkeypatch.setattr(pipeline_mod, "asyncio", Shim())
+    monkeypatch.setattr(PipelineMixin, "_pipeline_schedule_retry", fake_schedule)
     store = make_store(tmp_path)
     add_post(store, tmp_path)
     host = make_host(tmp_path, store, services=make_services(), config={"enabled": True})
@@ -663,12 +666,23 @@ async def test_worker_backs_off_exponentially_and_resets(monkeypatch, tmp_path):
         for mid in ("bad-1", "bad-2", "bad-3", "good-1"):
             assert host.pipeline_enqueue(mid) is True
         await wait_until(lambda: len(calls) == 4)
+        # 退避按「本 mid 的连续失败次数」派生，且不阻塞 worker：三条坏帖
+        # 都是首轮重试 = 5s（旧实现是 worker 级累积，会排成 5/10/20）
+        assert scheduled == [("bad-1", 5.0), ("bad-2", 5.0), ("bad-3", 5.0)]
+        assert host._pipeline_fail_map() == {"bad-1": 1, "bad-2": 1, "bad-3": 1}
+        # 同一条帖子第二次失败 → 10s；第三次到 max_attempts → 不再重投
+        scheduled.clear()
+        host._pipeline_retry_pending("bad-1")
+        await wait_until(lambda: scheduled == [("bad-1", 10.0)])
+        scheduled.clear()
+        host._pipeline_retry_pending("bad-1")
+        await wait_until(lambda: "bad-1" not in host._pipeline_fail_map())
+        assert scheduled == []
     finally:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
-    assert calls == ["bad-1", "bad-2", "bad-3", "good-1"]
-    assert delays == [5.0, 10.0, 20.0]
+    assert calls == ["bad-1", "bad-2", "bad-3", "good-1", "bad-1", "bad-1"]
 
 
 # ---------------------------------------------------------------- 补跑 / 统计

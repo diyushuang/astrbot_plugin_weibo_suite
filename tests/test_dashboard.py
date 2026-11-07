@@ -88,7 +88,7 @@ class FakePlugin:
         self._store = FakeStore()
         self._backfill_last_stats = {"status": "done", "inserted": 2}
         self._backfill_task = None
-        self._pipeline_worker_task = None
+        self._pipeline_task = None
         self.events: list[str] = []
         self.saved = 0
 

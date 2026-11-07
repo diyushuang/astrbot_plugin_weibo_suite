@@ -293,7 +293,9 @@ class PipelineMixin:
             return
         self._pipeline_refill_task = None
         try:
-            if self.pipeline_enabled():
+            # 回灌会把归档里 200 条缺口逐条试跑；服务未绑定（trace/图床注入
+            # 失败）时每条都会以"管线未就绪"失败重试，纯属空转刷告警。
+            if self.pipeline_enabled() and self.pipeline_services() is not None:
                 self._pipeline_refill_task = loop.create_task(
                     self._pipeline_refill_pending(), name="weibo-pipeline-refill"
                 )
@@ -328,15 +330,26 @@ class PipelineMixin:
         self._pipeline_refill_task = None
         if refill is not None and not refill.done():
             refill.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await refill
+            # gather 只吞「被等待的那条任务」自身的取消（作为返回值收集）；
+            # 若 pipeline_stop 本身被取消，CancelledError 照常向上抛，
+            # 不会被误当成"清理完成"。
+            await asyncio.gather(refill, return_exceptions=True)
         task = getattr(self, "_pipeline_task", None)
         self._pipeline_task = None
         if task is not None and not task.done():
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+            await asyncio.gather(task, return_exceptions=True)
+        # 退避重投的定时器句柄统一回收：否则停机后到点的回调仍会跑一次
+        # （虽然 pending 已清、会提前返回，但句柄会一直存活到触发为止）。
+        handles = getattr(self, "_pipeline_retry_handles", None)
+        if handles:
+            for handle in list(handles):
+                handle.cancel()
+            handles.clear()
         self._pipeline_pending_ref().clear()
+        # 失败计数随停机关闭：重启后同一 mid 应从第 1 次重新计数，
+        # 与"停机残留交给下次回灌重跑"的语义一致。
+        self._pipeline_fail_map().clear()
         queue = getattr(self, "_pipeline_queue", None)
         if queue is None:
             return
@@ -448,8 +461,6 @@ class PipelineMixin:
         queue = self._pipeline_queue_ref()
         pending = self._pipeline_pending_ref()
         fail_map = self._pipeline_fail_map()
-        loop = asyncio.get_running_loop()
-        delay = _BACKOFF_MIN
         max_attempts = max(1, self._pipeline_int("max_attempts", 3))
         while True:
             mid = await queue.get()
@@ -470,7 +481,6 @@ class PipelineMixin:
                     queue.task_done()
             if not failed:
                 fail_map.pop(key, None)
-                delay = _BACKOFF_MIN
                 continue
             count = int(fail_map.get(key, 0)) + 1
             if count >= max_attempts:
@@ -478,15 +488,34 @@ class PipelineMixin:
                 # 达到上限就停止重投，避免同一帖在队列里无限热循环；
                 # 媒体条目的尝试次数已在归档库累计，补跑会按上限跳过
                 logger.warning("图床管线单帖连续失败 %d 次，停止重投（mid=%s）", count, key)
-                delay = _BACKOFF_MIN
                 continue
             fail_map[key] = count
             pending.add(key)
-            # call_later 而不是立刻 put：退避期间不占用 worker，队列里其它
-            # 帖子先跑；pending 已占位，生产者不会重复入队。
-            loop.call_later(delay, self._pipeline_retry_pending, key)
-            await asyncio.sleep(delay)
-            delay = min(_BACKOFF_MAX, delay * 2)
+            # 退避由定时器负责，worker 立刻回去取下一帖：退避期间不占用
+            # worker，队列里其它帖子先跑；pending 已占位，生产者不会重复入队。
+            # 时长按**本 mid 的连续失败次数**派生（不是 worker 级累积），
+            # 一条反复失败的帖子不会把后续新帖的首次重试一起拖慢。
+            delay = min(_BACKOFF_MAX, _BACKOFF_MIN * 2 ** (count - 1))
+            self._pipeline_schedule_retry(key, delay)
+
+    def _pipeline_retry_handles_ref(self) -> set[asyncio.TimerHandle]:
+        """尚未触发的退避重投定时器句柄；停机时逐个 cancel 并清空。"""
+        handles = getattr(self, "_pipeline_retry_handles", None)
+        if not isinstance(handles, set):
+            handles = set()
+            self._pipeline_retry_handles = handles
+        return handles
+
+    def _pipeline_schedule_retry(self, key: str, delay: float) -> None:
+        """登记一次退避重投：句柄进集合，触发时自清理，停机时统一回收。"""
+        handles = self._pipeline_retry_handles_ref()
+
+        def fire() -> None:
+            handles.discard(handle)
+            self._pipeline_retry_pending(key)
+
+        handle = asyncio.get_running_loop().call_later(delay, fire)
+        handles.add(handle)
 
     def _pipeline_retry_pending(self, key: str) -> None:
         """退避到点后把失败的 mid 放回队尾；停机/已被清出 pending 则放弃。"""
