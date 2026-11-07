@@ -115,7 +115,7 @@
 - `text_max_length` 默认只有 100 字符，长微博会被截断；`show_full_weibo_text` 只影响长文（正文超过截断长度时是否改发全文），不改变普通帖的截断。
 - `message_send_timeout` 是单条消息的总超时，同时开图片与视频、或目标通道是 QQ 官方机器人时建议加到 120 以上。
 - 推送顺序由 `push_delay_seconds` 控制，`max_push_per_round` 用于压突发：一次检查命中很多帖子时，先推 N 条，其余留在待推送队列按重试次数继续。
-- 多群推送**部分失败只补发失败的会话**：某条微博只在部分 `push_sessions` 里失败时，条目留在队列并记住 `retry_sessions`（`weibo/pusher.py:1114-1136`），下一轮只发这些会话，已送达的群不会出现同一条微博两遍（`weibo/pusher.py:891-903`）。发送结果「未知」（超时但可能已经发出）按已送达处理、不重发——宁可漏一条也不在群里刷重复；这个重试名单与已下载的媒体一起落盘，重启不丢。之后新绑定的群不会参与老条目的补发。
+- 多群推送**部分失败只补发失败的会话**：某条微博只在部分 `push_sessions` 里失败时，条目留在队列并记住 `retry_sessions`（`weibo/pusher.py:1111-1139`），下一轮只发这些会话，已送达的群不会出现同一条微博两遍（`weibo/pusher.py:894-906`）。发送结果「未知」（超时但可能已经发出）按已送达处理、不重发——宁可漏一条也不在群里刷重复；这个重试名单与已下载的媒体一起落盘，重启不丢。之后新绑定的群不会参与老条目的补发。
 - `callback_api_base` 只在反向代理或容器化部署里需要手填，留空会按当前请求自动推断。
 
 ## album
@@ -445,14 +445,15 @@ Qdrant 向量检索与多模态 embedding。
 调参建议与常见坑：
 
 - 三通道的取舍：`browser`（默认）复用本机持久化浏览器，Cookie 不出浏览器，是最稳的保号方式；`http` 需要自备对应平台的 Cookie 并承担失效风险；`rss` 只对提供了 RSS 的源有效，作为备选。
-- 间隔下限是硬约束：`base_interval_douyin` / `base_interval_xhs` 低于 300、`base_interval_instagram` 低于 900 都会被抬回下限（`sns/service.py:112-118` 的 `max(floor, value)`）。
+- `http` 模式的 Cookie 只从上面三个配置项读取：插件不读、也不写任何凭据文件，没有配置项以外的 Cookie 来源。
+- 间隔下限是硬约束：`base_interval_douyin` / `base_interval_xhs` 低于 300、`base_interval_instagram` 低于 900 都会被抬回下限（`sns/service.py:117-123` 的 `max(floor, value)`）。
 - `aggressive` 打开后取 `min(配置值, 180/180/600)` 且不低于 60 秒，风控概率显著上升。它不会覆盖你的配置值往上调，只会往下压，所以关掉后恢复成原来的间隔。
-- `health_pause_threshold` 会被夹到不超过 `health_degrade_threshold`（`sns/service.py:131-134` 取 `min`），把暂停线设得比降速线高不会生效，也不会报错。
+- `health_pause_threshold` 会被夹到不超过 `health_degrade_threshold`（`sns/service.py:142-145` 取 `min`），把暂停线设得比降速线高不会生效，也不会报错。
 - 保号参数叠加生效：新订阅前 `warmup_minutes` 分钟间隔翻倍，订阅后 `protect_mode_hours` 小时内间隔翻倍，`night_slowdown` 打开的 0–8 点间隔再翻倍。三个都默认开启，所以新号在夜间实际轮询间隔可能是基础值的数倍，这是「加了订阅半天没推送」的常见原因。
 - `jitter_ratio` 为 `0` 时用平台内置抖动比例且只向长的一侧抖；手动填正数会在内置基础上再加一层，一般不需要动。
 - `platform_concurrency` 为 `0` 时用内置并发（抖音 2 / 小红书 1 / IG 1）。调高能加快多号检查，但同一平台的请求会挤在一起，比调低间隔更容易触发风控。
-- `push_sessions` 留空时沿用微博的推送目标（`sns/service.py:137-139` 的回落逻辑），只想给订阅单独建群时再填。
-- `sns.at_all_uids` 与 `push.at_all_uids` 是**两个不同的键**，各管各的域：前者匹配订阅账号的账号 ID、名称或平台标识（`weibo/pusher.py:1853-1872` 的 `_sns_at_all_hit` 拿 `at_all_keys` 去比），后者匹配微博博主 uid。填 `douyin` 等于给抖音平台的所有账号开 @全体；留空表示白名单不设限，此时能不能 @ 只取决于 `at_all` 开关、关键词与群管理员权限这三关。
+- `push_sessions` 留空时沿用微博的推送目标（`sns/service.py:148-159` 的回落逻辑），只想给订阅单独建群时再填。
+- `sns.at_all_uids` 与 `push.at_all_uids` 是**两个不同的键**，各管各的域：前者匹配订阅账号的账号 ID、名称或平台标识（`weibo/pusher.py:1856-1875` 的 `_sns_at_all_hit` 拿 `at_all_keys` 去比），后者匹配微博博主 uid。填 `douyin` 等于给抖音平台的所有账号开 @全体；留空表示白名单不设限，此时能不能 @ 只取决于 `at_all` 开关、关键词与群管理员权限这三关。
 - `message_format` 支持 `{platform}`、`{name}`、`{time}`、`{text}`、`{link}` 五个占位符，模板里写错占位符不会报错，只会原样输出。
 - `cooldown_base_seconds` 与 `cooldown_cap_seconds` 共同决定风控冷却的指数退避区间，默认 10 分钟起、最多 1 小时。
 
@@ -479,7 +480,7 @@ Qdrant 向量检索与多模态 embedding。
 ### 两种镜像的区别
 
 - **隐藏镜像**：14 条早期键（`search_engine`、`scan_dirs`、`similarity_threshold`、`hash_size`、`top_n`、`max_images_per_query`、`ai_verify`、`register_admin_only`、`max_download_mb`、`remote_hash_enabled`、`remote_hash_ttl`、`remote_hash_max_points`、`image_delivery`、`qq_upload`）连同 `config_layout`，都带 `"invisible": true` 与 `"condition": {"advanced_settings": "__legacy__"}`。这个条件指向一个 schema 里不存在的字段，永远不成立，所以面板里根本不显示它们。
-- **运行时镜像**：微博域的 45 条旧键（`poll_interval`、`monitored_uids`、`push_sessions`、`message_format`、`album_*` 等）没有隐藏标记，面板顶层仍会出现。它们不是历史残留，而是微博域代码仍在读的镜像：`weibo/plugin.py:24` 的 `WEIBO_CFG_PATHS` 把 45 个平铺键映射到「分组 + 字段」，`_sync_config_groups`（`weibo/plugin.py:463`）在启动时以分组值为准覆盖平铺镜像，`_set_cfg`（`weibo/plugin.py:475`）在写配置时两边同时写。所以改分组键会同步到镜像，改镜像下一轮就被覆盖。
+- **运行时镜像**：微博域的 45 条旧键（`poll_interval`、`monitored_uids`、`push_sessions`、`message_format`、`album_*` 等）没有隐藏标记，面板顶层仍会出现。它们不是历史残留，而是微博域代码仍在读的镜像：`weibo/plugin.py:26` 的 `WEIBO_CFG_PATHS` 把 45 个平铺键映射到「分组 + 字段」，`_sync_config_groups`（`weibo/plugin.py:608`）在启动时以分组值为准覆盖平铺镜像，`_set_cfg`（`weibo/plugin.py:620`）在写配置时两边同时写。所以改分组键会同步到镜像，改镜像下一轮就被覆盖。
 
 ### 用户该怎么做
 
@@ -491,7 +492,7 @@ Qdrant 向量检索与多模态 embedding。
 ### 另外两处一次性迁移
 
 - `_migrate_bucket_config`（`trace/state_mixin.py:288`）：v1.2.x → v1.3.0 时把 `image_bed.mode` 里的 `cloudflare_r2` / `oracle_oci` 搬到 `storage_bucket`，若 `storage_bucket.mode` 已有值则不覆盖。
-- `_migrate_album_max_images`（`weibo/plugin.py:485`）：v1.11.x 及以前的 `album_max_images` 默认值是 9，AstrBot 会把默认值物化进部署配置，导致升级后新默认值 18 不生效。迁移只在「当前值恰好等于旧默认值 9」时上调到 18，并在 `state.json` 记一个 `album_max_images_v18` 标记，之后不再自动改动，所以迁移后手动改回 9 是允许的。
+- `_migrate_album_max_images`（`weibo/plugin.py:628`）：v1.11.x 及以前的 `album_max_images` 默认值是 9，AstrBot 会把默认值物化进部署配置，导致升级后新默认值 18 不生效。迁移只在「当前值恰好等于旧默认值 9」时上调到 18，并在 `state.json` 记一个 `album_max_images_v18` 标记，之后不再自动改动，所以迁移后手动改回 9 是允许的。
 
 ## 相关文档
 

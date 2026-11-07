@@ -5,7 +5,7 @@
 
 1. `_MessageChain` 实现了 `__iter__`，而真 AstrBot 的 `MessageChain`
    （astrbot/core/message/message_event_result.py）是 dataclass，只有 `chain: list`
-   字段，**不可迭代**。生产代码自己也只写 `chain.chain`（见 weibo/pusher.py:1835）。
+   字段，**不可迭代**。生产代码自己也只写 `chain.chain`（见 weibo/pusher.py:1838）。
 2. `_Image.fromURL(u)` 把地址存进 `.url`，真 `Image.fromURL` 存进 `.file`
    （`.url` 留空），真包自己的取值口径就是 `self.url or self.file`
    （components.py 的 `convert_to_file_path`）。

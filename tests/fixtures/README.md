@@ -26,5 +26,5 @@ Node 版 `WB_EMOJI` 实际为 93 个基础码加 4 个同义码，共 97 个键�
 本地全量核对（不进 CI，依赖仓库外参考数据）：
 
 ```powershell
-.\.venv\Scripts\python.exe astrbot_plugin_weibo_suite\scripts\verify_cleaner_golden.py
+.\.venv\Scripts\python.exe scripts\verify_cleaner_golden.py
 ```

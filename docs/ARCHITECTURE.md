@@ -172,7 +172,7 @@ terminate()
 - **失败必须自己回滚**：AstrBot 宿主的 `star_manager` 在 `initialize()` 抛错时只做
   模块级清理，**从不调用** `terminate()`。已建的 errlog 写线程、SQLite 连接、面板
   后台任务、aiohttp 会话若是放任不管，就变成孤儿，重载一次还会叠加一份。所以
-  `main.py:85-109` 用 `except BaseException` 兜住、先回收再 `raise`，且回滚不依赖
+  `main.py:101-105` 用 `except BaseException` 兜住、先回收再 `raise`，且回滚不依赖
   `_trace_initialized` / `_weibo_initialized` 标记（失败点可能落在某个域的
   `initialize()` 内部，那个域标记还没置位却已经建了一半资源），两个 `terminate()`
   自身都做到了幂等。

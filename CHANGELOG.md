@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### 死代码清理（未发布）
+
+- **A 档零引用符号整批删除**：`weibo/plugin.py` 的 `WEIBO_LAYOUT_VERSION` 与
+  `clear_error_log`、`weibo/visitor.py` 的 `_renew_quietly_force`、
+  `weibo/napcat_album.py` 的相册缓存簇（`_last_albums` / `take_cached_albums`）、
+  `weibo/constants.py` 的 `THUMBNAIL_DIR_NAME` / `_JSONP_RE`、`trace/weibo_posts.py`
+  的 `URL_RE` / `direct_url` / `replace_image`、`trace/library.py` 的
+  `delete_by_source`、`sns/constants.py` 的三个常量、`sns/adapters/douyin.py` 的
+  `USER_API_PATH`、`sns/adapters/xhs.py` 的 `covered_by_card`、`sns/browser.py` 的
+  `read_state`、`sns/commands.py` 的 `sns_add`（保留宿主真正调用的 `_sns_add`）、
+  `sns/service.py` 的 `mark_logged_in`，以及根 `constants.py` 的 `ACTIVITY_MAX` /
+  `ERRLOG_BUFFER`。配套删除三个测试辅助函数与 `data/.gitkeep`。
+- **Cookie 只从配置读取**（`sns/identity.py`、`sns/service.py`）：移除
+  `credentials.json` 的整条读取链（`credentials_path` / `_load_credentials` /
+  `stored_cookie` / `save_cookie` / `SNS_CREDENTIALS_FILE`），
+  `http` 模式的 Cookie 只认 `douyin_cookie` / `xhs_cookie` / `instagram_cookie`
+  配置项；插件不再读、也不再写任何凭据文件。
+- **文档行号修正**：`docs/CONFIGURATION.md`、`docs/WEBUI.md`、`docs/COMMANDS.md`、
+  `tests/fixtures/README.md` 里漂移的 `文件:行号` 引用按当前代码重新核对。
+
 ### 复核补修（未发布）
 
 - **图床管线退避不再拖慢其它帖子**（`weibo/pipeline.py`）：重投前不再占住 worker

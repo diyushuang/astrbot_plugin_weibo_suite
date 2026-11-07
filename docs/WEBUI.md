@@ -153,8 +153,8 @@
 - 日志类接口返回的是脱敏后的记录。`/errors` 的每条 `msg` 在 `shared/errorlog.py` 的 `emit()` 入口与 `snapshot()` 出口都经过 `_redact_error_msg()`：URL 与裸 IP 变成 `<地址已隐藏>`，`?token=` / `?sign=` 这类查询串凭据、`Authorization: Bearer ...` 认证头与 `user:pass@host` 代理账号变成 `<凭据已隐藏>`，裸 `/file/...` 路径同样变成 `<地址已隐藏>`。`Cookie:` / `Set-Cookie:` 头按同一个白名单逐对处理：`session` / `session_token` 等凭据值变成 `<凭据已隐藏>`，`theme`、`Path`、`HttpOnly`、`Expires` 这类非密钥键原样保留（分号、空格与引号风格不变），并未覆盖所有请求头。`errors.log` 单条落盘按 `ERRLOG_DISK_MSG_LIMIT`（32 KiB，UTF-8 字节）截断并追加 `…`，防止超大单条在下一次写入触发的轮转中被整条丢掉；面板展示另按 `ERRLOG_MSG_LIMIT`（1000 字符）截断，两个上限相互独立。图床直链相关的日志另由 `trace/image_bed.py` 的 `redact_url()` 处理：只保留 `scheme://host/path`，查询串（`?sign=`、`?token=` 等一次性凭据）一律收成 `?***`。
 - `/overview` 里的出网代理地址经 `redact_proxy()` 打码后才下发，不返回代理账号与密码。
 - 上传接口有后缀白名单（归档只收 `.json`，文案只收 `.csv` / `.md` / `.markdown`）、64 MB 大小上限，文件只写到插件数据目录下的 `webui_uploads/`，6 小时后由下一次上传顺带清理，最多保留最近 50 个；数据目录未就绪时直接拒绝，不落到 AstrBot 安装目录。
-- 上传是**流式分块**写入而不是整个读进内存：multipart 走的 `_store_stream()`（`views_backend/dashboard.py:938`）按 1 MB 一段写到临时 `.part` 文件，累计超过 64 MB 立即中断、返回 413 并删掉半成品；只有确认没超限才 `os.replace()` 成正式文件名。所以「选了一个 2 GB 的文件」不会先把进程撑爆再报错。
-- 错误响应不带服务端绝对路径：所有接口的异常文本都过 `_safe_error()`（`views_backend/dashboard.py:841-846`），URL 与裸 IP 变成 `<地址已隐藏>`，裸凭据（含 `Authorization: Bearer ...` 这类认证头）变成 `<凭据已隐藏>`，本机绝对路径被替换成 `<路径已隐藏>`。接口只回「为什么失败」，不回目录结构，截图贴群里也不会泄露部署路径。
+- 上传是**流式分块**写入而不是整个读进内存：multipart 走的 `_store_stream()`（`views_backend/dashboard.py:981`）按 1 MB 一段写到临时 `.part` 文件，累计超过 64 MB 立即中断、返回 413 并删掉半成品；只有确认没超限才 `os.replace()` 成正式文件名。所以「选了一个 2 GB 的文件」不会先把进程撑爆再报错。
+- 错误响应不带服务端绝对路径：所有接口的异常文本都过 `_safe_error()`（`views_backend/dashboard.py:863`），URL 与裸 IP 变成 `<地址已隐藏>`，裸凭据（含 `Authorization: Bearer ...` 这类认证头）变成 `<凭据已隐藏>`，本机绝对路径被替换成 `<路径已隐藏>`。接口只回「为什么失败」，不回目录结构，截图贴群里也不会泄露部署路径。
 - 面板启动的后台任务（回填、图库重扫、手动检查）都会登记在插件的任务集合里，插件卸载时统一取消。
 
 ## 常见问题
