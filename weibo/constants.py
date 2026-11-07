@@ -122,7 +122,7 @@ DIAG_MAX_BYTES = 512 * 1024  # 诊断文件轮转阈值：超限只留后半段
 # 这份文件补上"死机前最后在报什么告警"（发送超时、检查失败、风控冷却……）
 ERRLOG_FILE = "errors.log"
 ERRLOG_MAX_BYTES = 512 * 1024  # 轮转阈值：超限只留后半段
-# ERRLOG_BUFFER / ERRLOG_PAGE_LIMIT 与面板共享，见 constants.py
+# ERRLOG_BUFFER 见 shared/errorlog.py；ERRLOG_PAGE_LIMIT 见根 constants.py
 GIF_MAX_BYTES = 30 * 1024 * 1024  # 实况图 GIF 产物上限：超限回落封面静图，防超大 GIF
 GIF_TRANSCODE_TIMEOUT = 60  # 单条实况图 ffmpeg 转码上限（秒）：超时按失败回落封面静图
 SINAIMG_RE = re.compile(
@@ -243,8 +243,6 @@ MEDIA_STATES = ("pending", "downloaded", "album", "bed", "thumb", "vector")
 # ---- 图床/向量管线（P4）：队列上限与缩略图约定 ----
 # 与归档队列分开：归档只搬字节，管线要跑图床/embed，彼此不能互相反压
 PIPELINE_QUEUE_MAX = 500
-# 缩略图目录：与 img-indexer 现网一致（Qdrant payload.thumb_url 指向这里）
-THUMBNAIL_DIR_NAME = "thumbnails"
 PIPELINE_STAGE_DIR_NAME = "pipeline_stage"
 
 # ---- 文案库（P5/F3）：archive.db 即文案库，CSV/MD 只是导入导出通道 ----
@@ -268,7 +266,6 @@ _MONTH_MAP = {
 }
 _TZ_CN = timezone(timedelta(hours=8))
 _STD_TIME_RE = re.compile(r"^(\w{3}) (\w{3}) (\d{1,2}) (\d{2}):(\d{2}):(\d{2}) \+0800 (\d{4})$")
-_JSONP_RE = re.compile(r"\((\{.*\})\)\s*;?\s*$")
 _UID_PATTERNS = (
     re.compile(r"weibo\.com/u/(\d+)"),
     re.compile(r"m\.weibo\.cn/u/(\d+)"),

@@ -202,27 +202,6 @@ class SnsCommandsMixin:
 
     # ------------------------------------------------------------ 写操作
 
-    async def sns_add(self, event):
-        """订阅一个博主（`订阅抖音 <链接>`）"""
-        args = _tail(
-            event,
-            "抖音",
-            "douyin",
-            "dy",
-            "小红书",
-            "xhs",
-            "红书",
-            "ig",
-            "ins",
-            "instagram",
-        )
-        if len(args) < 2:
-            yield event.plain_result("用法：订阅抖音 <主页链接或 sec_uid>")
-            return
-        platform = _norm_platform(args[0]) or "douyin"
-        async for item in self._sns_add(event, platform, " ".join(args[1:])):
-            yield item
-
     async def _sns_add(self, event, platform: str, target: str):
         service = self._sns()
         if service is None:

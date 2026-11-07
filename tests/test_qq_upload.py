@@ -203,10 +203,6 @@ def test_intranet_or_invalid_rejected(url):
 # ----------------------------------------------------------------------
 
 
-def _delivery_settings(base_url="", lan_base_url=""):
-    return {"base_url": base_url, "lan_base_url": lan_base_url}
-
-
 def test_public_url_swaps_intranet_link_back_to_base(make_plugin):
     """内网直连下命中的是内网直链：按 base_url 换回公网源。"""
     plugin = make_plugin(

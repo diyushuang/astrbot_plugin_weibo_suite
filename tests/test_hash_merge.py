@@ -36,15 +36,6 @@ def _local(similarity: float, entry_id: int = 1, note: str = "本地备注") -> 
     )
 
 
-def _remote_only(plugin, monkeypatch, remote_matches):
-    """把本地腿置空、图床腿注入给定命中，隔离验证图床那条腿。"""
-    monkeypatch.setattr(plugin.library, "search", lambda _p, _n: [])
-    monkeypatch.setattr(plugin.remote_hash, "search", lambda _p, _n: remote_matches)
-    monkeypatch.setattr(plugin.remote_hash, "_cache", (list(remote_matches), None, 16, 0))
-    monkeypatch.setattr(type(plugin.remote_hash), "is_empty", property(lambda _s: False))
-    monkeypatch.setattr(plugin, "remote_hash_on", lambda: True)
-
-
 async def test_merge_prefers_local_on_equal_similarity(make_plugin, data_dir, monkeypatch):
     """同分时本地优先：本地能给出路径，回传链路更短、少一次网络往返。
 

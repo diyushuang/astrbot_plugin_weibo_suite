@@ -250,23 +250,6 @@ class BrowserSession:
             await page.bring_to_front()
         return final_url or url
 
-    async def read_state(self, page, expression: str) -> Any:
-        """在页面里求值并解析 JSON（拿 `window.__INITIAL_STATE__` 用）。"""
-        try:
-            raw = await page.evaluate(expression)
-        except Exception:
-            return None
-        if raw is None:
-            return None
-        if isinstance(raw, (dict, list)):
-            return raw
-        try:
-            import json
-
-            return json.loads(raw)
-        except Exception:
-            return None
-
     # ------------------------------------------------------------ 状态
 
     def status(self) -> dict[str, Any]:

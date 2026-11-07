@@ -405,9 +405,6 @@ class ImageLibrary:
     def delete(self, entry_id: int) -> bool:
         return self._delete_where("DELETE FROM images WHERE id = ?", (entry_id,)) > 0
 
-    def delete_by_source(self, source: str) -> int:
-        return self._delete_where("DELETE FROM images WHERE source = ?", (source,))
-
     def prune_scan_missing(self, keep_paths: set, scanned_dirs: set | None = None) -> int:
         """删除来源为 scan、文件路径不在 keep_paths 中的条目，返回删除数量。
 

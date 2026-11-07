@@ -158,8 +158,8 @@ class _Image:
     `trace/resolve_mixin.py:172` 的 `os.path.isfile(path)` 恒为 False——
     “宿主已经把图片下载成本地文件”这条最常见的生产主路径，从来没被任何测试走过。
 
-    需要验证插件**自带**兜底下载分支（resolve_mixin.py:187 起）的用例，请在该用例
-    内部用 `force_url_passthrough(monkeypatch)` 显式退回旧语义，而不是把默认行为改回去。
+    需要验证插件**自带**兜底下载分支（trace/resolve_mixin.py:187 起）的用例，可在该用例
+    内自行 monkeypatch `_Image.convert_to_file_path` 退回旧语义，而不是把默认行为改回去。
     """
 
     def __init__(self, *, url=None, file=None, path=None):
@@ -204,19 +204,6 @@ class _Image:
         _IMAGE_TMP["seq"] += 1
         self._converted_path = _write_image_file(_png_bytes(_IMAGE_TMP["seq"]), ".png")
         return self._converted_path
-
-
-def force_url_passthrough(monkeypatch):
-    """把 Image.convert_to_file_path 退回“返回 url 字符串”的旧语义。
-
-    只给需要验证插件兜底下载分支（resolve_mixin.py:187 起：宿主没给本地文件时
-    自己下载）的用例使用。真实 AstrBot 不会返回 url，所以这是**测试侧**的显式豁免。
-    """
-
-    async def _passthrough(seg):
-        return seg.path or seg.file or seg.url
-
-    monkeypatch.setattr(_Image, "convert_to_file_path", _passthrough)
 
 
 class _Reply:

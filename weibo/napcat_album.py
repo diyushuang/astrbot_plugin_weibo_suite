@@ -238,8 +238,6 @@ class NapCatAlbum:
         # 非空 = 调用方带来了"上次真的传成功过的方式"；空串表示还没学到可用载荷
         self.preferred = preferred if preferred in ("path", "base64") else ""
         self.modes = self._ordered(preferred, same_host)
-        # resolve_album 顺手拉到的相册列表，供紧接着的"现选一个"复用（一次性）
-        self._last_albums: tuple[str, list[dict]] | None = None
 
     @staticmethod
     def _ordered(preferred: str, same_host: bool) -> list[str]:
@@ -371,18 +369,6 @@ class NapCatAlbum:
             return bool(page) and bool(nxt) and nxt != attach
         return bool(more) and nxt != attach
 
-    def take_cached_albums(self, group_id: str) -> list[dict] | None:
-        """取走 resolve_album 刚顺带拉到的相册列表（一次性，取完即弃）。
-
-        resolve_album 失败时要转去"列出来让用户现选一个"，那一步要的正是同一份
-        列表：不传过去就得多列一遍（NapCat 单页只给 10 个，相册多时要翻好几页）。
-        只认同一个群、且刚拉过的那一份，用完立即清掉，不会拿到陈旧数据。
-        """
-        cached, self._last_albums = self._last_albums, None
-        if cached and cached[0] == str(group_id):
-            return cached[1]
-        return None
-
     async def resolve_album(
         self, group_id: str, want: str, default_name: str = ""
     ) -> tuple[str, str]:
@@ -402,8 +388,6 @@ class NapCatAlbum:
             if looks_like_id:  # 列不出来时至少让 ID 直通，交给协议端裁决
                 return want, default_name or want
             raise
-        # 存一份给调用方复用：解析失败转"现选一个"时不必再列一遍
-        self._last_albums = (str(group_id), albums)
         for a in albums:
             if pick(a, ALBUM_LIST_ITEM_ID_KEYS) == want:
                 return want, pick(a, ALBUM_LIST_ITEM_NAME_KEYS, want)

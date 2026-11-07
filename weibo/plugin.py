@@ -71,8 +71,6 @@ WEIBO_CFG_PATHS: dict[str, tuple[str, str]] = {
     "album_upload_payload_mb": ("album", "album_upload_payload_mb"),
 }
 
-WEIBO_LAYOUT_VERSION = "1"
-
 _SCHEMA_PATH = Path(__file__).resolve().parents[1] / "_conf_schema.json"
 
 # 宿主 AstrBotConfig._config_schema_to_default_config 的 DEFAULT_VALUE_MAP：
@@ -1157,9 +1155,3 @@ class WeiboMonitorPlugin(
             "total_mb": usage.total // 1048576,
             "free_mb": usage.free // 1048576,
         }
-
-    async def clear_error_log(self) -> int:
-        """清空错误留存（面板按钮），返回清掉的条数。"""
-        if self._errlog is None:
-            return 0
-        return self._errlog.clear()

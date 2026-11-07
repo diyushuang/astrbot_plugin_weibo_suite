@@ -36,7 +36,6 @@ MD_META_RE = re.compile(r"——\s*(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})\s*·\s*�
 MD_ENTRY_RE = re.compile(r"^\d+\.\s+")
 MD_YEAR_RE = re.compile(r"^\d{4}\s*年")
 MD_APPENDIX_PREFIXES = ("去掉话题和链接后无正文", "微博表情码对照表")
-URL_RE = re.compile(r"https?://[^\s]+")
 CODE_RE = re.compile(r"^[0-9A-Za-z_-]{4,}$")
 
 
@@ -48,11 +47,6 @@ class WeiboImage:
     image_url: str
     thumb_url: str = ""
     score: float = 0.0
-
-    @property
-    def direct_url(self) -> str:
-        """优先缩略图（720px 下载更快），没有缩略图才退回原图。"""
-        return self.thumb_url or self.image_url
 
 
 @dataclass(frozen=True)
@@ -440,11 +434,6 @@ def map_is_stale(path: str, source_dir: str) -> bool:
         except OSError:
             continue
     return False
-
-
-def replace_image(post: WeiboPost, image: WeiboImage | None) -> WeiboPost:
-    """构建脚本用：只替换 image，其余字段原样保留。"""
-    return replace(post, image=image)
 
 
 def _archive_stamp(created_at) -> str:

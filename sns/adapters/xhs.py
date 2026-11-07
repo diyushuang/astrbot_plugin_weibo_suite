@@ -296,8 +296,3 @@ def has_user_notes(state: dict[str, Any]) -> bool:
     if not isinstance(user, dict):
         return False
     return "notes" in user
-
-
-def covered_by_card(card: SnsPost) -> bool:
-    """卡片带了的字段是否够发一条消息（不够就得去拿详情）。"""
-    return bool(card.text or card.title)

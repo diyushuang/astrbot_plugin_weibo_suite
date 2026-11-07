@@ -99,14 +99,6 @@ class VisitorMixin:
             f"（连续第 {level + 1} 次触发）: {e}"
         )
 
-    async def _renew_quietly_force(self):
-        try:
-            await self._renew_visitor(force=True)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.warning(f"{PLUGIN_NAME} 换新游客身份失败: {e}")
-
     async def _renew_visitor_quietly(self):
         try:
             await self._renew_visitor()

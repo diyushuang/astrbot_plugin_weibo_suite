@@ -28,7 +28,6 @@ SIGN_SALT = "A96D855A08C0A9707F8BEF0D9A527E4E"
 UIFID_COOKIE_KEYS = ("UIFID", "UIFID_TEMP", "uifid", "uifid_temp", "uifidtemp", "UIFIDTEMP")
 
 POST_API_PATH = "/aweme/v1/web/aweme/post/"
-USER_API_PATH = "/aweme/v1/web/user/profile/other/"
 
 # 验证码判定只看 <title> 与页面顶部可见文案，不扫整页：打包 JS 里的
 # `verifyStatus` / `captchaBypass` 之类的常量几乎每页都有，按子串匹配会把

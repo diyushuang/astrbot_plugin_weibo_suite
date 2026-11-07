@@ -2,8 +2,6 @@
 
 PLUGIN_NAME = "astrbot_plugin_weibo_suite"
 PLUGIN_VERSION = "v0.9.3"
-ACTIVITY_MAX = 100
-ERRLOG_BUFFER = 2000
 
 # WebUI 单次返回的明细上限；state.json/errors.log 仍保留完整数据。
 PENDING_PAGE_LIMIT = 100
