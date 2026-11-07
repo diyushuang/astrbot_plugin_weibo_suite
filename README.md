@@ -180,8 +180,11 @@ CI 在 Python 3.10 与 3.12 上跑同样的门禁，另有一个装真 AstrBot �
   `data/plugin_data/`。
 - 日志：`*.log`（写盘前经 `redact_url()` 脱敏，直链只保留 scheme/host/path）。
 
-登录态（Cookie）只保存在浏览器 profile 或系统凭据存储里，不写日志、不进配置文件回显。
-图床直链在写日志前统一经 `redact_url()` 去掉查询串；面板的「凭据」接口只返回脱敏值。
+登录态（Cookie）：`http` 模式只从 `douyin_cookie` / `xhs_cookie` / `instagram_cookie`
+配置项读取，插件不读也不写任何凭据文件；`browser` 模式的登录态留在浏览器 profile 目录，
+不写日志、不回显明文。
+图床直链在写日志前统一经 `redact_url()` 去掉查询串；面板的「凭据」接口只返回是否配置、
+缺失字段名、前缀与长度，不返回凭据值。
 测试夹具、注释与 `CHANGELOG.md` 里的示例一律使用 `example.com`、`1000000001`、
 `示例博主` 这类占位值。
 

@@ -1,28 +1,18 @@
 # 更新日志
 
-## Unreleased
+## v0.9.4 - 2026-11-07
 
-### 死代码清理（未发布）
+### ⚠️ 升级前必读：图床管线自 v0.9.0 起从未真正运行
 
-- **A 档零引用符号整批删除**：`weibo/plugin.py` 的 `WEIBO_LAYOUT_VERSION` 与
-  `clear_error_log`、`weibo/visitor.py` 的 `_renew_quietly_force`、
-  `weibo/napcat_album.py` 的相册缓存簇（`_last_albums` / `take_cached_albums`）、
-  `weibo/constants.py` 的 `THUMBNAIL_DIR_NAME` / `_JSONP_RE`、`trace/weibo_posts.py`
-  的 `URL_RE` / `direct_url` / `replace_image`、`trace/library.py` 的
-  `delete_by_source`、`sns/constants.py` 的三个常量、`sns/adapters/douyin.py` 的
-  `USER_API_PATH`、`sns/adapters/xhs.py` 的 `covered_by_card`、`sns/browser.py` 的
-  `read_state`、`sns/commands.py` 的 `sns_add`（保留宿主真正调用的 `_sns_add`）、
-  `sns/service.py` 的 `mark_logged_in`，以及根 `constants.py` 的 `ACTIVITY_MAX` /
-  `ERRLOG_BUFFER`。配套删除三个测试辅助函数与 `data/.gitkeep`。
-- **Cookie 只从配置读取**（`sns/identity.py`、`sns/service.py`）：移除
-  `credentials.json` 的整条读取链（`credentials_path` / `_load_credentials` /
-  `stored_cookie` / `save_cookie` / `SNS_CREDENTIALS_FILE`），
-  `http` 模式的 Cookie 只认 `douyin_cookie` / `xhs_cookie` / `instagram_cookie`
-  配置项；插件不再读、也不再写任何凭据文件。
-- **文档行号修正**：`docs/CONFIGURATION.md`、`docs/WEBUI.md`、`docs/COMMANDS.md`、
-  `tests/fixtures/README.md` 里漂移的 `文件:行号` 引用按当前代码重新核对。
+- `weibo/plugin.py` 在 `__init__` 里把实例属性 `self._pipeline_worker_task` 赋成
+  `None`，遮蔽了 `pipeline.py` 的同名方法；`pipeline_start()` 调用它时抛
+  `TypeError: 'NoneType' object is not callable`，被 initialize 的兜底 `except`
+  记成一条「图床管线启动失败（管线降级）」warning 后跳过，v0.9.0–v0.9.3 的图床
+  管线因此从未消费过队列。修复后 worker 会真正启动：**升级后归档里积压的待处理
+  帖子会开始被处理**（启动时按归档缺口回灌，单次最多 200 条），CPU、带宽与图床
+  写入都会随之增加。若不希望升级后立即跑，请先在设置页关闭图床管线。
 
-### 复核补修（未发布）
+### 队列、配置与面板
 
 - **图床管线退避不再拖慢其它帖子**（`weibo/pipeline.py`）：重投前不再占住 worker
   睡眠，退避时长改按单条微博的连续失败次数派生（5s / 10s / 20s…上限 60 秒）；
@@ -40,10 +30,8 @@
   账号、相册绑定/解绑、关键词路由增删共 10 个入口改为「先落盘、成功才生效」；
   失败时直接回复哪一步没生效，不再出现「提示成功但重启就丢」。
   `微博添加` / `微博移除` 在保存失败时保持原监控列表不变。
-- **前端守卫测试可运行时验证**（`tests/`）：本机有 Node 时用最小 stub 真跑
-  `load()` 单飞调度与 `saveSettings()` 保存互斥；没有 Node 则跳过，不新增依赖。
 
-### 修掉的真 bug
+### 签到卡片与随机图
 
 - **签到卡片合成被超大长图拖垮**（`trace/checkin_card.py`）：合成前先对源图做
   `Image.draft("RGB", (1440, 1440))` 的 JPEG DCT 降采样，再判 50MP 防炸闸门；
@@ -56,12 +44,12 @@
   新增 `_checkin_card_source`，发送态是原图时先按原图对象键反查缩略图替身，查不到
   再退回原图；`_random_send_url` 增加 `thumbnail: bool | None` 显式口径，
   `random_media.send_thumbnail` 仍只决定 `/随机图` 的发图形态，互不覆盖。
+
+### 安全与日志脱敏
+
 - **embedding 返回非 JSON 时日志缺上下文**（`trace/vector_search.py`）：解析失败分支
   现在记录解析位置前后各 80 字片段，片段复用 `sanitize_error_text` 隐藏 URL 与裸 IPv4，
   再进 `errors.log` / `/errors` 面板。
-
-### 审查补修（未发布）
-
 - **脱敏顺序错误导致签名漏进日志**（`trace/vector_search.py`）：原实现先切窗口再脱敏，
   窗口起点落在长 URL 中间时前缀没有 scheme，`X-Amz-Signature` 等查询串会原样落进
   `errors.log`。改为先整段脱敏、再用「原前缀脱敏长度」映射位置并切窗口。
@@ -134,7 +122,7 @@
   `token=abcdefghijk`（11 位纯字母）这类真凭据会漏打。这是「优先保住排障词
   可读性」的取舍，尚未闭环。
 
-### 下载与归档稳定性（未发布）
+### 下载与归档
 
 - **大图与实况图下载不再拖住插件**：原图逐块写盘原本在事件循环里做同步 I/O，
   慢盘或 NAS 掉线时轮询、WebUI 与其它群推送会被一起卡住；现在写盘移出事件
@@ -150,11 +138,10 @@
 - **推送异常时仍保存本轮进度**：本轮推送队列刷新抛异常时也会把已见 ID 与
   待推送队列落盘，避免重启后重发已送达的微博；无变化的常规轮次仍不写盘。
 
-### 队列与配置（未发布）
+### 启动续跑、重试与设置项
 
 - **图床管线重启后自动续跑**：升级或重启后不必再手动补跑，启动时会按归档里
-  尚未跑完的帖子重新排队（单次最多 200 条）。注意：v0.9.0–v0.9.3 因实例属性
-  遮蔽同名方法，管线实际从未启动；升级后此前积压的待处理帖子会开始被处理。
+  尚未跑完的帖子重新排队（单次最多 200 条），详见文首「升级前必读」。
 - **图床管线单帖失败会自动重试**：失败帖子按退避间隔重新排队，连续失败达到
   配置上限（默认 3 次）才放弃，不会无限空转。
 - **慢盘与 NAS 不再拖住插件**：归档/图床状态写盘、图床命名落盘、文案库统计与
@@ -165,13 +152,29 @@
   从未被归档流程读取。旧配置文件中的该键会被忽略，无需手工清理；设置页配置键
   总数由 180 变为 179。
 
-### 面板交互（未发布）
+### 面板交互
 
 - **自动刷新不再用旧数据覆盖新状态**：上一轮刷新尚未结束时，新的刷新（含切回
   页面时的刷新）会排队等本轮结束后再跑，刚保存的命名规则、文案检索结果不会被
   早先发出的慢响应刷回旧值。
 - **设置页连按 Ctrl+S 不会并发保存**：保存进行中再按快捷键直接忽略，避免两次
   请求互相覆盖。
+
+### 其它
+
+- **前端守卫测试可运行时验证**（`tests/`）：本机有 Node 时用最小 stub 真跑
+  `load()` 单飞调度与 `saveSettings()` 保存互斥；没有 Node 则跳过，不新增依赖。
+
+### 清理（无行为变化）
+
+- **删除约 100 行零引用死代码**：15 个文件里从未被调用的常量、方法与测试夹具，
+  以及空的 `data/.gitkeep`；行为与配置项均无变化。
+- **移除从未被写入的 `credentials.json` 读取链**（`sns/identity.py`、`sns/service.py`）：
+  插件不再读、也不再写任何凭据文件，`http` 模式的 Cookie 只认
+  `douyin_cookie` / `xhs_cookie` / `instagram_cookie` 配置项。
+- **修正文档中漂移的源码行号与命令路径**：`docs/CONFIGURATION.md`、`docs/WEBUI.md`、
+  `docs/COMMANDS.md`、`docs/ARCHITECTURE.md`、`tests/fixtures/README.md` 与
+  `tests/host_compat.py` 里的 `文件:行号` 引用按当前代码重新核对。
 
 ## v0.9.3 - 2026-11-04
 
