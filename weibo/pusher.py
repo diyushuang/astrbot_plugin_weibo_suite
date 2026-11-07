@@ -777,7 +777,7 @@ class PusherMixin:
             logger.info(f"面板取消推送：微博 {item.get('post_id')} 已出队，未发送")
         return True
 
-    def cancel_pending(self, post_id: str) -> tuple[bool, str]:
+    async def cancel_pending(self, post_id: str) -> tuple[bool, str]:
         """面板「取消」：把一条待推送微博摘出队列，进可撤销保留区。
 
         正在发送的条目不能立刻搬走（发送协程还在用它），只打标记，由
@@ -796,11 +796,13 @@ class PusherMixin:
                 "已请求取消：该条正在发送，会在本次发送返回后立即取消（已发出的部分收不回）",
             )
         self._finalize_cancel(item)
-        self._save_state()
+        # 异步入口：同步 _save_state 会在事件循环线程上等 _state_file_lock，
+        # 而持锁线程正在 to_thread 写盘，慢盘时整条循环被卡住。
+        await self._save_state_async()
         name = self._account_name(str(item.get("uid") or ""))
         return True, f"已取消推送：{name} 的这条微博不再重发，{undo_min:.0f} 分钟内可恢复"
 
-    def restore_pending(self, post_id: str) -> tuple[bool, str]:
+    async def restore_pending(self, post_id: str) -> tuple[bool, str]:
         """面板「恢复」：把撤销窗口内的取消条目放回队列尾部。
 
         保留取消时的重试进度（撤销不是重置）：取消多半正是发生在"重试快烧完"的
@@ -830,7 +832,8 @@ class PusherMixin:
                 "本轮按原口径继续处理）"
             ),
         )
-        self._save_state()
+        # 同 cancel_pending：面板 handler 在事件循环里，走异步落盘避免等线程锁。
+        await self._save_state_async()
         logger.info(f"面板恢复已取消的推送：微博 {key}")
         return True, f"已恢复推送：{name} 的这条微博回到队列，重试进度保持不变"
 

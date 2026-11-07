@@ -510,7 +510,7 @@ class DashboardAPI:
         post_id = str(body.get("post_id") or "").strip()
         if not post_id:
             return error_response("缺少 post_id")
-        ok, message = p.cancel_pending(post_id)
+        ok, message = await p.cancel_pending(post_id)
         if not ok:
             return error_response(message, status_code=409)
         self._log.info(f"面板取消推送 {post_id}：{message}")
@@ -523,7 +523,7 @@ class DashboardAPI:
         post_id = str(body.get("post_id") or "").strip()
         if not post_id:
             return error_response("缺少 post_id")
-        ok, message = p.restore_pending(post_id)
+        ok, message = await p.restore_pending(post_id)
         if not ok:
             return error_response(message, status_code=409)
         self._log.info(f"面板恢复推送 {post_id}：{message}")
