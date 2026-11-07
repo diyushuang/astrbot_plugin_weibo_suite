@@ -95,6 +95,10 @@ APP_HARNESS = r"""
 const assert = require("assert");
 let loadInFlight = false;
 let loadQueued = false;
+/* 面板新增：force 意图要在排队轮次里存活。这里只补两个变量声明，
+ * 让 load() 能被单独提取运行；下面的断言保持原样。 */
+let loadForce = false;
+let loadQueuedForce = false;
 let calls = 0;
 let release;
 const gate = new Promise((resolve) => { release = resolve; });

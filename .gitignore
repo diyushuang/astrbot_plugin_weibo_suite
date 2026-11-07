@@ -15,6 +15,8 @@ __pycache__/
 htmlcov/
 pytest.log
 .pytest-of-*/
+# 性能测量脚本（measure.js metrics）的输出目录
+scripts/perf_dashboard/out/
 
 # 本地工具与编辑器
 .mimosa/

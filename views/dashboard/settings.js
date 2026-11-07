@@ -199,6 +199,10 @@ function renderRail() {
     const icon = el("img", "rail-icon");
     icon.src = ICON_BY_PAGE[page.id] || "./icon-about.svg";
     icon.alt = "";
+    icon.loading = "lazy";
+    icon.decoding = "async";
+    icon.width = 28;
+    icon.height = 28;
     const copy = el("span", "rail-copy");
     copy.append(el("span", "rail-title", page.title));
     copy.append(el("span", "rail-sub", page.about ? "版本与安全边界" : `${count} 项配置`));
@@ -670,6 +674,10 @@ function renderAboutPage(page) {
   const logo = el("img", "about-logo");
   logo.src = "./logo.svg";
   logo.alt = "微博全链路助手";
+  logo.loading = "lazy";
+  logo.decoding = "async";
+  logo.width = 56;
+  logo.height = 56;
   const copy = el("div");
   copy.append(el("div", "eyebrow", "ABOUT"));
   copy.append(el("h2", "", "微博全链路助手"));
@@ -713,6 +721,10 @@ function renderAboutPage(page) {
     const img = el("img", "about-line-icon");
     img.src = icon;
     img.alt = "";
+    img.loading = "lazy";
+    img.decoding = "async";
+    img.width = 22;
+    img.height = 22;
     const body = el("div");
     body.append(el("strong", "", title), el("span", "", desc));
     row.append(img, body);
@@ -1059,5 +1071,6 @@ export function initSettings(hooks) {
     event.preventDefault();
     event.returnValue = "";
   });
-  loadSettings({ quiet: true });
+  // 首页停在总览时不读设置：真正切到「设置」页签时由 settingsOnShown() 首次加载，
+  // 避免面板一打开就为一个看不见的页面拉 179 个配置键。
 }
