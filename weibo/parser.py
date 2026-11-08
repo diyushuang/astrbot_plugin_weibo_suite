@@ -131,7 +131,9 @@ def to_original(url: str) -> str:
         return url
     scheme = url[: m.start()] if url[: m.start()].endswith("://") else "https://"
     token, pid, ext = m.group(3), m.group(4), m.group(5)
-    if token in ("large", "original"):
+    if token in ("large", "original", "orj1080"):
+        # orj1080 是微博自己的"原图 1080"档位（长图/无损图的原始档），
+        # 改写成 /large/ 反而会降级甚至 404，必须原样保留
         return url
     return f"{scheme}{m.group(2)}.sinaimg.cn/large/{pid}.{ext}"
 
@@ -483,7 +485,11 @@ def _extract_pics(mb: dict[str, Any], rt_mb: dict[str, Any] | None = None) -> li
     for node in (mb, rt_mb):
         if not node:
             continue
-        for p in _pic_nodes(node):
+        # 图文视频混排帖的图片可能只挂在 mix_media_info 里（mblog.pics 为空），
+        # 必须无条件并入，不能只在"识别成视频帖"时才合并——否则混排里的图
+        # 在推送/归档两条链路都拿不到。
+        mix_pics, _mix_videos = _mix_media_nodes(node)
+        for p in [*_pic_nodes(node), *mix_pics]:
             largest = p.get("largest") or {}
             large = p.get("large") or {}
             base = (

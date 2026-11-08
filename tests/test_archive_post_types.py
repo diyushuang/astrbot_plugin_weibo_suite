@@ -63,7 +63,7 @@ async def test_long_post_stores_full_text(host):
     """长文帖：archive_enrich 补到 longTextContent_raw 后，整篇进 text。"""
     full_text = "长文第一段。" * 200
 
-    async def fake_long_text(mid: str) -> str | None:
+    async def fake_long_text(mid: str, bid: str = "") -> str | None:
         assert mid == MID_LONG
         return full_text
 

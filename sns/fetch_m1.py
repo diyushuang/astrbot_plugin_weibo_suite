@@ -172,19 +172,22 @@ async def _fetch_xhs(browser: BrowserSession, account_id: str, post_limit: int) 
         return FetchResult.failure("xhs.empty_state")
     if not xhs.has_user_notes(state):
         return FetchResult.failure("xhs.no_user_notes")
-    nickname, avatar, posts = xhs.parse_user_notes(state)
+    nickname, avatar, posts = xhs.parse_user_notes(state, xsec_tokens=xhs.extract_xsec_tokens(html))
     for post in posts:
         post.account_id = account_id
     return FetchResult.success(posts[:post_limit], nickname=nickname, avatar=avatar)
 
 
-async def fetch_note_detail(browser: BrowserSession, note_id: str) -> dict[str, Any]:
+async def fetch_note_detail(
+    browser: BrowserSession, note_id: str, xsec_token: str = ""
+) -> dict[str, Any]:
     """补全一篇小红书笔记的图集/视频（列表卡只有封面，且是有水印的小图）。
 
     只在"确实有新笔记要推送"时才会走到这里，所以额外一次页面加载是可接受的；
     拿到的是详情页 SSR 里的 `imageList[].urlDefault`（无水印原图）。
+    `xsec_token` 必须来自主页锚点：不带它时详情页会被风控当成"笔记不存在"。
     """
-    url = xhs.NOTE_URL.format(note_id=note_id)
+    url = xhs.note_detail_url(note_id, xsec_token)
     async with browser.lock("xhs"):
         page, status, final_url, _captured = await _open(browser, "xhs", url)
         html = await _html(page)

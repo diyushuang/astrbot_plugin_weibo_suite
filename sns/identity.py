@@ -28,7 +28,9 @@ REQUIRED_COOKIE_KEYS: dict[str, tuple[str, ...]] = {
     # 抖音的 web 接口签名需要 uifid；没有它接口必 403（实测 ArgusSecurityPlugin）
     "douyin": ("ttwid",),
     "xhs": ("a1", "web_session"),
-    "instagram": ("sessionid",),
+    # Instagram 的 web_profile_info 要求 X-CSRFToken 与 csrftoken Cookie 一致，
+    # 只有 sessionid 时必然 403
+    "instagram": ("sessionid", "csrftoken"),
 }
 
 

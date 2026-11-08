@@ -13,6 +13,26 @@ class ApiMixin:
         headers: dict[str, str],
         collect: dict[str, str] | None = None,
     ) -> str:
+        text, _final, _redirected = await self._get_text_with_meta(url, params, headers, collect)
+        return text
+
+    async def _get_text_with_meta(
+        self,
+        url: str,
+        params: dict[str, Any],
+        headers: dict[str, str],
+        collect: dict[str, str] | None = None,
+    ) -> tuple[str, str, bool]:
+        """发一次 GET，返回 `(text, final_url, 是否发生跳转)`。
+
+        302 的坑：m.weibo.cn 在登录态失效时会 302 到 `passport.*`，响应体是
+        登录页 HTML。原实现只看"HTML 就判风控"，于是把"要重新登录"当成了
+        IP 级风控——冷却、换游客、账号 paused 全都不对。这里在跟随跳转之后
+        单独校验每一跳：
+        - 落到 `passport.weibo.*`（不含 visitor.passport）→ `WeiboAuthError`；
+        - 每一跳与最终 URL 都过 `_validate_url` 白名单；
+        - 把"是否跳转"带回上层，只有**没有跳转**的 HTML 才按风控处理。
+        """
         await self._validate_url(url)
         assert self._http is not None
         timeout = aiohttp.ClientTimeout(total=15)
@@ -29,12 +49,24 @@ class ApiMixin:
                     timeout=timeout,
                     proxy=self._proxy,
                 ) as resp:
-                    if resp.status in (418, 432):
-                        raise WeiboRiskError(f"HTTP {resp.status}，触发微博 IP 级风控")
+                    if resp.status in (418, 432, 403, 429):
+                        # 403/429 与 418/432 同属"这一轮不该再打"：盲目重试只会
+                        # 把限流升级成封禁，统一进冷却分支。
+                        raise WeiboRiskError(f"HTTP {resp.status}，触发微博限流/风控")
                     resp.raise_for_status()
+                    for hop in resp.history:
+                        host = (hop.url.host or "").lower()
+                        if host.startswith("passport."):
+                            raise WeiboAuthError(f"接口被重定向到登录页（{host}），登录态已失效")
+                        await self._validate_url(str(hop.url))
+                    final = resp.url
+                    final_host = (final.host or "").lower()
+                    if final_host.startswith("passport."):
+                        raise WeiboAuthError(f"接口跳转到登录页（{final_host}），登录态已失效")
+                    await self._validate_url(str(final))
                     if collect is not None:
                         self._merge_cookies(collect, resp)
-                    return await resp.text()
+                    return await resp.text(), str(final), bool(resp.history)
             except (WeiboRiskError, WeiboAuthError):
                 raise
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
@@ -44,12 +76,16 @@ class ApiMixin:
         raise WeiboFetchError(f"请求失败: {last_err}")
 
     async def _api_get(
-        self, url: str, params: dict[str, Any], referer: str | None = None
+        self,
+        url: str,
+        params: dict[str, Any],
+        referer: str | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """GET m.weibo.cn JSON 接口。
 
         ok=-100（游客身份过期）→ 换新身份重试一次；
-        HTTP 418/432（IP 级风控）→ 记录全局冷却并换新身份，重试一次；
+        HTTP 418/432/403/429（限流/风控）→ 记录全局冷却并换新身份，重试一次；
         冷却期内直接快速失败，避免冷却期间继续向微博出网。
         """
         if time.time() < self._blocked_until:
@@ -58,7 +94,7 @@ class ApiMixin:
             )
         for attempt in (1, 2):
             try:
-                data = await self._api_get_once(url, params, referer)
+                data = await self._api_get_once(url, params, referer, extra_headers)
                 # 成功即解除风控冷却
                 self._risk_level = 0
                 self._blocked_until = 0.0
@@ -75,16 +111,28 @@ class ApiMixin:
                 await self._renew_visitor(force=True)
 
     async def _api_get_once(
-        self, url: str, params: dict[str, Any], referer: str | None
+        self,
+        url: str,
+        params: dict[str, Any],
+        referer: str | None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         if self._http is None:
             raise WeiboFetchError("HTTP 会话未初始化")
         headers = self._base_headers()
         headers.update(API_HEADERS)
         headers["Referer"] = referer or "https://m.weibo.cn/"
+        if extra_headers:
+            headers.update(extra_headers)
         if self._custom_cookies:
             # 自定义 Cookie 模式：直接使用用户身份，不走游客续期
             cookies = self._custom_cookies
+            # 自定义 Cookie 里带了 XSRF-TOKEN 时必须同步成 X-Xsrf-Token 头，
+            # 否则 weibo.com 的写/读接口会以"缺少 XSRF"拒绝（m.weibo.cn 不校验，
+            # 所以只在切到 weibo.com 端点时暴露出来）
+            xsrf = cookies.get("XSRF-TOKEN", "") or cookies.get("XSRF", "")
+            if xsrf:
+                headers["X-Xsrf-Token"] = xsrf
         else:
             if not self._visitor_cookies.get("SUB"):
                 await self._renew_visitor()
@@ -93,11 +141,17 @@ class ApiMixin:
             if xsrf:
                 headers["X-Xsrf-Token"] = xsrf
         headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
-        body = await self._get_text(url, params, headers)
+        body, final_url, redirected = await self._get_text_with_meta(url, params, headers)
         if body.lstrip().startswith("<"):
-            # 风控拦截页与错误页照样回 200：JSON 接口拿到 HTML 说明这个 IP
-            # 已经被墙了，按风控处理进入全局冷却，而不是按账号级失败继续撞墙
-            # （与媒体下载对 HTML 200 的判定口径一致）
+            if redirected:
+                # 302 之后的 HTML 不是风控：可能是被带到登录页或站点首页。
+                # 登录页已经在 _get_text_with_meta 里转成 AuthError；走到这里
+                # 说明跳到了别的正常域名，按普通失败处理，不进 IP 冷却。
+                raise WeiboFetchError(
+                    f"接口被跳转到 {urlparse(final_url).hostname} 并返回 HTML 页面"
+                )
+            # 无跳转的 HTML：风控拦截页与错误页照样回 200，说明这个 IP 已经
+            # 被墙了，按风控处理进入全局冷却（与媒体下载对 HTML 200 的口径一致）
             raise WeiboRiskError("JSON 接口返回了 HTML 页面（疑似被风控拦截）")
         try:
             data = json.loads(body)
@@ -361,7 +415,12 @@ class ApiMixin:
             self._merge_mix_pics(post, node)
 
     async def _fetch_timeline_page(self, uid: str, page: int) -> list[dict[str, Any]]:
-        """拉取用户时间线的指定页，返回解析后的帖子列表（新→旧）。"""
+        """拉取用户时间线的指定页，返回解析后的帖子列表（新→旧）。
+
+        `getIndex` 只认 `type` / `value` / `containerid` / `page`；`count` 不是
+        它的参数，带上也不会改变每页条数（服务端固定约 10 条）。所以"3 页
+        60 条"这种估算没有依据：翻页多少以实际返回为准。
+        """
         data = await self._api_get(
             WEIBO_INDEX_URL,
             {
@@ -369,7 +428,6 @@ class ApiMixin:
                 "value": uid,
                 "containerid": f"107603{uid}",
                 "page": page,
-                "count": 20,
             },
             referer=f"https://m.weibo.cn/u/{uid}",
         )

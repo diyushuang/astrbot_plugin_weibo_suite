@@ -22,7 +22,7 @@ from . import constants as C
 from .adapters import douyin as dy
 from .adapters import instagram as ig
 from .adapters import xhs
-from .identity import missing_required_keys
+from .identity import missing_required_keys, parse_cookie_string
 from .types import FetchResult
 
 # 桌面 UA：与 M1 的窗口保持同一份，避免"浏览器一套、HTTP 一套"被看成两个人
@@ -176,15 +176,17 @@ async def _fetch_xhs(session: Any, account_id: str, cookie: str, post_limit: int
         return FetchResult.failure("xhs.empty_state")
     if not xhs.has_user_notes(state):
         return FetchResult.failure("xhs.no_user_notes")
-    nickname, avatar, posts = xhs.parse_user_notes(state)
+    nickname, avatar, posts = xhs.parse_user_notes(state, xsec_tokens=xhs.extract_xsec_tokens(text))
     for post in posts:
         post.account_id = account_id
     return FetchResult.success(posts[:post_limit], nickname=nickname, avatar=avatar)
 
 
-async def fetch_note_detail(session: Any, note_id: str, cookie: str = "") -> dict[str, Any]:
+async def fetch_note_detail(
+    session: Any, note_id: str, cookie: str = "", xsec_token: str = ""
+) -> dict[str, Any]:
     """M2 版本的笔记详情（M1 不可用时的图集补全）。"""
-    url = xhs.NOTE_URL.format(note_id=note_id)
+    url = xhs.note_detail_url(note_id, xsec_token)
     status, final_url, text = await _get_text(session, url, _XHS_HEADERS, cookie)
     signal = xhs.detect_signal(text, final_url, http_status=status)
     if signal:
@@ -202,7 +204,13 @@ async def _fetch_instagram(
     session: Any, username: str, cookie: str, post_limit: int
 ) -> FetchResult:
     url = f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}"
-    status, payload = await _get_json(session, url, _IG_HEADERS, cookie)
+    headers = dict(_IG_HEADERS)
+    # Instagram 校验 `X-CSRFToken` 与 Cookie 里的 `csrftoken` 一致，缺头直接
+    # 403；M1 有浏览器自动补，M2 必须自己带上
+    csrf = parse_cookie_string(cookie).get("csrftoken", "")
+    if csrf:
+        headers["X-CSRFToken"] = csrf
+    status, payload = await _get_json(session, url, headers, cookie)
     signal = ig.detect_signal(payload, status=status)
     if signal:
         return FetchResult.failure(signal)

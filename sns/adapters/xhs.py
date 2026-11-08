@@ -19,6 +19,7 @@ import logging
 import re
 import time
 from typing import Any
+from urllib.parse import parse_qsl, quote, urlsplit
 
 from .. import constants as C
 from ..types import SnsPost
@@ -30,9 +31,16 @@ _PROFILE_RE = re.compile(r"xiaohongshu\.com/user/profile/([0-9a-fA-F]{24})", re.
 _EXPLORE_RE = re.compile(r"xiaohongshu\.com/(?:explore|discovery/item)/([0-9a-zA-Z]{16,32})", re.I)
 _SHORT_RE = re.compile(r"xhslink\.(?:com|cn)/[A-Za-z0-9._?%&+=/#@-]+", re.I)
 
-# 风控错误码只认字段形态（`error_code=300031` / `error-code: "300031"`）。
+# 风控错误码只认字段形态（`error_code=300031` / `error-code: "300031"` / `code: 300031`）。
 # 裸的 6 位数字匹配太宽：正文、统计数字、ID 里出现一次 300031 就会误判成验证码。
-_ERROR_300031_RE = re.compile(r"error[_-]?code\s*[=:]\s*\"?300031\b")
+# 小红书在不同端把同一个码写成 `error_code` 或裸 `code`，两种都要认。
+_ERROR_300031_RE = re.compile(r"(?:error[_-]?code|code)\"?\s*[=:]\s*\"?300031\b")
+
+# 主页锚点里的 `xsec_token`：不带它详情页会被风控拦成"笔记不存在"。
+_XSEC_RE = re.compile(
+    r"/(?:explore|discovery/item)/([0-9a-zA-Z]{16,32})"
+    r"[^\"'<>\s]*?[?&]xsec_token=([A-Za-z0-9_\-=+/%]+)"
+)
 
 NOTE_URL = "https://www.xiaohongshu.com/explore/{note_id}"
 
@@ -57,6 +65,41 @@ def note_id_from_text(text: str) -> str | None:
 
 def is_short_link(text: str) -> bool:
     return bool(_SHORT_RE.search(str(text or "")))
+
+
+def extract_xsec_tokens(html: str) -> dict[str, str]:
+    """主页 HTML -> `{note_id: xsec_token}`。
+
+    小红书的笔记详情页在未登录态下必须带 `xsec_token` 才肯渲染；这个 token
+    只出现在主页里笔记锚点的 href 上（`/explore/<id>?xsec_token=...`），
+    没有别的可推导入口。首页/主页的 HTML 里同一篇笔记可能出现多次，取第一次。
+    """
+    tokens: dict[str, str] = {}
+    for matched in _XSEC_RE.finditer(str(html or "")):
+        tokens.setdefault(matched.group(1), matched.group(2))
+    return tokens
+
+
+def note_detail_url(note_id: str, xsec_token: str = "", *, source: str = "pc_user") -> str:
+    """详情页地址：有 `xsec_token` 就拼上，没有则退回裸链接。"""
+    note_id = str(note_id or "").strip()
+    base = NOTE_URL.format(note_id=note_id)
+    token = str(xsec_token or "").strip()
+    if not token:
+        return base
+    return f"{base}?xsec_token={quote(token, safe='')}&xsec_source={source}"
+
+
+def xsec_token_from_link(link: str) -> str:
+    """从一条笔记链接里取 `xsec_token`（没有就返回空串）。"""
+    try:
+        parsed = urlsplit(str(link or ""))
+    except ValueError:
+        return ""
+    for key, value in parse_qsl(parsed.query, keep_blank_values=False):
+        if key == "xsec_token":
+            return value
+    return ""
 
 
 def extract_initial_state(html: str) -> dict[str, Any] | None:
@@ -131,9 +174,17 @@ def _card_ts(card: dict[str, Any]) -> float:
 
 
 def _note_from_card(card: Any, *, account_id: str = "") -> SnsPost | None:
-    """主页笔记卡片 -> `SnsPost`（只有标题/封面，图集要再看详情）。"""
+    """主页笔记卡片 -> `SnsPost`（只有标题/封面，图集要再看详情）。
+
+    卡片有两种包装：直接是 note 对象，或外面再套一层 `{"noteCard": {...}}`
+    （接口/SSR 的两种形态都实测出现过）。不先解包会取不到 noteId，整条被丢。
+    """
+    card = unwrap(card)
     if not isinstance(card, dict):
         return None
+    inner = unwrap(card.get("noteCard"))
+    if isinstance(inner, dict) and inner:
+        card = inner
     note_id = str(_pick(card, "noteId", "id", "note_id") or "")
     if not note_id:
         return None
@@ -154,11 +205,15 @@ def _note_from_card(card: Any, *, account_id: str = "") -> SnsPost | None:
     )
 
 
-def parse_user_notes(state: dict[str, Any]) -> tuple[str, str, list[SnsPost]]:
+def parse_user_notes(
+    state: dict[str, Any], *, xsec_tokens: dict[str, str] | None = None
+) -> tuple[str, str, list[SnsPost]]:
     """博主主页 SSR -> (昵称, 头像, 笔记列表)。
 
     兼容 `_rawValue` 包装：RSSHub 的 `getUser()` 里就是 `userPageData._rawValue
     || userPageData`、`notes._rawValue || notes`，两种形状都可能出现。
+    `xsec_tokens` 来自同一份 HTML（见 `extract_xsec_tokens`）：有 token 的笔记
+    会把 token 拼进 `link`，后续详情补全才能拿到无水印图集。
     """
     user = unwrap(state.get("user")) if isinstance(state, dict) else None
     if not isinstance(user, dict):
@@ -187,9 +242,13 @@ def parse_user_notes(state: dict[str, Any]) -> tuple[str, str, list[SnsPost]]:
             flattened.append(row)
     rows = flattened
     posts: list[SnsPost] = []
+    tokens = xsec_tokens or {}
     for card in rows[: C.FETCH_POST_LIMIT]:
         item = _note_from_card(card)
         if item is not None:
+            token = tokens.get(item.post_id, "")
+            if token:
+                item.link = note_detail_url(item.post_id, token)
             posts.append(item)
     # 没有时间戳的卡片必须补一个"合理"的值，否则上层按 ts 排序会退化成按
     # post_id 字典序（那正是 P2-8 的症状）。补法分两种，重点是**不能**让它们

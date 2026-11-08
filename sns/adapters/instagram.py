@@ -154,7 +154,11 @@ def parse_edges(edges: Any, *, account_id: str = "") -> list[SnsPost]:
         return []
     posts: list[SnsPost] = []
     for edge in edges[: C.FETCH_POST_LIMIT]:
-        node = edge.get("node") if isinstance(edge, dict) else edge
+        # 两种条目都要认：GraphQL/SSR 的 `{"node": {...}}` 包装，
+        # 以及 `items` 里直接给出的裸 node。原实现一律取 edge["node"]，
+        # 裸 node 会被当成 None 丢掉（表现为"新接口 0 条"）。
+        nested = edge.get("node") if isinstance(edge, dict) else None
+        node = nested if isinstance(nested, dict) else edge
         post = parse_node(node, account_id=account_id) if isinstance(node, dict) else None
         if post is not None:
             posts.append(post)
@@ -198,9 +202,17 @@ def _find_edges(data: Any) -> Any:
 
 
 def parse_profile(payload: Any, *, account_id: str = "") -> list[SnsPost]:
-    """`web_profile_info` 响应或 GraphQL 响应 -> `[SnsPost]`。"""
+    """`web_profile_info` 响应或 GraphQL 响应 -> `[SnsPost]`。
+
+    `web_profile_info` 的媒体列表直接放在 `items` 里（list），**没有**
+    `edges` 包装；只找 `edges` 会把这种响应当成"没有作品"。`items` 里的条目
+    可能是裸 node，也可能是 `{"node": ...}`，`parse_edges` 两种都认。
+    """
     if not isinstance(payload, dict):
         return []
+    items = payload.get("items")
+    if isinstance(items, list):
+        return parse_edges(items, account_id=account_id)
     edges = _find_edges(payload)
     return parse_edges(edges, account_id=account_id) if edges else []
 

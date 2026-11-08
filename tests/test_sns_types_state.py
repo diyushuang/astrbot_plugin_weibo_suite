@@ -194,7 +194,8 @@ def test_identity_status_and_missing_keys():
     assert "verysecret" not in json.dumps(identity_status("web_session=verysecret"))
     assert missing_required_keys("xhs", "a1=1") == ["web_session"]
     assert missing_required_keys("douyin", "ttwid=1") == []
-    assert missing_required_keys("instagram", "") == ["sessionid"]
+    # Instagram 同时要求 sessionid 与 csrftoken：只有前者时 web_profile_info 必 403
+    assert missing_required_keys("instagram", "") == ["sessionid", "csrftoken"]
 
 
 def test_identity_store_persists_login_state(tmp_path):

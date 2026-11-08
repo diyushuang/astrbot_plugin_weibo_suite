@@ -598,3 +598,51 @@ def test_instagram_403_is_risk_not_auth():
         ig.detect_signal({}, final_url="https://www.instagram.com/accounts/login/")
         == "ig.require_login"
     )
+
+
+def test_xhs_note_card_wrapper_is_unwrapped():
+    state = {
+        "user": {
+            "userPageData": {"basicInfo": {"nickname": "小红薯"}},
+            "notes": [
+                [
+                    {
+                        "noteCard": {
+                            "noteId": "65aabbccddeeff0011223344",
+                            "displayTitle": "套壳卡片",
+                        }
+                    }
+                ]
+            ],
+        }
+    }
+    _, _, posts = xhs.parse_user_notes(state)
+    assert [post.title for post in posts] == ["套壳卡片"]
+
+
+def test_xhs_risk_code_field_accepts_plain_code():
+    """同一个 300031 在不同端写成 `error_code` 或裸 `code`。"""
+    assert xhs.detect_signal('{"code": 300031}') == "xhs.error_300031"
+    assert xhs.detect_signal('{"error_code": 300031}') == "xhs.error_300031"
+    assert xhs.detect_signal('{"error_code": "300031"}') == "xhs.error_300031"
+
+
+def test_xhs_xsec_token_is_attached_to_links_and_detail_urls():
+    html = (
+        '<a href="/explore/65aabbccddeeff0011223344'
+        '?xsec_token=AB%2Bcd&amp;xsec_source=pc_user">笔记</a>'
+    )
+    tokens = xhs.extract_xsec_tokens(html)
+    assert tokens == {"65aabbccddeeff0011223344": "AB%2Bcd"}
+    _, _, posts = xhs.parse_user_notes(XHS_STATE, xsec_tokens=tokens)
+    assert "xsec_token=AB%252Bcd" in posts[0].link
+    assert xhs.xsec_token_from_link(posts[0].link) == "AB%2Bcd"
+    assert xhs.note_detail_url("65aabbccddeeff0011223344") == (
+        "https://www.xiaohongshu.com/explore/65aabbccddeeff0011223344"
+    )
+
+
+def test_instagram_parse_profile_accepts_items_list():
+    """`web_profile_info` 的媒体列表在 `items`（没有 edges 包装）。"""
+    posts = ig.parse_profile({"items": [IG_NODE_VIDEO, IG_NODE_SIDECAR]}, account_id="acc")
+    assert [post.post_id for post in posts] == ["C1abcdEFghi", "C2abcdEFghi"]

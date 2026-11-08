@@ -394,7 +394,8 @@ class ArchiveMixin:
             # 无条件调用等于给每条旧帖多花一次详情请求。
             need_pics = pic_total > len(pics)
             if need_text and mid:
-                full = await self._archive_long_text(mid)
+                bid = str(post.get("bid") or "") or self._archive_bid_from_link(post.get("link"))
+                full = await self._archive_long_text(mid, bid=bid)
                 # 只在真拿到更完整正文时替换；force 允许等长覆盖（截断形态可能
                 # 不同），但永不把已有正文改短。
                 if full and (len(full) > len(text) or (force and len(full) >= len(text))):
@@ -411,28 +412,21 @@ class ArchiveMixin:
             logger.warning(f"归档补全失败（mid={mid}）: {e}")
             return post
 
-    async def _archive_long_text(self, mid: str) -> str | None:
-        """取长文全文：优先 weibo.com/ajax/statuses/longtext，失败回落 _fetch_long_text。"""
+    async def _archive_long_text(self, mid: str, bid: str = "") -> str | None:
+        """取长文全文：优先 m.weibo.cn 的 `/statuses/extend`，失败才回落 weibo.com。
+
+        `/statuses/extend` 游客身份就能用（ok=1）；而 `weibo.com/ajax/statuses/longtext`
+        在游客态恒返回 `-100`——既拿不到正文，又会让 `_api_get` 把每次调用都
+        当成"身份失效"去换新游客，白烧续期配额。所以顺序反过来：
+        - `/statuses/extend` 排第一；
+        - 只有配置了自定义 Cookie（真登录态）才回落 weibo.com 接口；
+        - weibo.com 接口按上游要求用 **bid**（不是 mid），Referer 必须是
+          `https://weibo.com/`；`X-Xsrf-Token` 已由 `_api_get_once` 从 Cookie 的
+          `XSRF-TOKEN` 自动补齐。
+        """
         mid = str(mid or "").strip()
         if not mid:
             return None
-        api_get = getattr(self, "_api_get", None)
-        if callable(api_get):
-            try:
-                payload = await api_get(ARCHIVE_LONGTEXT_URL, {"id": mid})
-                text = _archive_longtext_of(payload)
-                if text:
-                    return _clean_text(text, 0)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                # 首选接口失效是可诊断故障（host 白名单、接口改版、风控），
-                # 不能像以前那样只打 debug —— 那等于把一条永久失效的链路
-                # 藏起来，只剩回落接口在默默兜底。同一次运行只告警一次，
-                # 避免每篇长文刷屏。
-                if not getattr(self, "_archive_longtext_warned", False):
-                    self._archive_longtext_warned = True
-                    logger.warning(f"归档长文首选接口不可用（后续静默，仍走回落接口）: {e}")
         fetch = getattr(self, "_fetch_long_text", None)
         if callable(fetch):
             try:
@@ -442,7 +436,31 @@ class ArchiveMixin:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.warning(f"归档长文回落接口失败（{mid}）: {e}")
+                logger.info(f"归档长文 /statuses/extend 失败（{mid}）: {e}")
+        cookies = getattr(self, "_custom_cookies", {}) or {}
+        bid = str(bid or "").strip()
+        api_get = getattr(self, "_api_get", None)
+        # 游客态打 weibo.com 必 -100：不发这个请求，也不换游客
+        if not cookies or not bid or not callable(api_get):
+            return None
+        try:
+            payload = await api_get(
+                ARCHIVE_LONGTEXT_URL,
+                {"id": bid},
+                referer="https://weibo.com/",
+            )
+            text = _archive_longtext_of(payload)
+            if text:
+                return _clean_text(text, 0)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # 回落接口失效是可诊断故障（接口改版、Cookie 过期、风控），
+            # 不能只打 debug —— 那等于把一条永久失效的链路藏起来。同一次
+            # 运行只告警一次，避免每篇长文刷屏。
+            if not getattr(self, "_archive_longtext_warned", False):
+                self._archive_longtext_warned = True
+                logger.warning(f"归档长文回落接口不可用（{mid}）: {e}")
         return None
 
     # ------------------------------------------------------------------

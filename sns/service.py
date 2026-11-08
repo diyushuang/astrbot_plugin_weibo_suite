@@ -27,7 +27,7 @@ import aiohttp
 
 from . import constants as C
 from . import fetch_m1, fetch_m2, scheduler
-from .adapters import parse_account_id, parse_posts
+from .adapters import parse_account_id, parse_posts, xhs
 from .adapters import rss as rss_adapter
 from .browser import BrowserSession, BrowserUnavailable
 from .guard import GuardConfig, apply_result, platform_tripped
@@ -731,15 +731,21 @@ class SnsService:
         if post.platform != "xhs" or len(post.images) > 1:
             return
         detail: dict[str, Any] = {}
+        # 详情页在未登录态下必须带主页锚点里的 xsec_token，否则会被风控当成
+        # "笔记不存在"；token 已经拼在 post.link 里（见 xhs.parse_user_notes）
+        token = xhs.xsec_token_from_link(post.link)
         try:
             if self.fetch_mode == "http":
                 detail = await fetch_m2.fetch_note_detail(
                     getattr(self.p, "_http", None),
                     post.post_id,
                     self._cookie_for("xhs"),
+                    xsec_token=token,
                 )
             else:
-                detail = await fetch_m1.fetch_note_detail(self.browser, post.post_id)
+                detail = await fetch_m1.fetch_note_detail(
+                    self.browser, post.post_id, xsec_token=token
+                )
         except Exception as exc:
             self.log.info(f"[sns] 补全笔记详情失败（不影响推送）：{exc}")
             return

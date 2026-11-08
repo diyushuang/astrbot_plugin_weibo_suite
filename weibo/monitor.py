@@ -53,7 +53,15 @@ class MonitorMixin:
             if isinstance(rt_mb, dict) and isinstance(rt_mb.get("page_info"), dict)
             else {}
         )
-        is_video = str(pi.get("type") or "") == "video" or str(rt_pi.get("type") or "") == "video"
+        # "有没有视频"要看三处：page_info.type / 原微博的 page_info.type /
+        # mix_media_info 里 type=video 的条目。只判前两者会漏掉"图文混排里夹
+        # 视频"的帖子，导致 _apply_video 不被调用、视频永远不进消息。
+        is_video = (
+            str(pi.get("type") or "") == "video"
+            or str(rt_pi.get("type") or "") == "video"
+            or bool(_mix_media_nodes(mb)[1])
+            or (isinstance(rt_mb, dict) and bool(_mix_media_nodes(rt_mb)[1]))
+        )
         # 接口自述的图片总数：超 9 图微博时间线卡片的 pics 只携带部分图片时，
         # pic_num 仍是全量数——识别侧据此补一次详情拿全量，见 _ensure_full_pics。
         # 转发帖的图挂在原微博上，两处取大即真实总数
