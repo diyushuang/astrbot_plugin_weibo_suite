@@ -25,6 +25,7 @@ mode=cloudflare_imgbed: CloudFlare-ImgBed 自建图床（官方 REST API）：
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import mimetypes
 import os
@@ -40,7 +41,7 @@ from urllib.parse import quote, unquote, urlencode, urlparse
 import aiohttp
 
 try:
-    from ..shared.common import USER_AGENT, as_int, read_bytes, truthy
+    from ..shared.common import USER_AGENT, as_int, truthy
     from ..shared.http import GuardedHttpClient, read_limited_text
     from .s3_store import S3CompatClient
 except ImportError:  # 兼容插件以独立模块方式加载
@@ -49,7 +50,6 @@ except ImportError:  # 兼容插件以独立模块方式加载
     from astrbot_plugin_weibo_suite.shared.common import (  # type: ignore[no-redef]
         USER_AGENT,
         as_int,
-        read_bytes,
         truthy,
     )
     from astrbot_plugin_weibo_suite.shared.http import (
@@ -135,6 +135,23 @@ def is_retryable_upload_error(exc: BaseException) -> bool:
 def _public_url(base: str, key: str) -> str:
     """拼接公开直链：base 去尾斜杠 + URI 编码后的对象名。"""
     return f"{base.rstrip('/')}/{quote(key)}"
+
+
+def sha256_of_file(path: str, chunk_size: int = 1 << 20) -> str:
+    """分块计算文件 sha256（调用方应放进 to_thread，避免阻塞事件循环）。
+
+    对象存储的 `x-amz-content-sha256` 必须与实际请求体一致；为了不算错，
+    原实现把整个文件读成 bytes。大文件改成分块摘要 + 文件句柄流式上传，
+    内存占用与文件大小无关。
+    """
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(chunk_size)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def redact_url(url: str) -> str:
@@ -551,15 +568,17 @@ class ImageBedClient:
 
         鉴权二选一（可同时配置）：cfi_token 以 Authorization: Bearer
         请求头发送（Token 需 upload 权限，官方推荐格式）；cfi_auth_code
-        默认以 X-Auth-Code 请求头发送（不进查询串：查询串会随 URL 进日志、
-        异常和面板，等价于把上传鉴权码明文外泄）。老版本站点只认
-        `?authCode=` 查询参数，被 401/403 拒绝时自动回落一次。两者均未
-        配置且站点未开启登录校验时无需鉴权。uploadChannel / channelName /
-        uploadFolder 为官方可选查询参数。
+        默认以 `authCode` 请求头发送（不是 `X-Auth-Code`：上游站点读的是
+        前者，写错头名会被当成"未鉴权"直接 401；也不进查询串，避免查询串
+        随 URL 进日志、异常和面板，等价于把上传鉴权码明文外泄）。老版本
+        站点只认 `?authCode=` 查询参数，被 401/403 拒绝时自动回落一次。
+        两者均未配置且站点未开启登录校验时无需鉴权。uploadChannel /
+        channelName / uploadFolder 为官方可选查询参数。
 
         响应为非空数组 [{"src": "/file/xxx.jpg", "publicUrl": "..."}]。
-        直链优先取站点地址 + src（忽略 publicUrl），保证落库的链接与
-        站点同源，/溯源删除 才能按前缀反解出文件路径。
+        直链优先用响应里的 `publicUrl`（站点绑定自定义域名时 `src` 只是
+        相对路径，站点域名拼出来的链接可能不可达）；`publicUrl` 缺失或不是
+        绝对地址时，才回落到站点地址 + src。
         """
         base = self._cf_base()
         token = str(self.config.get("cfi_token") or "").strip()
@@ -582,10 +601,11 @@ class ImageBedClient:
         api_url = f"{base}/upload"
         if params:
             api_url = f"{api_url}?{urlencode(params)}"
-        # 老版本 CloudFlare-ImgBed 只认 `?authCode=` 查询参数，版本较新的还认
-        # `X-Auth-Code` 请求头。默认走请求头——查询串会随 URL 进日志、异常栈和
-        # 面板（等价于把上传鉴权码明文外泄）；只有站点明确拒绝时才回落到查询串，
-        # 且只回落一次、只告警一次，保证老站点不会静默上传失败。
+        # 老版本 CloudFlare-ImgBed 只认 `?authCode=` 查询参数，版本较新的认
+        # `authCode` 请求头（上游读的就是这个名字；曾用 `X-Auth-Code`，站点
+        # 侧不认，表现为"配了鉴权码仍然 401"）。默认走请求头——查询串会随
+        # URL 进日志、异常栈和面板（等价于把上传鉴权码明文外泄）；只有站点
+        # 明确拒绝时才回落到查询串，且只回落一次、只告警一次。
         fallback_url = ""
         if auth_code:
             fallback_url = f"{base}/upload?{urlencode({**params, 'authCode': auth_code})}"
@@ -599,7 +619,7 @@ class ImageBedClient:
                 headers["Authorization"] = f"Bearer {token}"
             # 上传鉴权码优先走请求头，不拼进 URL：查询串会原样出现在异常/日志里
             if auth_code and not cross_origin and not use_query_auth["on"]:
-                headers["X-Auth-Code"] = auth_code
+                headers["authCode"] = auth_code
             if method != "POST":
                 return {"headers": headers}
             # FormData 不可复用，每次请求（含重定向后的重发）都需重新构建；
@@ -633,7 +653,7 @@ class ImageBedClient:
                 if not getattr(self, "_cf_authcode_query_warned", False):
                     self._cf_authcode_query_warned = True
                     logger.warning(
-                        "图床不认 X-Auth-Code 请求头，已回落到 ?authCode= 查询串上传"
+                        "图床不认 authCode 请求头，已回落到 ?authCode= 查询串上传"
                         "（站点版本较旧；建议升级站点或改用 API Token，"
                         "鉴权码出现在 URL 里会进访问日志）"
                     )
@@ -645,6 +665,11 @@ class ImageBedClient:
         if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
             raise RuntimeError(f"CloudFlare-ImgBed 上传响应不是非空数组: {body[:200]}")
         src = str(payload[0].get("src") or "").strip()
+        public_url = str(payload[0].get("publicUrl") or "").strip()
+        if public_url.startswith(("http://", "https://")):
+            # 站点绑了自定义域名/CDN 时，src 的相对路径拼站点域名未必可达；
+            # 官方响应给了绝对 publicUrl 就直接用
+            return public_url
         if not src:
             raise RuntimeError(f"上传响应缺少 src 字段: {body[:200]}")
         url = src if src.startswith(("http://", "https://")) else f"{base}/{src.lstrip('/')}"
@@ -747,11 +772,12 @@ class ImageBedClient:
             (secret_key, "oci_secret_access_key"),
             (bucket, "oci_bucket"),
         )
-        # 官方 S3 兼容 API endpoint（仅支持 path-style）；
-        # 特殊 realm 场景可用 oci_endpoint 覆盖
+        # 官方 S3 兼容 API endpoint（仅支持 path-style）：新 OCI 区域使用
+        # `oci.customer-oci.com` 域，旧区域仍可用 `oraclecloud.com`，用
+        # oci_endpoint 覆盖即可（不覆盖时按新域拼）
         endpoint = (
             str(cfg.get("oci_endpoint") or "").strip()
-            or f"https://{namespace}.compat.objectstorage.{region}.oraclecloud.com"
+            or f"https://{namespace}.compat.objectstorage.{region}.oci.customer-oci.com"
         )
         client = S3CompatClient(
             endpoint,
@@ -782,9 +808,11 @@ class ImageBedClient:
                 (region, "oci_region"),
                 (bucket, "oci_bucket"),
             )
-            # 官方文档的对象 URL 格式（公共存储桶可直接匿名读取）
+            # 官方文档的对象 URL 格式（公共存储桶可直接匿名读取）；新区域用
+            # `oci.customer-oci.com` 域，旧区域用 `oraclecloud.com`（历史链接
+            # 仍可反解删除，见 _oci_public_hosts）
             return (
-                f"https://objectstorage.{region}.oraclecloud.com"
+                f"https://objectstorage.{region}.oci.customer-oci.com"
                 f"/n/{namespace}/b/{bucket}/o/{quote(key)}"
             )
         raise ValueError(
@@ -797,11 +825,19 @@ class ImageBedClient:
         return truthy(value)
 
     def _oci_public_hosts(self) -> set:
-        """OCI 公开直链允许的主机名集合（按当前配置推导）。"""
+        """OCI 公开直链允许的主机名集合（按当前配置推导）。
+
+        同时收新域（`oci.customer-oci.com`）与旧域（`oraclecloud.com`）：
+        默认生成新域，但历史落库的旧域链接仍要能被 /溯源删除 反解。
+        """
         hosts = set()
         region = str(self.config.get("oci_region") or "").strip()
+        namespace = str(self.config.get("oci_namespace") or "").strip()
         if region:
+            hosts.add(f"objectstorage.{region}.oci.customer-oci.com")
             hosts.add(f"objectstorage.{region}.oraclecloud.com")
+        if region and namespace:
+            hosts.add(f"{namespace}.compat.objectstorage.{region}.oci.customer-oci.com")
         endpoint = str(self.config.get("oci_endpoint") or "").strip()
         if endpoint:
             host = urlparse(endpoint).hostname
@@ -853,7 +889,7 @@ class ImageBedClient:
                         return key, True
         return "", False
 
-    async def _put_object_bytes(
+    async def _put_object(
         self,
         client: S3CompatClient,
         bucket: str,
@@ -864,13 +900,17 @@ class ImageBedClient:
 
         folder 非空时作为对象键前缀（缩略图走 "thumbnails/"）：同一存储桶里
         原图与缩略图分开存放，按前缀批量清理/统计才有依据。
+
+        大文件（视频/原图）不整体读进内存：sha256 分块计算，请求体直接
+        用文件句柄流式上传。R2 上单文件可达几十 MB，`read_bytes` 的峰值
+        内存等于文件大小。
         """
         key, ctype = self._object_name(src_path)
         prefix = _clean_folder(folder)
         if prefix:
             key = f"{prefix}/{key}"
-        data = await asyncio.to_thread(read_bytes, src_path)
-        await client.put_object(bucket, key, data, ctype)
+        digest = await asyncio.to_thread(sha256_of_file, src_path)
+        await client.put_object_file(bucket, key, src_path, ctype, digest)
         return key
 
     async def _upload_object(self, src_path: str, folder: str = "") -> str:
@@ -884,9 +924,9 @@ class ImageBedClient:
                     " r2.dev 公开访问或绑定自定义域名，https:// 开头），溯源回图"
                     "需要长期有效的直链"
                 )
-            key = await self._put_object_bytes(client, bucket, src_path, folder)
+            key = await self._put_object(client, bucket, src_path, folder)
             return _public_url(public_base, key)
 
         # MODE_OCI
         client, bucket = self._oci_client()
-        return self._oci_public_url(await self._put_object_bytes(client, bucket, src_path, folder))
+        return self._oci_public_url(await self._put_object(client, bucket, src_path, folder))

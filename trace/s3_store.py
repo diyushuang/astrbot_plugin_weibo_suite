@@ -11,7 +11,8 @@
 - Oracle Cloud Infrastructure Object Storage 的 Amazon S3 兼容 API
   （docs.oracle.com/en-us/iaas/Content/Object/Tasks/s3compatibleapi.htm）：
   endpoint 形如
-  https://<namespace>.compat.objectstorage.<region>.oraclecloud.com，
+  https://<namespace>.compat.objectstorage.<region>.oci.customer-oci.com
+  （新区域；旧区域仍为 `.oraclecloud.com`，可用 oci_endpoint 覆盖），
   凭据为 Customer Secret Key（Access Key / Secret Key），仅支持
   path-style，签名同样是 AWS Signature Version 4（region 填 OCI 区域
   标识，如 ap-osaka-1）。
@@ -29,6 +30,7 @@ import hmac
 import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
+from typing import Any
 from urllib.parse import quote, urlparse
 
 import aiohttp
@@ -178,6 +180,29 @@ class S3CompatClient:
     async def put_object(self, bucket: str, key: str, data: bytes, content_type: str) -> None:
         await self._signed("PUT", f"/{bucket}/{key}", data=data, content_type=content_type)
 
+    async def put_object_file(
+        self,
+        bucket: str,
+        key: str,
+        path: str,
+        content_type: str,
+        payload_sha256: str,
+    ) -> None:
+        """流式上传本地文件：请求体用文件句柄，内容不整体读进内存。
+
+        `payload_sha256` 由调用方分块计算好后传入——大文件（视频/原图）
+        先整体 `read_bytes` 会让峰值内存等于文件大小，R2 上几十 MB 的文件
+        直接能把进程顶到 OOM。
+        """
+        with open(path, "rb") as handle:
+            await self._signed(
+                "PUT",
+                f"/{bucket}/{key}",
+                data=handle,
+                content_type=content_type,
+                payload_sha256=payload_sha256,
+            )
+
     async def delete_object(self, bucket: str, key: str) -> None:
         await self._signed("DELETE", f"/{bucket}/{key}", expect=(200, 204))
 
@@ -186,13 +211,19 @@ class S3CompatClient:
         method: str,
         path: str,
         *,
-        data: bytes = b"",
+        data: bytes | Any = b"",
         content_type: str = "",
         expect=(200,),
+        payload_sha256: str = "",
     ) -> None:
         encoded_path = uri_encode_path(path)
         url = self.endpoint + encoded_path
-        payload_sha256 = hashlib.sha256(data).hexdigest() if data else EMPTY_PAYLOAD_SHA256
+        if payload_sha256:
+            payload_sha256 = str(payload_sha256)
+        elif isinstance(data, (bytes, bytearray)) and data:
+            payload_sha256 = hashlib.sha256(data).hexdigest()
+        else:
+            payload_sha256 = EMPTY_PAYLOAD_SHA256
 
         def prepare(current_url: str, current_method: str, cross_origin: bool = False) -> dict:
             # SigV4 签名与目标 URL、方法绑定，重定向后无法复用；此处直接报错，

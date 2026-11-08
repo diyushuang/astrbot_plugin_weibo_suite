@@ -85,8 +85,13 @@ pip install -r requirements.txt
 `archive.db` 的 `media` 表，支持断点续跑、单 worker 串行、失败退避 5→60 秒。
 
 图床支持 CloudFlare-ImgBed、通用 HTTP 图床、R2/OCI 兼容对象存储；图床上传的
-鉴权码默认走 `X-Auth-Code` 请求头（不进 URL），老站点只认 `?authCode=` 时会
-自动回落一次并告警。
+鉴权码默认走 `authCode` 请求头（不进 URL），老站点只认 `?authCode=` 时会自动
+回落一次并告警。R2/OCI 大文件上传走流式摘要，不再把整个文件读进内存。
+
+OCI 的 S3 兼容端点默认用新域
+`https://<namespace>.compat.objectstorage.<region>.oci.customer-oci.com`；
+旧区域仍可用 `oci_endpoint` 覆盖为 `.oraclecloud.com`，历史落库的旧域直链
+也能被 `/溯源删除` 正常反解。
 
 ### 图片溯源与签到
 
@@ -94,6 +99,18 @@ pip install -r requirements.txt
 `/随机图`、`/随机视频` 出图，`/签到` 生成签到卡片。签到文案直接读归档库的
 `cleaned_text`（与 Node 版清洗逐字符一致，90 条黄金样本对拍零差异），
 归档不可用时回退 CSV/MD。
+
+Qdrant 侧需先建好集合（距离度量 Cosine，向量维度与 `embed_model` 输出一致）；
+插件在首次检索/登记前会主动读取集合配置并校验，维度或度量不符时直接给出
+可读错误，而不是只显示 `HTTP 400`。按缩略图/文件名反查还需要：
+`payload.thumb_url` 建 **full-text** 索引、`payload.file_name` 建 **keyword**
+索引——缺索引时 Qdrant 会以 `Index required but not found` 拒绝，插件会输出
+warning 说明该建哪两个索引，不再把它当「没命中」静默吞掉。
+
+pHash 的相似度阈值按 `hash_size` 的 bit 数归一化（`1 − 汉明距离 / bit 数`），
+默认 0.88（256 bit 下约允许 30 bit 差异），建议区间 0.88–0.9。注意本插件的
+DCT 归一化实现与 `imagehash` 库并不完全等价，阈值尚未与该库做金标比对，
+跨实现对照时需要重新标定。
 
 ### 多平台订阅
 

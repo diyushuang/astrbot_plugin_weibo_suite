@@ -281,6 +281,11 @@ class VectorEngine:
         # AstrBot 实例（v4.29.1）配了 Qdrant 却因 enabled 一刀切为 False，
         # 随机图命中缩略图后的反查全部静默失败，warning 里又无线索可查。
         self.qdrant_ready = bool(self.qdrant_url)
+        # 集合元信息只在首次检索/登记前取一次：维度/距离度量在集合生命周期内
+        # 不变，每次请求都 GET /collections/{name} 是纯浪费。
+        self._collection_meta: dict | None = None
+        self._collection_lock = asyncio.Lock()
+        self._index_warned = False
 
     @staticmethod
     def _normalize_base_url(value: object) -> str:
@@ -396,6 +401,16 @@ class VectorEngine:
             method, url, json_body=json_body, headers=headers, max_bytes=max_bytes
         )
         if status != 200:
+            lowered = str(text or "").lower()
+            # Qdrant 对维度不匹配只回 400 + 一句 "Vector dimension error"，
+            # 直接抛 HttpError 时用户/面板只看到「服务返回 HTTP 400」，完全
+            # 不知道是 embedding 维度配错了
+            if "vector dimension error" in lowered or "wrong vector dimension" in lowered:
+                raise VectorEngineError(
+                    "向量维度不匹配：Qdrant 集合要求的维度与当前 embedding 输出不一致。"
+                    "请让入库侧与查询侧使用同一个多模态模型，或按新维度重建集合。",
+                    detail=f"HTTP {status}: {text[:500]}",
+                )
             raise HttpError(status, text)
         try:
             return json.loads(text)
@@ -404,6 +419,90 @@ class VectorEngine:
                 "服务响应不是合法 JSON",
                 detail=f"响应不是合法 JSON: {text[:500]}",
             ) from e
+
+    async def _collection_config(self) -> dict:
+        """取（并缓存）集合元信息；集合不存在给出可读错误。"""
+        if self._collection_meta is not None:
+            return self._collection_meta
+        async with self._collection_lock:
+            if self._collection_meta is None:
+                try:
+                    obj = await self._request_json(
+                        "GET",
+                        f"{self.qdrant_url}/collections/{quote(self.collection, safe='')}",
+                        headers=self._qd_headers(),
+                    )
+                except HttpError as exc:
+                    if exc.status == 404:
+                        raise VectorEngineError(
+                            f"Qdrant 集合 {self.collection} 不存在：请先在 Qdrant 侧创建"
+                            "集合（或核对 vector_search.collection_name）",
+                            detail=exc.detail,
+                        ) from exc
+                    raise
+                result = obj.get("result") if isinstance(obj, dict) else None
+                self._collection_meta = result if isinstance(result, dict) else {}
+        return self._collection_meta
+
+    async def _ensure_collection(self, dim: int) -> None:
+        """首次检索/登记前校验集合的向量维度与距离度量。
+
+        只靠服务端 400 报错是不够的：Qdrant 的响应体只写一句
+        `Vector dimension error`，面板和日志里用户看到的往往是「HTTP 400」。
+        这里主动 GET 集合配置，把「维度要求 N / 实际 M」和「距离不是 Cosine」
+        直接翻译成可执行建议。校验结果缓存，集合生命周期内只查一次。
+        """
+        if not self.qdrant_ready or int(dim or 0) <= 0:
+            return
+        meta = await self._collection_config()
+        config = meta.get("config") if isinstance(meta.get("config"), dict) else {}
+        params = config.get("params") if isinstance(config.get("params"), dict) else {}
+        vectors = params.get("vectors")
+        size = 0
+        distance = ""
+        if isinstance(vectors, dict):
+            if isinstance(vectors.get("size"), int):
+                size = int(vectors["size"])
+                distance = str(vectors.get("distance") or "")
+            else:
+                # 命名向量：任一命名向量的 size/distance 都足以诊断配置错误
+                for named in vectors.values():
+                    if isinstance(named, dict) and isinstance(named.get("size"), int):
+                        size = int(named["size"])
+                        distance = str(named.get("distance") or "")
+                        break
+        if size and size != int(dim):
+            raise VectorEngineError(
+                f"向量维度不匹配：集合 {self.collection} 要求 {size} 维，当前 embedding"
+                f" 输出 {int(dim)} 维。请让入库侧与查询侧使用同一个多模态模型，"
+                "或按新维度重建集合。"
+            )
+        if distance and distance.lower() != "cosine":
+            raise VectorEngineError(
+                f"集合 {self.collection} 的距离度量是 {distance}，不是 Cosine；"
+                "相似度分数与本插件的阈值不可比，请在 Qdrant 重建集合为 Cosine。"
+            )
+
+    def _warn_missing_index(self, label: str, exc: Exception) -> None:
+        """反查命中 0 条时，把「缺索引」与「真的没有」区分开。
+
+        Qdrant 对未建索引的 `match.text` / `match.value` 过滤回 400
+        `Index required but not found`；原实现把它当普通异常打进 DEBUG，
+        于是所有按缩略图/文件名反查都长期静默「未命中」。
+        """
+        detail = str(getattr(exc, "detail", "") or exc).lower()
+        if "index required" not in detail and "index not found" not in detail:
+            return
+        if self._index_warned:
+            return
+        self._index_warned = True
+        logger.warning(
+            "Qdrant 集合缺少反查所需索引（%s）：请为 payload.thumb_url 建 full-text"
+            " 索引、为 payload.file_name 建 keyword 索引，否则按缩略图/文件名反查"
+            "会一直返回 0 条。详情：%s",
+            label,
+            exc,
+        )
 
     # ------------------------------------------------------------------
     # 向量化
@@ -602,12 +701,15 @@ class VectorEngine:
             )
         ):
             raise VectorEngineError("查询向量无效")
+        await self._ensure_collection(len(vector))
         effective_limit = self.top_k if limit is None else max(1, limit)
         extra: dict = {}
         if with_vector:
             # with_vector=True 时响应里带 top_k 条完整向量（4096 维约 45KB/条），
             # 1MiB 统一上限会在 top_k≥20 时误报"响应体过大"，按向量规模放宽。
-            extra["max_bytes"] = max(1_048_576, effective_limit * len(vector) * 8 + 262_144)
+            # 每维按 16 字节估：JSON 浮点（如 0.123456789）常见 12–20 字符，
+            # 8 字节/维会把 4096 维的高维模型算少一半，仍然误报"响应体过大"。
+            extra["max_bytes"] = max(1_048_576, effective_limit * len(vector) * 16 + 262_144)
         try:
             obj = await self._request_json(
                 "POST",
@@ -722,7 +824,13 @@ class VectorEngine:
         return collected
 
     async def count(self) -> int:
-        """返回集合点数；集合不存在按 0；连接/鉴权失败抛 VectorEngineError。"""
+        """返回集合点数。
+
+        - 集合存在但没有点 → 0；
+        - 集合**不存在**（HTTP 404）→ 抛 VectorEngineError，并说明是集合缺失，
+          不能与「0 条」混为一谈（面板/日志里两个结论的处理方式完全不同）；
+        - 连接/鉴权失败 → 抛 VectorEngineError。
+        """
         url = self._points_url("count")
         try:
             obj = await self._request_json(
@@ -733,7 +841,11 @@ class VectorEngine:
         except HttpError as e:
             # 按状态码判定集合缺失，避免响应体偶然含 "404" 字样时误判
             if e.status == 404:
-                return 0
+                raise VectorEngineError(
+                    f"Qdrant 集合 {self.collection} 不存在（HTTP 404）：请先在 Qdrant 侧"
+                    "创建集合，或核对 vector_search.collection_name",
+                    detail=e.detail,
+                ) from e
             raise
 
     async def thumb_url_for(self, file_id: str) -> str | None:
@@ -1144,6 +1256,7 @@ class VectorEngine:
             )
             return int((count_obj.get("result") or {}).get("count") or 0)
         except Exception as exc:  # 网络/鉴权/集合缺失一律视为「查不到」
+            self._warn_missing_index(label, exc)
             logger.debug(f"反查计数失败（按查不到处理）{label}: {exc}")
             return None
 
@@ -1166,6 +1279,7 @@ class VectorEngine:
                 headers=self._qd_headers(),
             )
         except Exception as exc:
+            self._warn_missing_index(label, exc)
             logger.debug(f"反查取点失败（按查不到处理）{label}: {exc}")
             return []
         points = (obj.get("result") or {}).get("points")
@@ -1258,6 +1372,7 @@ class VectorEngine:
         """
         # mime 为空时保持单参调用，兼容既有调用方/测试对 embed_file(path) 的替换
         vector = await (self.embed_file(path, mime=mime) if mime else self.embed_file(path))
+        await self._ensure_collection(len(vector))
         file_name = os.path.basename(unquote(urlparse(image_url).path)) or Path(path).name
         payload = self._point_payload(
             file_name=file_name,
@@ -1317,6 +1432,8 @@ class VectorEngine:
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
+        if vectors and isinstance(vectors[0], list):
+            await self._ensure_collection(len(vectors[0]))
         points = [
             {
                 "id": point_id,

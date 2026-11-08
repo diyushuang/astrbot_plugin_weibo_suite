@@ -41,7 +41,9 @@ COMPRESS_MIN_BYTES = 200 * 1024
 # 探测结果里「确定不存在」的状态码：只有这两个语义明确。
 _NOT_FOUND_STATUSES = frozenset({404, 410})
 # 表示「该部署处理不了缩放请求」的 API 级拒绝（见 is_scaling_capability_rejection）。
-_CAPABILITY_REJECT_STATUSES = frozenset({400, 405, 501})
+# 403 也在内：图床/CDN 对缩放参数做防盗链或权限校验时回的正是 403，继续
+# 每张图都试一次只会把发送节奏拖慢，还会让配文里的「已压缩」全部落空。
+_CAPABILITY_REJECT_STATUSES = frozenset({400, 403, 405, 501})
 
 # 本地压缩的质量阶梯：目标是「不超过指定体积」时的最低质量与最大尝试次数。
 # 每次尝试都是一次完整编码，故上限 3 次（首次 + 两次降档）。
@@ -771,8 +773,8 @@ def is_scaling_capability_rejection(status: int | None) -> bool:
 
     对应 CloudFlare-ImgBed Read API 的 API 级拒绝：405（带缩放参数的请求只接受
     GET）、501（未配置图片处理器）、400（缩放参数与 Range 同时使用等参数组合
-    非法）。这类拒绝是**部署能力**问题，不是单张图的问题，因此调用方可以据此
-    在一段时间内不再探测缩放版。
+    非法）、403（防盗链/权限校验拒绝缩放版）。这类拒绝是**部署能力**问题，
+    不是单张图的问题，因此调用方可以据此在一段时间内不再探测缩放版。
     """
     return status is not None and int(status) in _CAPABILITY_REJECT_STATUSES
 
@@ -830,7 +832,9 @@ def sniff_image_format(data: bytes) -> str | None:
         brand = data[8:12]
         if brand.startswith(b"av"):
             return "AVIF"
-        if brand in (b"heic", b"heix", b"hevc", b"mif1", b"msf1"):
+        # heis 是 HEIF 的"单轨 + 隐式图像"品牌（部分安卓机/iPhone 导出的
+        # 截图用它），不在旧清单里会漏判成未知格式，进而绕过去水印/转码闸门
+        if brand in (b"heic", b"heix", b"hevc", b"heis", b"mif1", b"msf1"):
             return "HEIF"
     stripped = data.lstrip(b" \t\r\n")
     if stripped.startswith((b"<svg", b"<?xml")):
@@ -973,6 +977,22 @@ def _exact_hit_key(hit: dict) -> tuple[str, str] | None:
     return None
 
 
+def _vector_values(vector: object) -> list:
+    """把 Qdrant 返回的向量规整成浮点列表。
+
+    `with_vector` 的响应形状不固定：匿名向量是 `[...]`，命名向量是
+    `{"name": [...]}`（多向量集合里甚至会有多个命名向量）。原实现只认
+    list，命名向量时相似度去重会静默退化成「仅按 URL 去重」。
+    """
+    if isinstance(vector, list):
+        return vector
+    if isinstance(vector, dict):
+        for value in vector.values():
+            if isinstance(value, list) and value:
+                return value
+    return []
+
+
 def deduplicate_vector_hits(hits: list[dict], threshold: float = 0.995) -> list[dict]:
     """合并相同 URL/src 与向量近似相同的命中，保留相似度最高者。"""
     ordered = sorted(hits, key=lambda hit: float(hit.get("score") or 0.0), reverse=True)
@@ -987,11 +1007,11 @@ def deduplicate_vector_hits(hits: list[dict], threshold: float = 0.995) -> list[
             continue
 
         merged = False
-        vector = hit.get("vector")
-        if isinstance(vector, list) and vector:
+        vector = _vector_values(hit.get("vector"))
+        if vector:
             for representative in result:
-                representative_vector = representative.get("vector")
-                if not isinstance(representative_vector, list) or not representative_vector:
+                representative_vector = _vector_values(representative.get("vector"))
+                if not representative_vector:
                     continue
                 if cosine_similarity(vector, representative_vector) >= threshold:
                     representative["duplicate_count"] = (

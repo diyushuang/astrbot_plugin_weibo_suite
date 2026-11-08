@@ -372,6 +372,32 @@ def test_deduplicate_vector_hits_without_vectors_only_uses_exact_keys():
     assert result[1]["duplicate_count"] == 2
 
 
+def test_deduplicate_vector_hits_accepts_named_vector_dicts():
+    """Qdrant 命名向量集合的 with_vector 返回 {"name": [...]}。
+
+    原实现只认 list，命名向量时向量腿被静默跳过、去重退化成「仅按 URL」，
+    同构图的多个命中就会被重复推给用户。"""
+    hits = [
+        {
+            "id": "1",
+            "score": 0.91,
+            "vector": {"image": [1.0, 0.0]},
+            "payload": {"image_url": "https://a.example/file/a"},
+        },
+        {
+            "id": "2",
+            "score": 0.90,
+            "vector": {"image": [1.0, 0.0]},
+            "payload": {"image_url": "https://a.example/file/b"},
+        },
+    ]
+    result = deduplicate_vector_hits(hits, threshold=0.995)
+
+    assert [hit["id"] for hit in result] == ["1"]
+    assert result[0]["duplicate_count"] == 2
+    assert [hit["id"] for hit in result[0]["duplicates"]] == ["2"]
+
+
 def test_build_original_url_strips_imgbed_processing_params():
     url = "https://img.example.com/file/a%20b.jpg?width=1280&height=1280&fallback=original&v=2"
     assert build_original_url(url) == "https://img.example.com/file/a%20b.jpg?v=2"
@@ -597,12 +623,13 @@ def test_probe_helpers_classify_status_and_length():
 
 
 def test_scaling_capability_rejection_covers_api_level_refusals():
-    """405（缩放请求只接受 GET）、501（未配置图片处理器）、400（参数组合非法）
-    都属于「这个部署处理不了缩放」，据此进入冷却期，不再反复探测。"""
+    """405（缩放请求只接受 GET）、501（未配置图片处理器）、400（参数组合非法）、
+    403（防盗链/权限拒绝缩放参数）都属于「这个部署处理不了缩放」，据此进入
+    冷却期，不再反复探测。"""
     assert is_scaling_capability_rejection(405)
     assert is_scaling_capability_rejection(501)
     assert is_scaling_capability_rejection(400)
-    assert not is_scaling_capability_rejection(403)  # 可能只是防盗链
+    assert is_scaling_capability_rejection(403)
     assert not is_scaling_capability_rejection(404)
     assert not is_scaling_capability_rejection(200)
     assert not is_scaling_capability_rejection(None)
@@ -610,6 +637,7 @@ def test_scaling_capability_rejection_covers_api_level_refusals():
 
 def test_sniff_image_format_recognizes_heif_brands():
     assert sniff_image_format(b"\x00\x00\x00\x18ftypheic" + b"\x00" * 40) == "HEIF"
+    assert sniff_image_format(b"\x00\x00\x00\x18ftypheis" + b"\x00" * 40) == "HEIF"
     assert sniff_image_format(b"\x00\x00\x00\x18ftypmif1" + b"\x00" * 40) == "HEIF"
     assert sniff_image_format(b"\x00\x00\x00\x18ftypavif" + b"\x00" * 40) == "AVIF"
 

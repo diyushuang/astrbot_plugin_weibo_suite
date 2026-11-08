@@ -38,12 +38,19 @@ def make_engine(collection: str = "imgbed_images") -> VectorEngine:
     )
 
 
+def _collection_meta(size: int = 2, distance: str = "Cosine") -> dict:
+    """GET /collections/{name} 的典型响应（首次检索前的前置校验读取）。"""
+    return {"result": {"config": {"params": {"vectors": {"size": size, "distance": distance}}}}}
+
+
 async def test_search_uses_query_api_and_parses_points():
     engine = make_engine()
     calls = []
 
     async def request_json(method, url, *, json_body=None, headers=None):
         calls.append((method, url, json_body, headers))
+        if method == "GET":
+            return _collection_meta()
         return {
             "result": {
                 "points": [{"id": 1, "score": 0.92, "payload": {"image_url": "https://img"}}]
@@ -53,14 +60,21 @@ async def test_search_uses_query_api_and_parses_points():
     engine._request_json = request_json
     hits = await engine.search([0.1, 0.2], limit=2)
 
-    assert len(calls) == 1
-    method, url, body, headers = calls[0]
+    # 首次检索先读一次集合配置做维度/度量校验，之后才是真正的 query
+    assert len(calls) == 2
+    assert calls[0][0] == "GET"
+    assert calls[0][1] == "https://qdrant.example.com/collections/imgbed_images"
+    method, url, body, headers = calls[1]
     assert method == "POST"
     assert url == "https://qdrant.example.com/collections/imgbed_images/points/query"
     assert body == {"query": [0.1, 0.2], "limit": 2, "with_payload": True, "with_vector": False}
     assert headers == {"api-key": "secret"}
     assert hits[0]["id"] == "1"
     assert hits[0]["score"] == pytest.approx(0.92)
+
+    # 集合元信息缓存：第二次检索不再重复 GET
+    await engine.search([0.1, 0.2], limit=2)
+    assert len(calls) == 3
 
 
 async def test_search_falls_back_to_legacy_api_on_404():
@@ -69,6 +83,8 @@ async def test_search_falls_back_to_legacy_api_on_404():
 
     async def request_json(method, url, *, json_body=None, headers=None):
         calls.append((url, json_body))
+        if method == "GET":
+            return _collection_meta(size=1)
         if url.endswith("/points/query"):
             raise HttpError(404, "query endpoint not found")
         return {"result": [{"id": 2, "score": 0.88, "payload": {}}]}
@@ -76,11 +92,11 @@ async def test_search_falls_back_to_legacy_api_on_404():
     engine._request_json = request_json
     hits = await engine.search([1.0])
 
-    assert len(calls) == 2
-    assert calls[0][0].endswith("/points/query")
-    assert calls[0][1]["query"] == [1.0]
-    assert calls[1][0].endswith("/points/search")
-    assert calls[1][1]["vector"] == [1.0]
+    assert len(calls) == 3
+    assert calls[1][0].endswith("/points/query")
+    assert calls[1][1]["query"] == [1.0]
+    assert calls[2][0].endswith("/points/search")
+    assert calls[2][1]["vector"] == [1.0]
     assert hits[0]["id"] == "2"
 
 
@@ -89,6 +105,8 @@ async def test_search_can_return_candidate_vectors_for_duplicate_clustering():
     calls = []
 
     async def request_json(method, url, *, json_body=None, headers=None, **_kwargs):
+        if method == "GET":
+            return _collection_meta()
         calls.append(json_body)
         return {
             "result": {
@@ -114,11 +132,91 @@ async def test_search_raises_when_both_apis_are_missing():
     engine = make_engine()
 
     async def request_json(method, url, *, json_body=None, headers=None):
-        raise HttpError(404, "collection not found")
+        if method == "GET":
+            return _collection_meta(size=1)
+        raise HttpError(404, "query endpoint not found")
 
     engine._request_json = request_json
     with pytest.raises(HttpError):
         await engine.search([1.0])
+
+
+async def test_missing_collection_is_reported_as_readable_error():
+    """集合不存在时给出可执行提示，而不是让 404 以裸 HttpError 冒泡。"""
+    engine = make_engine()
+
+    async def request_json(method, url, *, json_body=None, headers=None):
+        raise HttpError(404, "collection imgbed_images not found")
+
+    engine._request_json = request_json
+    with pytest.raises(VectorEngineError, match="不存在"):
+        await engine.search([1.0])
+
+
+async def test_collection_dimension_mismatch_is_readable():
+    """集合维度与 embedding 输出不一致时，说清「要求几维 / 实际几维」。"""
+    engine = make_engine()
+
+    async def request_json(method, url, *, json_body=None, headers=None):
+        if method == "GET":
+            return _collection_meta(size=1024)
+        pytest.fail("维度不符时不应继续发检索请求")
+
+    engine._request_json = request_json
+    with pytest.raises(VectorEngineError, match="要求 1024 维，当前 embedding 输出 2 维"):
+        await engine.search([0.1, 0.2])
+
+
+async def test_named_vectors_dimension_is_validated_too():
+    """命名向量集合的配置是 {name: {size, distance}}，同样要校验。"""
+
+    async def request_json(method, url, *, json_body=None, headers=None):
+        return {
+            "result": {
+                "config": {"params": {"vectors": {"image": {"size": 3, "distance": "Cosine"}}}}
+            }
+        }
+
+    engine = make_engine()
+    engine._request_json = request_json
+    with pytest.raises(VectorEngineError, match="要求 3 维"):
+        await engine.search([0.1, 0.2])
+
+
+async def test_non_cosine_distance_is_reported():
+    engine = make_engine()
+
+    async def request_json(method, url, *, json_body=None, headers=None):
+        return _collection_meta(size=2, distance="Dot")
+
+    engine._request_json = request_json
+    with pytest.raises(VectorEngineError, match="不是 Cosine"):
+        await engine.search([0.1, 0.2])
+
+
+async def test_vector_dimension_error_from_server_is_translated():
+    """服务端 400 的 'Vector dimension error' 不能原样透出成 HTTP 400。"""
+    engine = make_engine()
+    engine._collection_meta = _collection_meta(size=2)["result"]
+
+    async def request(method, url, *, json_body=None, headers=None, max_bytes=None):
+        return 400, '{"status":{"error":"Vector dimension error: expected dim: 1024"}}'
+
+    engine._request = request
+    with pytest.raises(VectorEngineError, match="向量维度不匹配"):
+        await engine.search([0.1, 0.2])
+
+
+async def test_count_distinguishes_missing_collection_from_empty():
+    """404 是「集合不存在」，不是「0 条」——两者对面板的处置完全不同。"""
+    engine = make_engine()
+
+    async def request_json(method, url, *, json_body=None, headers=None):
+        raise HttpError(404, "Collection not found")
+
+    engine._request_json = request_json
+    with pytest.raises(VectorEngineError, match="不存在（HTTP 404）"):
+        await engine.count()
 
 
 async def test_search_rejects_invalid_vectors():
@@ -134,11 +232,17 @@ async def test_collection_name_is_url_encoded():
 
     async def request_json(method, url, *, json_body=None, headers=None):
         calls.append(url)
+        if method == "GET":
+            return _collection_meta(size=1)
         return {"result": {"points": []}}
 
     engine._request_json = request_json
     await engine.search([1.0])
-    assert calls == ["https://qdrant.example.com/collections/my%20collection%2F%3F/points/query"]
+    # 集合名里的空格 / 斜杠 / 问号在预检 GET 与检索 POST 里都必须转义
+    assert calls == [
+        "https://qdrant.example.com/collections/my%20collection%2F%3F",
+        "https://qdrant.example.com/collections/my%20collection%2F%3F/points/query",
+    ]
 
 
 async def test_count_upsert_and_delete_use_encoded_collection_and_uuid():
@@ -147,6 +251,8 @@ async def test_count_upsert_and_delete_use_encoded_collection_and_uuid():
 
     async def request_json(method, url, *, json_body=None, headers=None):
         calls.append((method, url, json_body))
+        if method == "GET":
+            return _collection_meta(size=2)
         return {"result": {"count": 7}}
 
     async def embed_file(path):
@@ -168,14 +274,17 @@ async def test_count_upsert_and_delete_use_encoded_collection_and_uuid():
     await engine.delete_point("phash:00")
 
     assert calls[0][1].endswith("/collections/img%20bed/points/count")
-    assert calls[1][0] == "PUT"
-    assert calls[1][1].endswith("/collections/img%20bed/points?wait=true")
-    assert calls[1][2]["points"][0]["id"] == engine.point_id_for("phash:00")
-    assert calls[1][2]["points"][0]["vector"] == [0.2, 0.4]
+    # 登记前先做一次集合维度校验（新增，防维度不一致时把弱向量写进库）
+    assert calls[1][0] == "GET"
+    assert calls[1][1] == "https://qdrant.example.com/collections/img%20bed"
+    assert calls[2][0] == "PUT"
+    assert calls[2][1].endswith("/collections/img%20bed/points?wait=true")
+    assert calls[2][2]["points"][0]["id"] == engine.point_id_for("phash:00")
+    assert calls[2][2]["points"][0]["vector"] == [0.2, 0.4]
     # file_name 必须是解码后的真名，否则 /原图 按中文名精确反查会落空
-    assert calls[1][2]["points"][0]["payload"]["file_name"] == "a b.jpg"
-    assert calls[2][1].endswith("/collections/img%20bed/points/delete?wait=true")
-    assert calls[2][2] == {"points": [engine.point_id_for("phash:00")]}
+    assert calls[2][2]["points"][0]["payload"]["file_name"] == "a b.jpg"
+    assert calls[3][1].endswith("/collections/img%20bed/points/delete?wait=true")
+    assert calls[3][2] == {"points": [engine.point_id_for("phash:00")]}
 
 
 def test_invalid_base_urls_disable_engine_and_provide_safe_hint():
@@ -1219,3 +1328,30 @@ async def test_original_info_for_thumb_name_tolerates_duplicate_points():
     info = await engine.original_info_for_thumb_name("【微博_示例博主A工作室official】剧照.jpg")
 
     assert info is not None and info["url"] == original
+
+
+async def test_missing_index_warns_once_and_still_returns_none(caplog):
+    """缺索引是「配置问题」，不能静默当成「没命中」。
+
+    Qdrant 对未建索引的 match.text / match.value 回 400
+    `Index required but not found`；反查必须仍然返回 None（不阻断 /原图），
+    但要打一条说明「该建哪两个索引」的 warning，且只打一次。
+    """
+    engine = make_engine()
+
+    async def request_json(method, url, *, json_body=None, headers=None):
+        raise HttpError(
+            400,
+            'Index required but not found. Please create an index for "thumb_url" first',
+        )
+
+    engine._request_json = request_json
+    with caplog.at_level("WARNING", logger="vector_search"):
+        assert await engine.original_url_for_thumb("http://bed/file/thumbnails/1_x.jpg") is None
+        assert await engine.original_url_for_thumb("http://bed/file/thumbnails/2_x.jpg") is None
+
+    assert "缺少反查所需索引" in caplog.text
+    # 两个 payload 键的建索引建议都要提到，只提示一次
+    assert "thumb_url" in caplog.text
+    assert "file_name" in caplog.text
+    assert caplog.text.count("缺少反查所需索引") == 1

@@ -706,6 +706,14 @@ class DeliveryMixin:
             jobs.append((original, scaled, self._known_bytes(block)) if verify else None)
 
         verified = await self._verify_scaled_batch(jobs) if any(jobs) else {}
+        if any(jobs) and self._scaled_verify_cooling():
+            # 探测期间图床明确拒绝了缩放（400/403/405/501 都算能力拒绝）：
+            # 这一批改发原图。否则发出去的仍是刚被拒的缩放链接，用户收到的
+            # 就是加载失败或防盗链占位图。证据仍取实测结果 → 不会写"已压缩"。
+            urls = [
+                build_original_url(str(block.get("url") or "")) or str(block.get("url") or "")
+                for block in image_blocks
+            ]
         evidences = [
             compression_evidence(sizes[index], max_side, verified_smaller=verified.get(index))
             for index in range(len(image_blocks))

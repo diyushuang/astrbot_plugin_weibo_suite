@@ -366,9 +366,9 @@
       "hash_similarity_threshold": {
         "description": "【选填】哈希命中阈值（0~1）",
         "type": "float",
-        "default": 0.85,
+        "default": 0.88,
         "obvious_hint": true,
-        "hint": "相似度 = 1 − 汉明距离/总位数，达到该值才判命中。默认 0.85 对应 hash_size=16。"
+        "hint": "相似度 = 1 − 汉明距离/总位数（256 bit 下 0.88 ≈ 允许 30 bit 差异），达到该值才判命中。建议 0.88–0.9；本插件 DCT 归一化与 imagehash 库未做过金标比对，跨库对照需重新标定。"
       },
       "ai_verify": {
         "description": "【选填】AI 视觉复核",
@@ -628,12 +628,13 @@
         "hint": "上传成功后按点号路径从响应 JSON 中提取图片直链。默认值 data.url 适用于 Lsky Pro；EasyImages 常为 url 或 data.url；Chevereto 为 image.url，需按所用图床修改。"
       },
       "timeout": {
-        "description": "【generic_http 选填】上传超时（秒）",
+        "description": "【选填】上传/删除超时（秒）",
         "type": "int",
         "default": 30,
         "condition": {
           "mode": "generic_http"
-        }
+        },
+        "hint": "图床上传与删除请求的超时时间。通用 HTTP 图床、CloudFlare-ImgBed 与 R2/OCI 对象存储共用此值；大文件在慢网下可适当调大。"
       },
       "cfi_base_url": {
         "description": "【imgbed 必填】CloudFlare-ImgBed 站点地址",
@@ -1057,7 +1058,7 @@
         "type": "string",
         "default": "",
         "obvious_hint": true,
-        "hint": "接受图片输入的多模态 embedding 模型 ID（文本 embedding 模型无法对图片向量化），例如 Qwen/Qwen3-VL-Embedding-8B。必须与图床入库侧一致。"
+        "hint": "接受图片输入的多模态 embedding 模型 ID（文本 embedding 模型无法对图片向量化），例如 Qwen/Qwen3-VL-Embedding-8B。必须与图床入库侧一致；且 embed_base_url 需指向**多模态兼容网关**（能接受 image_url 内容块并返回图像向量），普通纯文本 OpenAI 兼容端点会对图片内容块报 400。"
       },
       "similarity_threshold": {
         "description": "【选填】向量相似度阈值（0~1）",
@@ -1185,9 +1186,9 @@
   "similarity_threshold": {
     "description": "（旧布局迁移用，请勿修改）【选填】相似度阈值（0~1，哈希引擎）",
     "type": "float",
-    "default": 0.85,
+    "default": 0.88,
     "obvious_hint": true,
-    "hint": "仅用于把旧版配置搬到 basic / limits，迁移后不再生效。",
+    "hint": "仅用于把旧版配置搬到 basic / limits，迁移后不再生效。阈值按 hash_size 的 bit 数归一化，0.88 在 256 bit 下约允许 30 bit 差异。",
     "condition": {
       "advanced_settings": "__legacy__"
     },

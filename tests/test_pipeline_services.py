@@ -103,6 +103,12 @@ class _FakeS3:
     async def put_object(self, bucket, key, data, content_type):
         self.puts.append((bucket, key, content_type))
 
+    async def put_object_file(self, bucket, key, path, content_type, payload_sha256):
+        # 流式上传：对象存储收到的是文件内容，这里只记录调用并校验摘要长度
+        assert len(payload_sha256) == 64
+        assert Path(path).is_file()
+        self.puts.append((bucket, key, content_type))
+
 
 def _make_bed(config: dict, data_dir: Path, fake_client=None) -> ImageBedClient:
     async def get_client():
@@ -395,6 +401,10 @@ async def test_upsert_file_batch_writes_every_point_in_one_put(tmp_path, monkeyp
         return [0.1, float(len(embeds))]
 
     async def request_json(method, url, *, json_body=None, headers=None):
+        if method == "GET":
+            return {
+                "result": {"config": {"params": {"vectors": {"size": 2, "distance": "Cosine"}}}}
+            }
         puts.append((method, url, json_body, headers))
         return {"result": {}}
 
@@ -460,6 +470,10 @@ async def test_upsert_file_batch_dedupes_by_point_id(monkeypatch):
         return [0.5]
 
     async def request_json(method, url, *, json_body=None, headers=None):
+        if method == "GET":
+            return {
+                "result": {"config": {"params": {"vectors": {"size": 1, "distance": "Cosine"}}}}
+            }
         puts.append(json_body)
         return {"result": {}}
 
@@ -593,6 +607,10 @@ async def test_upsert_file_keeps_legacy_payload_shape(monkeypatch):
         return [0.2, 0.4]
 
     async def request_json(method, url, *, json_body=None, headers=None):
+        if method == "GET":
+            return {
+                "result": {"config": {"params": {"vectors": {"size": 2, "distance": "Cosine"}}}}
+            }
         puts.append(json_body)
         return {}
 

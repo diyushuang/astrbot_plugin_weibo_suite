@@ -421,9 +421,16 @@ class ImageTracePlugin(
                 "如 8/16/24/32），已回退为默认 16。"
             )
             hash_size = 16
+        # phash 相似度按 bit 数归一化（`1 - 汉明距离 / hash_size²`），默认
+        # 0.88 ≈ 16×16=256 bit 下允许 30 bit 差异。推荐区间 0.88–0.9：更低会
+        # 把"同构图不同图"判成命中，更高会漏掉轻微裁剪/二次压缩。注意本插件
+        # 的 DCT 归一化与 imagehash 库不完全等价，阈值尚未与该库做金标比对。
         return {
             "hash_size": hash_size,
-            "hash_threshold": max(0.0, min(1.0, self._float_cfg("similarity_threshold", 0.85))),
+            "hash_threshold": max(
+                0.0,
+                min(1.0, self._float_cfg("similarity_threshold", 0.88)),
+            ),
             "top_n": max(0, min(50, self._int_cfg("top_n", 3))),
             "max_images_per_query": max(1, min(10, self._int_cfg("max_images_per_query", 3))),
         }

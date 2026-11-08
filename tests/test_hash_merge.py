@@ -70,11 +70,11 @@ async def test_merge_prefers_local_on_equal_similarity(make_plugin, data_dir, mo
 async def test_merge_ranks_by_similarity_not_by_leg(make_plugin, data_dir, monkeypatch):
     """本地腿的低分命中不能挡住图床腿的高分命中。
 
-    这正是顺序短路（本地先查、没中才查图床）会犯的错：本地有条 0.86 的勉强命中，
+    这正是顺序短路（本地先查、没中才查图床）会犯的错：本地有条 0.89 的勉强命中，
     就直接返回了，图床那条 0.99 的完美命中永远轮不到。
     """
     plugin = make_plugin(**VECTOR_CFG)
-    monkeypatch.setattr(plugin.library, "search", lambda _p, _n: [_local(0.86)])
+    monkeypatch.setattr(plugin.library, "search", lambda _p, _n: [_local(0.89)])
 
     remote = HashIndex(str(data_dir / "r.json"), expected_phash_hex_len=64)
     remote.build(
@@ -90,9 +90,9 @@ async def test_merge_ranks_by_similarity_not_by_leg(make_plugin, data_dir, monke
         ]
     )
     plugin.remote_hash = remote
-    monkeypatch.setattr(plugin.library, "search", lambda _p, _n: [_local(0.86)])
+    monkeypatch.setattr(plugin.library, "search", lambda _p, _n: [_local(0.89)])
 
-    # 查询串与远端哈希相同 → 图床腿 1.0，本地腿固定 0.86
+    # 查询串与远端哈希相同 → 图床腿 1.0，本地腿固定 0.89
     hits, _lines = plugin._merged_hash_candidates("f" * 64, 5)
 
     assert len(hits) == 2

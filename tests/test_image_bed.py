@@ -178,7 +178,9 @@ async def test_cf_upload_sends_auth_code_as_header_not_in_query(tmp_path):
 
     assert url == "https://img.example.com/file/a.jpg"
     assert len(fake.calls) == 1
-    assert fake.calls[0]["headers"].get("X-Auth-Code") == "SECRET123"
+    # CloudFlare-ImgBed 服务端读的是 `authCode` 头（旧实现误写成 X-Auth-Code）
+    assert fake.calls[0]["headers"].get("authCode") == "SECRET123"
+    assert "X-Auth-Code" not in fake.calls[0]["headers"]
     assert "authCode" not in fake.calls[0]["url"]
     assert "SECRET123" not in fake.calls[0]["url"]
 
@@ -199,10 +201,10 @@ async def test_cf_upload_falls_back_to_query_param_for_old_sites(tmp_path):
 
     assert url == "https://img.example.com/file/a.jpg"
     assert len(fake.calls) == 2
-    assert "X-Auth-Code" in fake.calls[0]["headers"]
+    assert "authCode" in fake.calls[0]["headers"]
     assert "authCode=SECRET123" in fake.calls[1]["url"]
     # 回落只做一次，且不能把请求头也带上（否则等于两条路一起漏）
-    assert "X-Auth-Code" not in fake.calls[1]["headers"]
+    assert "authCode" not in fake.calls[1]["headers"]
 
 
 async def test_cf_upload_does_not_fall_back_on_non_auth_errors(tmp_path):
@@ -305,3 +307,72 @@ async def test_store_reports_degraded_until_a_upload_succeeds(tmp_path):
         "degraded_reason": "",
         "degraded_since": 0.0,
     }
+
+
+async def test_cf_upload_prefers_absolute_public_url(tmp_path):
+    """站点绑了自定义域名/CDN 时，响应里的 publicUrl 才是可达直链。
+
+    原实现忽略 publicUrl，一律用站点地址 + src 拼，绑定自定义域名后
+    拼出来的链接可能根本打不开。"""
+    src = tmp_path / "a.jpg"
+    src.write_bytes(b"\xff\xd8\xff\xe0")
+    fake = _FakeHttpClient(
+        [
+            _FakeResponse(
+                200,
+                '[{"src": "/file/a.jpg", "publicUrl": "https://cdn.example.net/file/a.jpg"}]',
+            )
+        ]
+    )
+    client = _cf_client(tmp_path, fake)
+
+    url = await client._upload_cf(str(src))
+
+    assert url == "https://cdn.example.net/file/a.jpg"
+
+
+async def test_cf_upload_ignores_relative_public_url(tmp_path):
+    """publicUrl 不是绝对地址时仍按站点地址 + src 拼接，不能返回半截路径。"""
+    src = tmp_path / "a.jpg"
+    src.write_bytes(b"\xff\xd8\xff\xe0")
+    fake = _FakeHttpClient(
+        [_FakeResponse(200, '[{"src": "/file/a.jpg", "publicUrl": "file/a.jpg"}]')]
+    )
+    client = _cf_client(tmp_path, fake)
+
+    assert await client._upload_cf(str(src)) == "https://img.example.com/file/a.jpg"
+
+
+def test_oci_public_url_uses_new_domain_and_old_links_still_reverse(tmp_path):
+    """默认生成 oci.customer-oci.com 新域；历史落库的 oraclecloud.com 旧域仍可反解。"""
+    client = make_client(
+        {
+            "mode": "oracle_oci",
+            "oci_namespace": "namespace",
+            "oci_region": "ap-osaka-1",
+            "oci_bucket": "bucket",
+            "oci_public_bucket": True,
+        },
+        tmp_path,
+    )
+    url = client._oci_public_url("a b.jpg")
+    assert url == (
+        "https://objectstorage.ap-osaka-1.oci.customer-oci.com/n/namespace/b/bucket/o/a%20b.jpg"
+    )
+    assert client._oci_key_from_url(url) == ("a b.jpg", True)
+
+    old = "https://objectstorage.ap-osaka-1.oraclecloud.com/n/namespace/b/bucket/o/a%20b.jpg"
+    assert client._oci_key_from_url(old) == ("a b.jpg", True)
+
+
+def test_sha256_of_file_streams_in_chunks(tmp_path):
+    """分块摘要必须等于整文件摘要——流式上传靠它填 x-amz-content-sha256。"""
+    import hashlib
+
+    from astrbot_plugin_weibo_suite.trace.image_bed import sha256_of_file
+
+    path = tmp_path / "blob.bin"
+    data = bytes(range(256)) * 40
+    path.write_bytes(data)
+
+    assert sha256_of_file(str(path), chunk_size=97) == hashlib.sha256(data).hexdigest()
