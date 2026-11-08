@@ -189,11 +189,9 @@ FIELD_META: dict[str, dict[str, Any]] = {
     "push.video_prefer_file": _f("视频优先按文件发送", advanced=True),
     "push.video_quality": _f("视频清晰度", advanced=True),
     "push.video_max_mb": _f("单个视频上限", unit="MB", min=1, max=500, step=1, advanced=True),
-    "push.video_inline_max_mb": _f(
-        "内联视频上限", unit="MB", min=1, max=200, step=1, advanced=True
-    ),
+    "push.video_inline_max_mb": _f("内联视频上限", unit="MB", min=1, max=35, step=1, advanced=True),
     "push.video_file_fallback": _f("视频失败回退文件", advanced=True),
-    "push.video_file_temp": _f("视频转文件后清理临时文件", advanced=True),
+    "push.video_file_temp": _f("视频回退只发文件消息（不落群文件）", advanced=True),
     # ---------------- album ----------------
     "album.album_enabled": _f("启用群相册"),
     "album.album_rules": _f("相册绑定规则", managed=True),

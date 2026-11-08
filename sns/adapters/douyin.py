@@ -71,8 +71,14 @@ def extract_uifid(cookie: str) -> str:
 
 
 def build_signature(params: dict[str, str], uifid: str, timestamp: str | int) -> str:
-    """`md5(uifid_timestamp_SALT_query)`，query 用 `&` 拼接且不含签名参数本身。"""
-    query = "&".join(f"{k}={params[k]}" for k in sorted(params) if params[k] is not None)
+    """`md5(uifid_timestamp_SALT_query)`，query 用 `&` 拼接且不含签名参数本身。
+
+    **参数顺序必须与 `urlencode` 生成 URL 时的顺序完全一致**：签名是对字节
+    串做 md5，`sorted()` 排出来的顺序与实际请求里的插入顺序不同就是两个不同的
+    串——签名一错平台直接 403，而且从响应里看不出原因。所以这里按 dict 的插入
+    顺序拼接，调用方用同一份 dict 去 `urlencode`。
+    """
+    query = "&".join(f"{k}={params[k]}" for k in params if params[k] is not None)
     payload = f"{uifid}_{timestamp}_{SIGN_SALT}_{query}"
     return hashlib.md5(payload.encode("utf-8")).hexdigest()
 
@@ -94,6 +100,34 @@ def signed_params(
     return flat
 
 
+def signature_headers(params: dict[str, str], *, expire_seconds: int = 3600) -> dict[str, str]:
+    """把签名三件套同时放进请求头（上游 web 端就是这么发的）。
+
+    - `uifid`：签名用的访客标识，和 Cookie 里那个必须一致；
+    - `x-secsdk-web-signature`：`signed_params` 算出的 32 位 md5；
+    - `x-secsdk-web-expire`：签名有效期（默认 1 小时），按 `timestamp` 加窗口
+      推算。
+
+    查询串里保留 `uifid` / `timestamp` 是因为签名 preimage 覆盖了它们；两个位置
+    都带并不冲突，平台按头优先。**该头组合未在真机验证**（需要真实登录态
+    Cookie），改动依据是上游 `Douyin_TikTok_Download_API` 的请求样例。
+    """
+    signature = str(params.get("x-secsdk-web-signature") or "")
+    uifid = str(params.get("uifid") or "")
+    try:
+        stamp = int(params.get("timestamp") or 0)
+    except (TypeError, ValueError):
+        stamp = 0
+    expire = (
+        str(stamp + int(expire_seconds)) if stamp else str(int(time.time()) + int(expire_seconds))
+    )
+    return {
+        "uifid": uifid,
+        "x-secsdk-web-signature": signature,
+        "x-secsdk-web-expire": expire,
+    }
+
+
 def post_params(sec_uid: str, *, count: int = C.FETCH_POST_LIMIT) -> dict[str, str]:
     """作品列表接口的查询参数（未签名）。
 
@@ -110,8 +144,8 @@ def post_params(sec_uid: str, *, count: int = C.FETCH_POST_LIMIT) -> dict[str, s
         "show_live_replay_strategy": "1",
         "count": str(int(count)),
         "publish_video_strategy_type": "2",
-        "version_code": "170400",
-        "version_name": "17.4.0",
+        "version_code": "190600",
+        "version_name": "19.6.0",
         "cookie_enabled": "true",
         "platform": "PC",
         "downlink": "10",
@@ -201,7 +235,20 @@ def parse_aweme(
 
 
 def author_avatar(item: dict[str, Any]) -> str:
-    author = item.get("author") if isinstance(item, dict) else {}
+    """取作者头像。
+
+    传进来的通常是 `/web/aweme/post/` 的**整个响应**：作者信息在
+    `aweme_list[0].author` 里，响应顶层没有 `author` 字段。直接读顶层只会
+    永远拿到空串（此前 M1/M2 的头像一直缺失）。单条作品（dict 自带 `author`）
+    仍按自身字段处理。
+    """
+    node: Any = item if isinstance(item, dict) else {}
+    rows = node.get("aweme_list") or node.get("awemeList")
+    if isinstance(rows, list):
+        # 这是"作品列表响应"：作者只在每一条作品里，顶层的 author 字段即使存在
+        # 也不是本条作者（旧实现取顶层，结果一直拿到空串）。
+        node = rows[0] if rows and isinstance(rows[0], dict) else {}
+    author = node.get("author") if isinstance(node, dict) else {}
     if not isinstance(author, dict):
         return ""
     for key in ("avatar_thumb", "avatar_medium", "avatar_larger", "avatarThumb"):

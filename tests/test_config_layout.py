@@ -316,3 +316,54 @@ def test_documented_config_key_count_matches_schema():
         assert int(expected) == actual, (
             f"配置手册 {name} 组写 {expected} 个键，schema 实际 {actual} 个"
         )
+
+
+def _host_prune(schema: dict, conf: dict) -> None:
+    """复刻宿主 `check_config_integrity` 的删键规则（只处理本文关心的部分）。
+
+    - schema 里不存在的键 → 删；
+    - `type: object` 会递归进 `items`，`items` 里没有的自由键全部被删；
+    - 其它类型（含 `dict`）整块保留。
+    """
+    for key in list(conf.keys()):
+        node = schema.get(key)
+        if not isinstance(node, dict):
+            del conf[key]
+            continue
+        if node.get("type") == "object" and isinstance(node.get("items"), dict):
+            child = conf.get(key)
+            if isinstance(child, dict):
+                _host_prune(node["items"], child)
+
+
+def test_pipeline_categories_mapping_survives_host_integrity_check():
+    """自由键值映射必须声明为 `dict`。
+
+    声明成 `object` + 空 `items` 时，宿主每次加载都会把用户新增的分类键当成
+    "schema 里不存在"删掉并当场 `save_config()` 落盘——用户填的分类映射会
+    静默丢光。`dict` 才是官方文档对自由映射的写法。
+    """
+    schema = _schema()
+    node = schema["pipeline"]["items"]["categories"]
+    assert node["type"] == "dict"
+    assert node["default"] == {}
+
+    conf = {"pipeline": {"categories": {"示例博主": "12、日常分享", "1234567890": "13、其他"}}}
+    _host_prune(schema, conf)
+    assert conf["pipeline"]["categories"] == {
+        "示例博主": "12、日常分享",
+        "1234567890": "13、其他",
+    }
+
+
+def test_every_legacy_flat_key_is_hidden_from_the_settings_ui():
+    """旧布局平铺键必须全部 `invisible`，否则设置页会多出一堆历史字段。"""
+    schema = _schema()
+    legacy = {
+        key
+        for key, node in schema.items()
+        if isinstance(node, dict) and "旧布局迁移用" in str(node.get("description", ""))
+    }
+    assert len(legacy) == 59
+    missing = sorted(key for key in legacy if schema[key].get("invisible") is not True)
+    assert not missing, f"这些旧平铺键缺少 invisible：{missing}"

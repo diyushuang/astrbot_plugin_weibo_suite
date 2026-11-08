@@ -497,6 +497,27 @@ def test_generated_settings_map_lists_every_key():
         assert f"`{key}`" in mapping, f"映射表缺少 {key}"
 
 
+def test_video_channel_labels_and_limits_match_napcat_reality():
+    """NapCat 反向 WS 的 maxPayload 是 50MB，base64 约 1.33 倍——内联上限不能写 200。
+
+    `video_file_temp=true` 对应 `upload_group_file(upload_file=false)`，语义是
+    「只发文件消息、不落群文件」，不是「清理临时文件」。
+    """
+    from astrbot_plugin_weibo_suite.views_backend.settings_schema import build_catalog
+
+    catalog = build_catalog()
+    fields = {
+        field["key"]: field
+        for page in catalog["pages"]
+        for group in page["groups"]
+        for field in group["fields"]
+    }
+    assert fields["push.video_inline_max_mb"]["max"] == 35
+    temp = fields["push.video_file_temp"]
+    assert "不落群文件" in temp["label"]
+    assert "清理临时文件" not in temp["label"]
+
+
 def test_register_settings_routes(monkeypatch):
     class Context:
         def __init__(self):

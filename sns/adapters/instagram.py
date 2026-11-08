@@ -263,8 +263,14 @@ def detect_signal(
     url = str(final_url or "")
     if "/challenge" in url or "/checkpoint" in url:
         return "ig.challenge"
-    if status in (401, 403):
+    if "/accounts/login" in url or url.rstrip("/").endswith("/login"):
+        return "ig.require_login"
+    if status == 401:
         return "ig.http_401"
+    if status == 403:
+        # 403 在 Instagram 多为限流/风控，按 AUTH 处理会把账号永久 paused；
+        # 只有 401 / 明确跳登录页才是登录态失效。
+        return "ig.http_403"
     if status == 429:
         return "ig.http_429"
     text = str(html or "")

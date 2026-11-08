@@ -266,11 +266,16 @@ def detect_signal(html: str, final_url: str = "", *, http_status: int = 200) -> 
     """判风控/登录态信号；空串表示"页面看起来正常"。
 
     按严重程度从"肯定要停"往"可能只是这次没抓到"排：
-    `.fe-verify-box`（验证码盒）> 302 到登录页 > `error_code=300031` >
-    406 `code=-1` > SSR 里根本没有 `__INITIAL_STATE__`。
+    `.fe-verify-box`（验证码盒）> 401/跳登录页 > `error_code=300031` >
+    403（限流/风控）> 406 `code=-1` > SSR 里根本没有 `__INITIAL_STATE__`。
+
+    401 才是"登录态失效"；403 在小红书多为限流/风控，归 AUTH 会把账号直接
+    `paused` 且要人工恢复，反而放大损失。
     """
-    if http_status in (401, 403):
+    if http_status == 401:
         return "xhs.redirect_login"
+    if http_status == 403:
+        return "xhs.http_403"
     if http_status == 406:
         return "xhs.http_406"
     url = str(final_url or "")

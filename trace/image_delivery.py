@@ -876,6 +876,18 @@ def prepare_image_bytes(
             original_format = (image.format or "").upper()
             if len(data) <= COMPRESS_MIN_BYTES and original_format in NAPCAT_PARSEABLE_FORMATS:
                 return data, False
+            # 防解压炸弹：像素闸门必须在 exif_transpose / 尺寸读取之前拦，
+            # 否则一张 10000×10000 的 JPEG 会先被完整解码再判超限——内存峰值和
+            # 耗时都发生在 check 之前。阈值与溯源侧共用一份（features），
+            # 单调上限，不在两处各写一个数。
+            try:
+                from . import features as _features
+
+                max_pixels = int(getattr(_features, "_MAX_LOAD_PIXELS", 0)) or 50_000_000
+            except Exception:  # features 依赖 numpy：缺失时退回同量级固定值
+                max_pixels = 50_000_000
+            if image.width * image.height > max_pixels:
+                return None
             image = PILImageOps.exif_transpose(image)
             side = bounded_int(max_side, 1920, 1, 4096)
             width, height = image.size

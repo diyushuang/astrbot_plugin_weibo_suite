@@ -34,6 +34,7 @@ from ..constants import (
     PENDING_PAGE_LIMIT,
 )
 from ..shared.common import sanitize_error_text
+from . import commit_config
 
 # 面板错误文本回传给浏览器时还要遮掉本机绝对路径：异常串里常带
 # C:\Users\<name>\AppData\... 或 /home/<name>/...，等于把部署目录和用户名
@@ -593,7 +594,9 @@ class DashboardAPI:
             except Exception as e:
                 self._log.info(f"面板添加账号 {uid} 拉取昵称失败: {e!r}")
             remaining = [k for k in p.accounts if k != uid]
-            if not p._update_config(lambda _cfg: p._set_cfg("monitored_uids", [*remaining, uid])):
+            if not await commit_config(
+                p, lambda _cfg: p._set_cfg("monitored_uids", [*remaining, uid])
+            ):
                 return error_response(
                     "配置保存失败（已回滚），请检查磁盘空间或权限", status_code=500
                 )
@@ -617,7 +620,7 @@ class DashboardAPI:
             if uid not in p.accounts:
                 return error_response(f"账号 {uid} 不在监控列表中")
             remaining = [k for k in p.accounts if k != uid]
-            if not p._update_config(lambda _cfg: p._set_cfg("monitored_uids", remaining)):
+            if not await commit_config(p, lambda _cfg: p._set_cfg("monitored_uids", remaining)):
                 return error_response(
                     "配置保存失败（已回滚），请检查磁盘空间或权限", status_code=500
                 )
@@ -650,7 +653,7 @@ class DashboardAPI:
             new_uids = [u for u in current if u != uid]
         else:
             return error_response("不支持的操作")
-        if not p._update_config(lambda _cfg: p._set_cfg("at_all_uids", new_uids)):
+        if not await commit_config(p, lambda _cfg: p._set_cfg("at_all_uids", new_uids)):
             return error_response("配置保存失败（已回滚），请检查磁盘空间或权限", status_code=500)
         name = p._account_name(uid)
         on = action == "add"
@@ -675,7 +678,7 @@ class DashboardAPI:
             if "value" not in body:
                 return error_response("缺少 value（true 开启 / false 关闭）")
             on = bool(body.get("value"))
-            if not p._update_config(lambda _cfg: p._set_cfg("at_all", on)):
+            if not await commit_config(p, lambda _cfg: p._set_cfg("at_all", on)):
                 return error_response(
                     "配置保存失败（已回滚），请检查磁盘空间或权限", status_code=500
                 )
@@ -699,7 +702,7 @@ class DashboardAPI:
                 if kw not in kws:
                     return error_response(f"关键词「{kw}」不在限定列表中")
                 new_kws = [k for k in kws if k != kw]
-            if not p._update_config(lambda _cfg: p._set_cfg("at_all_keywords", new_kws)):
+            if not await commit_config(p, lambda _cfg: p._set_cfg("at_all_keywords", new_kws)):
                 return error_response(
                     "配置保存失败（已回滚），请检查磁盘空间或权限", status_code=500
                 )
@@ -724,7 +727,7 @@ class DashboardAPI:
             if umo in sessions:
                 return error_response("该会话已在推送列表中")
             sessions.append(umo)
-            if not p._update_config(lambda _cfg: p._set_cfg("push_sessions", sessions)):
+            if not await commit_config(p, lambda _cfg: p._set_cfg("push_sessions", sessions)):
                 return error_response(
                     "配置保存失败（已回滚），请检查磁盘空间或权限", status_code=500
                 )
@@ -735,7 +738,7 @@ class DashboardAPI:
             if umo not in sessions:
                 return error_response("该会话不在推送列表中")
             sessions.remove(umo)
-            if not p._update_config(lambda _cfg: p._set_cfg("push_sessions", sessions)):
+            if not await commit_config(p, lambda _cfg: p._set_cfg("push_sessions", sessions)):
                 return error_response(
                     "配置保存失败（已回滚），请检查磁盘空间或权限", status_code=500
                 )
@@ -761,7 +764,7 @@ class DashboardAPI:
             rules = p._album_rules()
             rules[(uid, gid)] = album
             rule_list = [f"{u}:{g}:{a}" for (u, g), a in rules.items()]
-            if not p._update_config(lambda _cfg: p._set_cfg("album_rules", rule_list)):
+            if not await commit_config(p, lambda _cfg: p._set_cfg("album_rules", rule_list)):
                 return error_response(
                     "配置保存失败（已回滚），请检查磁盘空间或权限", status_code=500
                 )
@@ -780,7 +783,7 @@ class DashboardAPI:
                 return error_response("该规则不存在（可能已被移除）")
             rules.pop((uid, gid))
             rule_list = [f"{u}:{g}:{a}" for (u, g), a in rules.items()]
-            if not p._update_config(lambda _cfg: p._set_cfg("album_rules", rule_list)):
+            if not await commit_config(p, lambda _cfg: p._set_cfg("album_rules", rule_list)):
                 return error_response(
                     "配置保存失败（已回滚），请检查磁盘空间或权限", status_code=500
                 )
@@ -823,7 +826,9 @@ class DashboardAPI:
             else:
                 rules.append((uid, keyword, gid, album))
             rule_texts = [f"{u}:{k}:{g}:{a}" if u else f"{k}:{g}:{a}" for u, k, g, a in rules]
-            if not p._update_config(lambda _cfg: p._set_cfg("album_keyword_rules", rule_texts)):
+            if not await commit_config(
+                p, lambda _cfg: p._set_cfg("album_keyword_rules", rule_texts)
+            ):
                 return error_response(
                     "配置保存失败（已回滚），请检查磁盘空间或权限", status_code=500
                 )
@@ -844,7 +849,9 @@ class DashboardAPI:
                 return error_response("该规则不存在（可能已被移除）")
             rules = [r for r in rules if not (r[0] == uid and r[1] == keyword and r[2] == gid)]
             rule_texts = [f"{u}:{k}:{g}:{a}" if u else f"{k}:{g}:{a}" for u, k, g, a in rules]
-            if not p._update_config(lambda _cfg: p._set_cfg("album_keyword_rules", rule_texts)):
+            if not await commit_config(
+                p, lambda _cfg: p._set_cfg("album_keyword_rules", rule_texts)
+            ):
                 return error_response(
                     "配置保存失败（已回滚），请检查磁盘空间或权限", status_code=500
                 )
@@ -1215,7 +1222,7 @@ class DashboardAPI:
             def _apply(cfg: MutableMapping) -> None:
                 cfg["pipeline"] = new_group
 
-            if not self.p._update_config(_apply):
+            if not await commit_config(self.p, _apply):
                 return error_response(
                     "配置保存失败（已回滚），请检查磁盘空间或权限", status_code=500
                 )

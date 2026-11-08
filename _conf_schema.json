@@ -179,7 +179,7 @@
       "video_file_temp": {
         "type": "bool",
         "default": true,
-        "description": "视频转文件发送后清理临时文件"
+        "description": "视频回退只发文件消息、不落群文件（关闭则上传到群文件永久空间）"
       }
     }
   },
@@ -295,7 +295,7 @@
         "description": "文件名模板"
       },
       "categories": {
-        "type": "object",
+        "type": "dict",
         "default": {},
         "items": {},
         "description": "博主→分类目录映射（键可用 uid 或昵称，如 {\"示例博主\": \"12、日常分享\"}）",
@@ -1329,229 +1329,274 @@
   "poll_interval": {
     "type": "int",
     "default": 120,
-    "description": "（旧布局迁移用，请勿修改）轮询间隔（秒）"
+    "description": "（旧布局迁移用，请勿修改）轮询间隔（秒）",
+    "invisible": true
   },
   "monitored_uids": {
     "type": "list",
     "default": [],
-    "description": "（旧布局迁移用，请勿修改）监控 UID 列表"
+    "description": "（旧布局迁移用，请勿修改）监控 UID 列表",
+    "invisible": true
   },
   "include_retweets": {
     "type": "bool",
     "default": true,
-    "description": "（旧布局迁移用，请勿修改）是否包含转发帖"
+    "description": "（旧布局迁移用，请勿修改）是否包含转发帖",
+    "invisible": true
   },
   "filter_keywords": {
     "type": "list",
     "default": [],
-    "description": "（旧布局迁移用，请勿修改）正文命中这些关键词的微博直接跳过"
+    "description": "（旧布局迁移用，请勿修改）正文命中这些关键词的微博直接跳过",
+    "invisible": true
   },
   "whitelist_keywords": {
     "type": "list",
     "default": [],
-    "description": "（旧布局迁移用，请勿修改）白名单关键词（命中则强制推送）"
+    "description": "（旧布局迁移用，请勿修改）白名单关键词（命中则强制推送）",
+    "invisible": true
   },
   "max_post_age_minutes": {
     "type": "int",
     "default": 0,
-    "description": "（旧布局迁移用，请勿修改）只推送最近 N 分钟内的微博（0=不限制）"
+    "description": "（旧布局迁移用，请勿修改）只推送最近 N 分钟内的微博（0=不限制）",
+    "invisible": true
   },
   "proxy": {
     "type": "string",
     "default": "",
     "description": "（旧布局迁移用，请勿修改）出网代理（http:// 或 https:// 开头）",
-    "secret": true
+    "secret": true,
+    "invisible": true
   },
   "custom_cookie": {
     "type": "string",
     "default": "",
     "description": "（旧布局迁移用，请勿修改）自定义 Cookie（填写后跳过游客身份）",
-    "secret": true
+    "secret": true,
+    "invisible": true
   },
   "at_all": {
     "type": "bool",
     "default": false,
-    "description": "（旧布局迁移用，请勿修改）@全体总开关"
+    "description": "（旧布局迁移用，请勿修改）@全体总开关",
+    "invisible": true
   },
   "message_format": {
     "type": "string",
     "default": "📢 微博更新\\n【{name}】{time}\\n{weibo}\\n🔗 {link}",
-    "description": "（旧布局迁移用，请勿修改）推送模板"
+    "description": "（旧布局迁移用，请勿修改）推送模板",
+    "invisible": true
   },
   "push_sessions": {
     "type": "list",
     "default": [],
-    "description": "（旧布局迁移用，请勿修改）推送目标会话（由 微博绑定 写入）"
+    "description": "（旧布局迁移用，请勿修改）推送目标会话（由 微博绑定 写入）",
+    "invisible": true
   },
   "push_delay_seconds": {
     "type": "int",
     "default": 2,
-    "description": "（旧布局迁移用，请勿修改）每轮推送条目之间的间隔（秒）"
+    "description": "（旧布局迁移用，请勿修改）每轮推送条目之间的间隔（秒）",
+    "invisible": true
   },
   "max_push_per_round": {
     "type": "int",
     "default": 0,
-    "description": "（旧布局迁移用，请勿修改）单轮最多推送条数（0=不限制）"
+    "description": "（旧布局迁移用，请勿修改）单轮最多推送条数（0=不限制）",
+    "invisible": true
   },
   "max_pending_retries": {
     "type": "int",
     "default": 5,
-    "description": "（旧布局迁移用，请勿修改）待推送条目的最大重试次数"
+    "description": "（旧布局迁移用，请勿修改）待推送条目的最大重试次数",
+    "invisible": true
   },
   "message_with_images": {
     "type": "bool",
     "default": true,
-    "description": "（旧布局迁移用，请勿修改）推送时附带图片"
+    "description": "（旧布局迁移用，请勿修改）推送时附带图片",
+    "invisible": true
   },
   "message_with_videos": {
     "type": "bool",
     "default": true,
-    "description": "（旧布局迁移用，请勿修改）推送时附带视频"
+    "description": "（旧布局迁移用，请勿修改）推送时附带视频",
+    "invisible": true
   },
   "max_videos_per_post": {
     "type": "int",
     "default": 2,
-    "description": "（旧布局迁移用，请勿修改）单条微博最多处理的视频数"
+    "description": "（旧布局迁移用，请勿修改）单条微博最多处理的视频数",
+    "invisible": true
   },
   "message_send_timeout": {
     "type": "int",
     "default": 60,
-    "description": "（旧布局迁移用，请勿修改）单次发送超时（秒）"
+    "description": "（旧布局迁移用，请勿修改）单次发送超时（秒）",
+    "invisible": true
   },
   "text_max_length": {
     "type": "int",
     "default": 100,
-    "description": "（旧布局迁移用，请勿修改）推送正文截断长度（字符）"
+    "description": "（旧布局迁移用，请勿修改）推送正文截断长度（字符）",
+    "invisible": true
   },
   "show_full_weibo_text": {
     "type": "bool",
     "default": false,
-    "description": "（旧布局迁移用，请勿修改）长文是否推送全文"
+    "description": "（旧布局迁移用，请勿修改）长文是否推送全文",
+    "invisible": true
   },
   "show_hashtags": {
     "type": "bool",
     "default": false,
-    "description": "（旧布局迁移用，请勿修改）正文是否保留话题标签"
+    "description": "（旧布局迁移用，请勿修改）正文是否保留话题标签",
+    "invisible": true
   },
   "weibo_emoji_translate": {
     "type": "bool",
     "default": false,
-    "description": "（旧布局迁移用，请勿修改）是否把微博表情码翻译成 emoji"
+    "description": "（旧布局迁移用，请勿修改）是否把微博表情码翻译成 emoji",
+    "invisible": true
   },
   "at_all_uids": {
     "type": "list",
     "default": [],
-    "description": "（旧布局迁移用，请勿修改）@全体生效的博主 uid 列表"
+    "description": "（旧布局迁移用，请勿修改）@全体生效的博主 uid 列表",
+    "invisible": true
   },
   "at_all_keywords": {
     "type": "list",
     "default": [],
-    "description": "（旧布局迁移用，请勿修改）@全体生效的关键词（空=不限定）"
+    "description": "（旧布局迁移用，请勿修改）@全体生效的关键词（空=不限定）",
+    "invisible": true
   },
   "at_all_daily_limit": {
     "type": "int",
     "default": 10,
-    "description": "（旧布局迁移用，请勿修改）24 小时内 @全体 次数上限（0=不限制）"
+    "description": "（旧布局迁移用，请勿修改）24 小时内 @全体 次数上限（0=不限制）",
+    "invisible": true
   },
   "at_all_check_permission": {
     "type": "bool",
     "default": true,
-    "description": "（旧布局迁移用，请勿修改）@全体发送前检查机器人权限"
+    "description": "（旧布局迁移用，请勿修改）@全体发送前检查机器人权限",
+    "invisible": true
   },
   "at_all_verify": {
     "type": "bool",
     "default": true,
-    "description": "（旧布局迁移用，请勿修改）@全体发送后回读确认"
+    "description": "（旧布局迁移用，请勿修改）@全体发送后回读确认",
+    "invisible": true
   },
   "callback_api_base": {
     "type": "string",
     "default": "",
-    "description": "（旧布局迁移用，请勿修改）AstrBot 回调 API 基址（留空自动获取）"
+    "description": "（旧布局迁移用，请勿修改）AstrBot 回调 API 基址（留空自动获取）",
+    "invisible": true
   },
   "video_prefer_file": {
     "type": "bool",
     "default": true,
-    "description": "（旧布局迁移用，请勿修改）优先以文件方式发送视频"
+    "description": "（旧布局迁移用，请勿修改）优先以文件方式发送视频",
+    "invisible": true
   },
   "video_quality": {
     "type": "string",
     "default": "hd",
-    "description": "（旧布局迁移用，请勿修改）视频清晰度（hd/sd）"
+    "description": "（旧布局迁移用，请勿修改）视频清晰度（hd/sd）",
+    "invisible": true
   },
   "video_max_mb": {
     "type": "int",
     "default": 95,
-    "description": "（旧布局迁移用，请勿修改）单个视频体积上限（MB）"
+    "description": "（旧布局迁移用，请勿修改）单个视频体积上限（MB）",
+    "invisible": true
   },
   "video_inline_max_mb": {
     "type": "int",
     "default": 30,
-    "description": "（旧布局迁移用，请勿修改）内联发送视频的体积上限（MB）"
+    "description": "（旧布局迁移用，请勿修改）内联发送视频的体积上限（MB）",
+    "invisible": true
   },
   "video_file_fallback": {
     "type": "bool",
     "default": true,
-    "description": "（旧布局迁移用，请勿修改）视频发送失败时回退为文件"
+    "description": "（旧布局迁移用，请勿修改）视频发送失败时回退为文件",
+    "invisible": true
   },
   "video_file_temp": {
     "type": "bool",
     "default": true,
-    "description": "（旧布局迁移用，请勿修改）视频转文件发送后清理临时文件"
+    "description": "（旧布局迁移用，请勿修改）视频转文件发送后清理临时文件",
+    "invisible": true
   },
   "album_enabled": {
     "type": "bool",
     "default": true,
-    "description": "（旧布局迁移用，请勿修改）启用群相册"
+    "description": "（旧布局迁移用，请勿修改）启用群相册",
+    "invisible": true
   },
   "album_rules": {
     "type": "list",
     "default": [],
-    "description": "（旧布局迁移用，请勿修改）群相册绑定规则（由 微博相册绑定 写入）"
+    "description": "（旧布局迁移用，请勿修改）群相册绑定规则（由 微博相册绑定 写入）",
+    "invisible": true
   },
   "album_keyword_rules": {
     "type": "list",
     "default": [],
-    "description": "（旧布局迁移用，请勿修改）关键词相册路由规则"
+    "description": "（旧布局迁移用，请勿修改）关键词相册路由规则",
+    "invisible": true
   },
   "album_max_images": {
     "type": "int",
     "default": 18,
-    "description": "（旧布局迁移用，请勿修改）单条微博最多上传的图片数"
+    "description": "（旧布局迁移用，请勿修改）单条微博最多上传的图片数",
+    "invisible": true
   },
   "album_live_gif": {
     "type": "bool",
     "default": true,
-    "description": "（旧布局迁移用，请勿修改）实况图转 GIF 上传"
+    "description": "（旧布局迁移用，请勿修改）实况图转 GIF 上传",
+    "invisible": true
   },
   "album_same_host": {
     "type": "bool",
     "default": false,
-    "description": "（旧布局迁移用，请勿修改）相册文件走与协议端相同的 host"
+    "description": "（旧布局迁移用，请勿修改）相册文件走与协议端相同的 host",
+    "invisible": true
   },
   "album_notify": {
     "type": "bool",
     "default": false,
-    "description": "（旧布局迁移用，请勿修改）相册上传完成后在群里提示"
+    "description": "（旧布局迁移用，请勿修改）相册上传完成后在群里提示",
+    "invisible": true
   },
   "album_download_concurrency": {
     "type": "int",
     "default": 5,
-    "description": "（旧布局迁移用，请勿修改）相册图片下载并发"
+    "description": "（旧布局迁移用，请勿修改）相册图片下载并发",
+    "invisible": true
   },
   "album_upload_concurrency": {
     "type": "int",
     "default": 3,
-    "description": "（旧布局迁移用，请勿修改）相册上传并发"
+    "description": "（旧布局迁移用，请勿修改）相册上传并发",
+    "invisible": true
   },
   "album_upload_interval": {
     "type": "float",
     "default": 0.5,
-    "description": "（旧布局迁移用，请勿修改）相册上传间隔（秒）"
+    "description": "（旧布局迁移用，请勿修改）相册上传间隔（秒）",
+    "invisible": true
   },
   "album_upload_payload_mb": {
     "type": "float",
     "default": 32.0,
-    "description": "（旧布局迁移用，请勿修改）单次上传的 base64 载荷预算（MB）"
+    "description": "（旧布局迁移用，请勿修改）单次上传的 base64 载荷预算（MB）",
+    "invisible": true
   },
     "sns": {
       "type": "object",

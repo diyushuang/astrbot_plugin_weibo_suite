@@ -14,6 +14,7 @@ import time
 from typing import Any
 
 from ..sns import constants as C
+from . import commit_config
 
 try:  # 与新/旧 AstrBot 的 Web 层对接方式保持一致（同 dashboard.py）
     from astrbot.api.web import error_response, json_response
@@ -378,7 +379,7 @@ class SnsAPI:
             updates[key] = value
         if not updates:
             return error_response("没有可更新的字段", status_code=400)
-        if not self.p._update_config(lambda cfg: self._apply_cfg(cfg, updates)):
+        if not await commit_config(self.p, lambda cfg: self._apply_cfg(cfg, updates)):
             return error_response("配置保存失败（已回滚），请检查磁盘空间或权限", status_code=500)
         return json_response({"status": "ok", "changed": list(updates)})
 

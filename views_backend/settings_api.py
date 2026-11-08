@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import copy
 import json
@@ -320,14 +321,20 @@ class SettingsAPI:
                 # 留下告警：否则面板显示"已保存"，微博域却读到的还是旧值。
                 logger.warning(f"设置页写入后同步平铺镜像失败: {_safe_error(exc)}")
 
-        saver = getattr(self.p, "_save_config", None)
+        # 落盘走异步入口：宿主 save_config 是同步写 JSON，直接在请求协程里调会
+        # 卡住事件循环（大配置下更明显）。老宿主/测试桩只有同步入口时丢线程池。
+        async_saver = getattr(self.p, "_save_config_async", None)
         try:
-            if callable(saver):
-                saver()
+            if callable(async_saver):
+                await async_saver()
             else:
-                raw_saver = getattr(self.p.config, "save_config", None)
-                if callable(raw_saver):
-                    raw_saver()
+                sync_saver = getattr(self.p, "_save_config", None)
+                if callable(sync_saver):
+                    await asyncio.to_thread(sync_saver)
+                else:
+                    raw_saver = getattr(self.p.config, "save_config", None)
+                    if callable(raw_saver):
+                        await asyncio.to_thread(raw_saver)
         except Exception as exc:
             for group, previous in touched.items():
                 if previous is None:

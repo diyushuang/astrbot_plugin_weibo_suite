@@ -10,9 +10,13 @@ RSS 2.0 与 Atom），不联网。这里守的是两条底线：
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
+from types import SimpleNamespace
 
 from astrbot_plugin_weibo_suite.sns import constants as C
+from astrbot_plugin_weibo_suite.sns import fetch_m2
 from astrbot_plugin_weibo_suite.sns.adapters import douyin as dy
 from astrbot_plugin_weibo_suite.sns.adapters import instagram as ig
 from astrbot_plugin_weibo_suite.sns.adapters import rss, xhs
@@ -515,3 +519,82 @@ def test_every_detected_signal_is_declared_in_the_signal_table():
 def test_xhs_state_fixture_is_json_serialisable_for_panels():
     # 面板与状态文件都不该出现不可序列化对象
     assert json.loads(json.dumps(XHS_STATE)) == XHS_STATE
+
+
+# ---------------------------------------------------------------- 403 归因与签名顺序（v0.9.5 审计）
+
+
+def test_douyin_signature_preimage_uses_insertion_order():
+    """签名 preimage 的参数顺序必须与 URL 的插入顺序一致。
+
+    旧实现用 `sorted()` 拼 preimage、`urlencode` 用插入序，得到两个不同的字节
+    串；这里直接按 `signed_params` 的插入序复算 md5，换序后签名必须不同。
+    """
+    params = dy.post_params(SEC_UID, count=10)
+    assert params["version_code"] == "190600"
+    signed = dy.signed_params(params, uifid="abc123", timestamp=1700000000)
+    ordered = {k: v for k, v in signed.items() if k != "x-secsdk-web-signature"}
+    preimage = "&".join(f"{k}={v}" for k, v in ordered.items())
+    expected = hashlib.md5(f"abc123_1700000000_{dy.SIGN_SALT}_{preimage}".encode()).hexdigest()
+    assert signed["x-secsdk-web-signature"] == expected
+
+    shuffled = dict(reversed(list(params.items())))
+    assert dy.build_signature(shuffled, "abc123", 1700000000) != dy.build_signature(
+        params, "abc123", 1700000000
+    )
+
+
+def test_douyin_signature_headers_cover_uifid_signature_and_expire():
+    signed = dy.signed_params(
+        dy.post_params(SEC_UID, count=10), uifid="abc123", timestamp=1700000000
+    )
+    headers = dy.signature_headers(signed)
+    assert headers["uifid"] == "abc123"
+    assert headers["x-secsdk-web-signature"] == signed["x-secsdk-web-signature"]
+    assert headers["x-secsdk-web-expire"] == "1700003600"
+
+
+def test_douyin_author_avatar_reads_first_aweme_not_payload_top_level():
+    payload = {
+        "author": {"avatar_thumb": {"url_list": ["https://p3.douyinpic.com/top.jpeg"]}},
+        "aweme_list": [
+            {"author": {"avatar_thumb": {"url_list": ["https://p3.douyinpic.com/a.jpeg"]}}}
+        ],
+    }
+    assert dy.author_avatar(payload) == "https://p3.douyinpic.com/a.jpeg"
+    assert dy.author_avatar({"aweme_list": []}) == ""
+    # 单条作品（无 aweme_list）仍读自身 author
+    assert (
+        dy.author_avatar({"author": {"avatar_thumb": {"url_list": ["https://p3/x.jpeg"]}}})
+        == "https://p3/x.jpeg"
+    )
+
+
+def test_douyin_m2_without_uifid_reports_not_configured():
+    """缺 UIFID 是「未配置/未登录」，不是「登录失效」，更不能算风控。"""
+    account = SimpleNamespace(platform="douyin", account_id=SEC_UID)
+    # session 不是 None 才能走到签名前置检查；缺 UIFID 时不会真的发请求
+    result = asyncio.run(fetch_m2.fetch(account, session=object(), cookie="ttwid=1"))
+    assert result.signal == "env.not_logged_in"
+    assert "UIFID" in result.detail
+
+
+def test_xhs_403_is_risk_not_auth():
+    assert xhs.detect_signal("", http_status=403) == "xhs.http_403"
+    assert C.signal_outcome("xhs.http_403") == C.OUTCOME_RISK
+    assert xhs.detect_signal("", http_status=401) == "xhs.redirect_login"
+    assert C.signal_outcome("xhs.redirect_login") == C.OUTCOME_AUTH
+    assert (
+        xhs.detect_signal("", "https://www.xiaohongshu.com/website-login") == "xhs.redirect_login"
+    )
+
+
+def test_instagram_403_is_risk_not_auth():
+    assert ig.detect_signal({}, status=403) == "ig.http_403"
+    assert C.signal_outcome("ig.http_403") == C.OUTCOME_RISK
+    assert ig.detect_signal({}, status=401) == "ig.http_401"
+    assert C.signal_outcome("ig.http_401") == C.OUTCOME_AUTH
+    assert (
+        ig.detect_signal({}, final_url="https://www.instagram.com/accounts/login/")
+        == "ig.require_login"
+    )

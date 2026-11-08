@@ -559,6 +559,20 @@ def test_build_imgbed_file_url_quotes_names_and_rejects_escapes():
     assert build_imgbed_file_url("ftp://bed.example.com", "a.jpg") is None
 
 
+def test_prepare_image_rejects_pixel_bomb_before_decode(monkeypatch):
+    """像素闸门必须在 exif_transpose 之前，防止先完整解码再判超限。"""
+    from astrbot_plugin_weibo_suite.trace import features
+
+    monkeypatch.setattr(features, "_MAX_LOAD_PIXELS", 100)
+    image = Image.effect_noise((900, 900), 64).convert("RGB")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    data = buffer.getvalue()
+    # 必须先越过「小文件直通」分支，才能证明走的是像素闸门而不是提前返回
+    assert len(data) > 200_000
+    assert prepare_image_bytes(data, 1920, 85) is None
+
+
 def test_probe_helpers_classify_status_and_length():
     assert classify_probe_status(200) is True
     assert classify_probe_status(206) is True

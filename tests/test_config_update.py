@@ -61,3 +61,63 @@ def test_update_config_snapshot_failure_returns_false(make_weibo_plugin):
     assert mutated == []
     assert plugin.config["push"] == {"at_all": False}
     assert plugin.config.saves == 0
+
+
+class AsyncCountingConfig(dict):
+    def __init__(self, data=None, *, fail=False):
+        super().__init__(data or {})
+        self.fail = fail
+        self.saves_async = 0
+        self.saves_sync = 0
+
+    def save_config(self):
+        self.saves_sync += 1
+
+    async def save_config_async(self):
+        self.saves_async += 1
+        if self.fail:
+            raise OSError("磁盘写入失败")
+
+
+class ThreadRecordingConfig(CountingConfig):
+    def __init__(self, data=None):
+        super().__init__(data)
+        self.thread_ids = []
+
+    def save_config(self):
+        self.thread_ids.append(threading.get_ident())
+        super().save_config()
+
+
+async def test_update_config_async_prefers_host_async_saver(make_weibo_plugin):
+    plugin = make_weibo_plugin()
+    plugin.config = AsyncCountingConfig({"push": {"at_all": False}})
+
+    ok = await plugin._update_config_async(lambda cfg: cfg["push"].__setitem__("at_all", True))
+
+    assert ok is True
+    assert plugin.config.saves_async == 1
+    assert plugin.config.saves_sync == 0
+
+
+async def test_update_config_async_falls_back_to_a_worker_thread(make_weibo_plugin):
+    """老宿主没有 save_config_async 时，同步写盘必须离开事件循环线程。"""
+    plugin = make_weibo_plugin()
+    plugin.config = ThreadRecordingConfig({"push": {"at_all": False}})
+
+    ok = await plugin._update_config_async(lambda cfg: cfg["push"].__setitem__("at_all", True))
+
+    assert ok is True
+    assert plugin.config.saves == 1
+    assert plugin.config.thread_ids and plugin.config.thread_ids[0] != threading.get_ident()
+
+
+async def test_update_config_async_rolls_back_when_save_fails(make_weibo_plugin):
+    plugin = make_weibo_plugin()
+    plugin.config = AsyncCountingConfig({"push": {"at_all": False}}, fail=True)
+
+    ok = await plugin._update_config_async(lambda cfg: cfg["push"].__setitem__("at_all", True))
+
+    assert ok is False
+    assert plugin.config == {"push": {"at_all": False}}
+    assert plugin.config.saves_async == 1

@@ -140,13 +140,16 @@ async def _get_text(
 async def _fetch_douyin(session: Any, account_id: str, cookie: str, post_limit: int) -> FetchResult:
     uifid = dy.extract_uifid(cookie)
     if not uifid:
-        # 没有 UIFID 时签名无从算起——这正是上游插件"403 Uifid Not Found"的根因
+        # 没有 UIFID 时签名无从算起——这是"未配置/未登录"，不是"登录态失效"：
+        # 按 AUTH 记一条、提示用户去配 Cookie，而不是当作抖音风控去冷却账号。
         return FetchResult.failure(
-            "douyin.status_code_8", "Cookie 里没有 UIFID，无法签名；请改用浏览器取数"
+            "env.not_logged_in", "Cookie 里没有 UIFID（需含 UIFID/UIFID_TEMP），请重新导出"
         )
     params = dy.signed_params(dy.post_params(account_id, count=post_limit), uifid=uifid)
+    headers = dict(_DOUYIN_HEADERS)
+    headers.update(dy.signature_headers(params))
     url = f"https://www.douyin.com{dy.POST_API_PATH}?{urlencode(params)}"
-    status, payload = await _get_json(session, url, _DOUYIN_HEADERS, cookie)
+    status, payload = await _get_json(session, url, headers, cookie)
     signal = dy.detect_signal(payload, status=status)
     if signal:
         return FetchResult.failure(signal)

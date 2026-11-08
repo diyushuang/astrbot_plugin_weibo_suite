@@ -366,7 +366,7 @@ class WeiboMonitorPlugin(
         self._load_state()
         # 存量配置迁移放在 state 读取之后：迁移标记就在 state.json 里，
         # 先读标记才能保证"迁移过就永不再动"的语义
-        self._migrate_album_max_images()
+        await self._migrate_album_max_images()
         self._sync_accounts_from_config()
         # 实况图转 GIF 依赖 ffmpeg（缺失时回落封面静图，不影响其余功能）
         self._ffmpeg = shutil.which("ffmpeg") or ""
@@ -569,12 +569,39 @@ class WeiboMonitorPlugin(
         if callable(saver):
             saver()
 
+    async def _save_config_async(self) -> None:
+        """异步落盘的版本：不把同步文件写入压在事件循环上。
+
+        宿主 `AstrBotConfig.save_config()` 是同步写 JSON，面板保存、命令改配置
+        时直接在协程里调用会卡住整轮轮询（大配置下更明显）。这里优先用宿主
+        新提供的 `save_config_async`，老宿主没有该接口时把同步入口丢进线程池。
+        回落到 `self._save_config`（而不是直接取 `config.save_config`）是为了
+        保留"纯 dict 配置静默跳过"的语义，也让测试里对 `_save_config` 的失败
+        注入继续生效。
+        """
+        async_saver = getattr(self.config, "save_config_async", None)
+        if callable(async_saver):
+            await async_saver()
+            return
+        await asyncio.to_thread(self._save_config)
+
+    def _rollback_config(self, snapshot) -> None:
+        """尽力恢复配置快照；恢复失败也不能把异常抛给调用方。"""
+        if snapshot is None:
+            return
+        with contextlib.suppress(Exception):
+            self.config.clear()
+            self.config.update(snapshot)
+
     def _update_config(self, mutate) -> bool:
         """批量改配置后只落盘一次；写失败把内存恢复成原样。
 
         面板一次请求可能同时改多个字段/分组键，逐键 save_config 时中途失败
         会留下"内存改了、磁盘只写了一半"的混合态。这里先深拷贝原配置，改完
         统一保存，失败整体回滚，调用方据返回值给用户明确报错。
+
+        同步版保留给启动迁移等同步上下文；事件循环里的调用点应走
+        `_update_config_async`。
         """
         snapshot = None
         try:
@@ -587,10 +614,20 @@ class WeiboMonitorPlugin(
         except Exception as exc:
             # 恢复必须尽力而为：即便恢复失败也要让调用方拿到 False，
             # 不能把"保存失败"伪装成成功
-            if snapshot is not None:
-                with contextlib.suppress(Exception):
-                    self.config.clear()
-                    self.config.update(snapshot)
+            self._rollback_config(snapshot)
+            logger.warning(f"{PLUGIN_NAME} 配置保存失败，已回滚内存改动: {exc}")
+            return False
+
+    async def _update_config_async(self, mutate) -> bool:
+        """`_update_config` 的异步版：语义相同，落盘不阻塞事件循环。"""
+        snapshot = None
+        try:
+            snapshot = copy.deepcopy(self.config)
+            mutate(self.config)
+            await self._save_config_async()
+            return True
+        except Exception as exc:
+            self._rollback_config(snapshot)
             logger.warning(f"{PLUGIN_NAME} 配置保存失败，已回滚内存改动: {exc}")
             return False
 
@@ -625,7 +662,7 @@ class WeiboMonitorPlugin(
             group, field = path
             self._ensure_cfg_group(group)[field] = value
 
-    def _migrate_album_max_images(self):
+    async def _migrate_album_max_images(self):
         """存量配置一次性迁移：旧默认 9 → 18（v1.12.1）。
 
         v1.11.x 及以前 album_max_images 默认 9，AstrBot 会把默认值物化进部署
@@ -651,7 +688,7 @@ class WeiboMonitorPlugin(
         if cur != OLD_ALBUM_MAX_IMAGES:
             return
         self._set_cfg("album_max_images", DEFAULT_MAX_IMAGES)
-        self._save_config()
+        await self._save_config_async()
         logger.warning(
             f"{PLUGIN_NAME} 检测到 album_max_images 仍为旧版本默认值 "
             f"{OLD_ALBUM_MAX_IMAGES}（超 9 图微博会被截回 9 张），"

@@ -162,7 +162,8 @@ SIGNALS: dict[str, tuple[str, float, str]] = {
     "douyin.captcha": (OUTCOME_RISK, 1.5, "验证码/滑块页面"),
     # ---- 小红书 ----
     "xhs.verify_box": (OUTCOME_RISK, 1.8, "出现风控校验盒 .fe-verify-box"),
-    "xhs.redirect_login": (OUTCOME_AUTH, 1.0, "被重定向到登录页"),
+    "xhs.redirect_login": (OUTCOME_AUTH, 1.0, "被重定向到登录页或 401"),
+    "xhs.http_403": (OUTCOME_RISK, 1.0, "接口 403（多为限流/风控，不是登录失效）"),
     "xhs.error_300031": (OUTCOME_RISK, 1.4, "error_code=300031 笔记暂时无法浏览"),
     "xhs.http_406": (OUTCOME_RISK, 1.2, "接口 406 code=-1"),
     "xhs.empty_state": (OUTCOME_RISK, 1.0, "SSR 里没有 __INITIAL_STATE__（多为被降级）"),
@@ -173,6 +174,7 @@ SIGNALS: dict[str, tuple[str, float, str]] = {
     "ig.http_429": (OUTCOME_RISK, 1.0, "429 请求过于频繁"),
     "ig.require_login": (OUTCOME_AUTH, 1.0, "require_login：登录态失效"),
     "ig.http_401": (OUTCOME_AUTH, 1.0, "接口 401"),
+    "ig.http_403": (OUTCOME_RISK, 1.0, "接口 403（多为限流/风控，不是登录失效）"),
     "ig.empty_edges": (OUTCOME_RISK, 0.8, "拿到页面但没有 media 字段"),
     # ---- 通用 ----
     "net.timeout": (OUTCOME_NETWORK, 0.0, "超时"),
