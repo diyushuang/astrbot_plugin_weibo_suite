@@ -41,9 +41,9 @@
 | 监控与推送 | 推送与 @全体 | `push.video_prefer_file` | 视频优先按文件发送 | 开关 | 是 | true |  | 高级 |
 | 监控与推送 | 推送与 @全体 | `push.video_quality` | 视频清晰度 | 单行文本 | 是 | hd |  | 高级 |
 | 监控与推送 | 推送与 @全体 | `push.video_max_mb` | 单个视频上限 | 数字 | 是 | 95 | 1–500 MB | 高级 |
-| 监控与推送 | 推送与 @全体 | `push.video_inline_max_mb` | 内联视频上限 | 数字 | 是 | 30 | 1–200 MB | 高级 |
+| 监控与推送 | 推送与 @全体 | `push.video_inline_max_mb` | 内联视频上限 | 数字 | 是 | 30 | 1–35 MB | 高级 |
 | 监控与推送 | 推送与 @全体 | `push.video_file_fallback` | 视频失败回退文件 | 开关 | 是 | true |  | 高级 |
-| 监控与推送 | 推送与 @全体 | `push.video_file_temp` | 视频转文件后清理临时文件 | 开关 | 是 | true |  | 高级 |
+| 监控与推送 | 推送与 @全体 | `push.video_file_temp` | 视频回退只发文件消息（不落群文件） | 开关 | 是 | true |  | 高级 |
 | 监控与推送 | 群相册 | `album.album_enabled` | 启用群相册 | 开关 | 是 | true |  |  |
 | 监控与推送 | 群相册 | `album.album_rules` | 相册绑定规则 | 列表（每行一项） | 是 | [] | 每行一项 | 指令维护 |
 | 监控与推送 | 群相册 | `album.album_keyword_rules` | 关键词相册路由 | 列表（每行一项） | 是 | [] | 每行一项 | 指令维护 |
@@ -116,12 +116,12 @@
 | 图床与存储 | 对象存储 | `storage_bucket.oci_public_base_url` | 自定义公开地址 | 单行文本 | 是 |  |  | 储存桶模式 = Oracle OCI |
 | 溯源与签到 | 溯源引擎 | `basic.search_engine` | 检索引擎 | 下拉 | 是 | auto | auto=自动（向量优先，失败回退哈希） / vector=仅向量库 / hash=仅本地哈希 |  |
 | 溯源与签到 | 溯源引擎 | `basic.scan_dirs` | 本地图库目录 | 列表（每行一项） | 是 | [] | 每行一项 |  |
-| 溯源与签到 | 溯源引擎 | `basic.hash_similarity_threshold` | 哈希命中阈值 | 数字 | 是 | 0.85 | 0–1 比例 |  |
+| 溯源与签到 | 溯源引擎 | `basic.hash_similarity_threshold` | 哈希命中阈值 | 数字 | 是 | 0.88 | 0–1 比例 |  |
 | 溯源与签到 | 溯源引擎 | `basic.ai_verify` | AI 视觉复核 | 开关 | 是 | false |  | 高级 |
 | 溯源与签到 | 溯源引擎 | `basic.register_admin_only` | 仅管理员可登记原图 | 开关 | 是 | true |  | 危险 · 高级 |
 | 溯源与签到 | 溯源引擎 | `basic.max_images_per_query` | 单次溯源最多图片 | 数字 | 是 | 3 | 1–10 张 | 高级 |
 | 溯源与签到 | 溯源引擎 | `basic.hash_size` | 感知哈希精度 | 下拉 | 是 | 16 | 4=4 × 4（16 bit） / 8=8 × 8（64 bit） / 12=12 × 12（144 bit） / 16=16 × 16（256 bit，默认） / 20=20 × 20（400 bit） / 24=24 × 24（576 bit） / 28=28 × 28（784 bit） / 32=32 × 32（1024 bit） | 高级 |
-| 溯源与签到 | 溯源引擎 | `basic.top_n` | 未命中候选数 | 数字 | 是 | 3 | 0–50 张 | 高级 |
+| 溯源与签到 | 溯源引擎 | `basic.top_n` | 未命中日志候选数 | 数字 | 是 | 3 | 0–50 张 | 高级 |
 | 溯源与签到 | 向量检索 | `vector_search.qdrant_url` | Qdrant 服务地址 | 单行文本 | 是 |  |  |  |
 | 溯源与签到 | 向量检索 | `vector_search.qdrant_api_key` | Qdrant API Key | 密码（脱敏） | 是 | （空） |  | 脱敏 |
 | 溯源与签到 | 向量检索 | `vector_search.collection_name` | Qdrant 集合名 | 单行文本 | 是 | imgbed_images |  |  |

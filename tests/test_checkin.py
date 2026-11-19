@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import random
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -88,7 +89,6 @@ async def test_checkin_flow_uses_builtin_quote_when_library_raises(
     make_plugin, make_event, monkeypatch
 ):
     """语句库构造/取句失败时签到仍要发出卡片文案，而不是抛回事件管线。"""
-    import astrbot_plugin_weibo_suite.trace.main as main_module
 
     plugin = make_plugin(checkin={"render_mode": "simple"})
     event = make_event("/签到", platform="telegram", sender_id="u1")
@@ -106,7 +106,7 @@ async def test_checkin_flow_uses_builtin_quote_when_library_raises(
         raise RuntimeError("boom")
 
     monkeypatch.setattr(plugin, "_quote_library", broken_library)
-    monkeypatch.setattr(main_module.random, "choice", lambda _seq: "FALLBACK")
+    monkeypatch.setattr(random, "choice", lambda _seq: "FALLBACK")
 
     jpeg = io.BytesIO()
     PILImage.effect_noise((64, 64), 32).convert("RGB").save(jpeg, "JPEG")
@@ -210,7 +210,6 @@ async def test_checkin_weibo_mode_falls_back_when_no_image(
     make_plugin, make_event, data_dir, monkeypatch
 ):
     """映射里的微博没有图时回退随机图 + 随机语句，签到不失败。"""
-    import astrbot_plugin_weibo_suite.trace.main as main_module
 
     plugin = make_plugin(checkin={"mode": "weibo", "render_mode": "simple"})
     _write_weibo_map(plugin.weibo_dir, with_image=False)
@@ -229,7 +228,7 @@ async def test_checkin_weibo_mode_falls_back_when_no_image(
         raise RuntimeError("boom")
 
     monkeypatch.setattr(plugin, "_quote_library", broken_library)
-    monkeypatch.setattr(main_module.random, "choice", lambda _seq: "FALLBACK")
+    monkeypatch.setattr(random, "choice", lambda _seq: "FALLBACK")
 
     jpeg = io.BytesIO()
     PILImage.effect_noise((64, 64), 32).convert("RGB").save(jpeg, "JPEG")

@@ -192,7 +192,9 @@ async def test_store_cfb_folder_overrides_upload_folder_query(tmp_path, monkeypa
         tmp_path / "plugin",
         fake,
     )
-    monkeypatch.setattr(image_bed, "read_limited_text", _fake_read_text)
+    monkeypatch.setattr(
+        "astrbot_plugin_weibo_suite.trace.storage_cfb.read_limited_text", _fake_read_text
+    )
 
     stored = await client.store(str(source), folder=" /thumbnails/ ")
     assert stored.ok is True
@@ -258,7 +260,9 @@ async def test_store_generic_http_ignores_folder(tmp_path, monkeypatch, caplog):
         tmp_path / "plugin",
         fake,
     )
-    monkeypatch.setattr(image_bed, "read_limited_text", _fake_read_text)
+    monkeypatch.setattr(
+        "astrbot_plugin_weibo_suite.trace.storage_local.read_limited_text", _fake_read_text
+    )
 
     with _capture_debug(caplog, image_bed.logger):
         stored = await client.store(str(source), folder="thumbnails")

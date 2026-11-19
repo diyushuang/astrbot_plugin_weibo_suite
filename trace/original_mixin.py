@@ -33,6 +33,7 @@ try:
         upgrade_to_https,
     )
     from .random_media import (
+        VIDEO_EXTENSIONS,
         RandomMediaError,
         clean_display_name,
         extract_directory,
@@ -60,6 +61,7 @@ except ImportError:  # 兼容插件以独立模块方式加载
         upgrade_to_https,
     )
     from random_media import (  # type: ignore[no-redef]
+        VIDEO_EXTENSIONS,
         RandomMediaError,
         clean_display_name,
         extract_directory,
@@ -80,6 +82,20 @@ except ImportError:  # 兼容插件以独立模块方式加载
         read_bytes,
         sanitize_error_text,
     )
+
+
+def _offbox_video_needs_file_fallback(url: str) -> bool:
+    """QQ 官方富媒体只收 MP4：已知是其它视频容器时按文件发送，避免必败。
+
+    只有扩展名能明确识别、且不是 .mp4 时才返回真；没有扩展名（图床直链
+    常见）时交给 QQ 自己尝试转码，不提前降级。
+    """
+    try:
+        path = unquote(urlsplit(str(url or "")).path).lower()
+    except ValueError:
+        return False
+    suffix = os.path.splitext(path)[1]
+    return bool(suffix) and suffix in VIDEO_EXTENSIONS and suffix != ".mp4"
 
 
 class OriginalMixin:
@@ -222,12 +238,16 @@ class OriginalMixin:
             date_text += f" ~ {dates[-1][:4]}-{dates[-1][4:6]}-{dates[-1][6:]}"
         map_path = self._weibo_map_path()
         map_note = (
-            "映射表未生成：签到时会按同账号同日图片回退，建议运行 scripts/build_weibo_map.py。"
+            "映射表未生成：签到时会按同账号同日图片回退；"
+            "映射表请按 README 的格式离线生成 weibo_post_map.json。"
         )
         if os.path.isfile(map_path):
             map_posts, _generated, map_meta = await asyncio.to_thread(load_post_map, map_path)
             if map_is_stale(map_path, self.weibo_dir):
-                map_note = "源文件已更新，映射表比源文件旧；请重新运行 scripts/build_weibo_map.py。"
+                map_note = (
+                    "源文件已更新，映射表比源文件旧；"
+                    "请按 README 的格式重新生成 weibo_post_map.json。"
+                )
             else:
                 map_note = (
                     f"映射表：{len(map_posts)} 条，可配对 "
@@ -709,6 +729,22 @@ class OriginalMixin:
             if target.offbox_upload:
                 send_url = self._public_media_url(media_url, settings) or media_url
             caption = self._random_caption(media_url, "video", settings)
+            if target.offbox_upload and _offbox_video_needs_file_fallback(send_url):
+                # 官方文档：视频只支持 mp4。其它容器原样发必被打回，改发文件卡片
+                # 至少能让用户拿到内容；文件名沿用清洗后的原名（含扩展名）。
+                name = (
+                    clean_display_name(send_url)
+                    or os.path.basename(unquote(urlsplit(send_url).path))
+                    or "随机视频"
+                )
+                logger.info(f"qq_official 视频不是 MP4，改按文件发送: {send_url}")
+                yield event.chain_result(
+                    [
+                        Comp.Plain(f"{caption}\n⚠️ QQ 官方机器人仅支持 MP4 视频，已按文件发送"),
+                        Comp.File(name=name, url=send_url),
+                    ]
+                )
+                return
             yield event.chain_result([Comp.Plain(caption), Comp.Video.fromURL(send_url)])
             return
         if kind == "image":

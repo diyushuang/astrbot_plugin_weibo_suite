@@ -408,7 +408,7 @@
         "collapsed": true
       },
       "top_n": {
-        "description": "【选填】未命中时提示的候选数",
+        "description": "【选填】未命中时写入日志的候选数",
         "type": "int",
         "default": 3,
         "hint": "0=不提示最接近的图，范围 0~50。",
@@ -1110,7 +1110,7 @@
         "description": "【选填】向量检索返回候选数",
         "type": "int",
         "default": 5,
-        "hint": "每次从 Qdrant 取回的最相似点数：达到相似度阈值的命中会全部回传（按相似度降序），因此该值同时也是单次回传图片数量的上限；未命中时其中前 top_n 条作为候选列出。范围 1~50。",
+        "hint": "每次从 Qdrant 取回的最相似点数：达到相似度阈值的命中会全部回传（按相似度降序），因此该值同时也是单次回传图片数量的上限；未命中时其中前 top_n 条写入日志。范围 1~50。",
         "collapsed": true
       },
       "request_timeout": {
@@ -1215,7 +1215,7 @@
     "invisible": true
   },
   "top_n": {
-    "description": "（旧布局迁移用，请勿修改）【选填】未命中时提示的最接近候选数",
+    "description": "（旧布局迁移用，请勿修改）【选填】未命中时写入日志的最接近候选数",
     "type": "int",
     "default": 3,
     "condition": {

@@ -124,15 +124,6 @@ class TraceMixin:
         """
         return self.library.count() + self.remote_hash.count
 
-    @staticmethod
-    def _miss_message(fail_line: str, candidates: list, empty_note: str = "") -> str:
-        """未命中回复的统一拼装：阈值提示 + 可选的“最接近候选”或空库说明。"""
-        if candidates:
-            return "\n".join([fail_line, "最接近的候选：", *candidates])
-        if empty_note:
-            return f"{fail_line}\n{empty_note}"
-        return fail_line
-
     def _merged_hash_candidates(self, phash: str, want: int) -> tuple:
         """把本地图库与图床镜像两条腿的候选**按相似度合并**后返回。
 
@@ -180,14 +171,21 @@ class TraceMixin:
         return (getattr(match, "file_name", "") or "").strip()
 
     async def _trace_hash(
-        self, event: AstrMessageEvent, seg, resolved: ResolvedImage | None = None
+        self,
+        event: AstrMessageEvent,
+        seg,
+        resolved: ResolvedImage | None = None,
+        *,
+        miss_text: str = "❌ 哈希比对失败",
     ) -> AsyncGenerator:
         """哈希检索；resolved 供 auto 引擎复用已解析的本地文件（含清理责任）。
 
         resolved 为 ResolvedImage（可能已带 features/MIME）；传了它表示调用方
         已解析过这张图，本方法不负责删除临时文件（由调用方统一清理）。
+
+        聊天里只留一行结论：命中时「哈希比对成功，相似度 xx%」，未命中时
+        miss_text；候选与阈值明细只写日志，避免每次未命中都刷一大段候选。
         """
-        threshold = self.hash_threshold
         top_n = self.top_n
         owns_temp = resolved is None
         if resolved is None:
@@ -217,12 +215,12 @@ class TraceMixin:
                     yield result
                 return
 
-            yield event.plain_result(
-                self._miss_message(
-                    f"❌ 图库中未找到相似度达标的原图（阈值 {threshold * 100:.0f}%）。",
-                    candidate_lines,
-                )
+            logger.info(
+                "哈希比对未命中（阈值 %.0f%%）；候选：%s",
+                self.hash_threshold * 100,
+                "；".join(candidate_lines) if candidate_lines else "无",
             )
+            yield event.plain_result(miss_text)
         except Exception as e:
             logger.error(f"图片溯源处理失败: {e}", exc_info=True)
             yield event.plain_result("⚠️ 处理图片时出错，详情请查看机器人日志。")
@@ -233,20 +231,22 @@ class TraceMixin:
     async def _hash_hit_result(self, event: AstrMessageEvent, best) -> AsyncGenerator:
         """把一条哈希命中渲染成回复（本地腿与图床腿共用）。
 
-        两腿的差异只有两处：展示名（本地用备注、图床用文件名）与路径来源
-        （本地文件 vs 远端直链）。其余展示与回传逻辑完全一致，故合并到一处，
-        免得日后改一处漏一处。
+        聊天里只留「哈希比对成功 + 相似度」一行；编号、备注、尺寸、入库时间
+        与直链全部写日志，避免刷屏。
         """
-        title = f"✅ 溯源命中（相似度 {best.similarity * 100:.1f}%）#{best.id}"
-        label = self._candidate_note(best)
-        if label:
-            title += f" · {label}"
-        lines = []
-        if best.width and best.height:
-            lines.append(f"尺寸：{best.width}x{best.height}")
-        if best.created_at:
-            lines.append(f"入库时间：{best.created_at}")
-        block = {"text": " · ".join(lines)}
+        title = f"✅ 哈希比对成功，相似度 {best.similarity * 100:.1f}%"
+        logger.info(
+            "哈希比对命中 #%s 相似度 %.1f%% 名称=%s 尺寸=%sx%s 入库=%s 直链=%s 本地=%s",
+            best.id,
+            best.similarity * 100,
+            self._candidate_note(best) or "-",
+            best.width or "-",
+            best.height or "-",
+            best.created_at or "-",
+            best.image_url or "-",
+            best.file_path or "-",
+        )
+        block: dict = {}
         if best.width and best.height:
             # 供回传计划判断是否需要图床缩放，以及压缩标识是否成立
             block["width"] = best.width
@@ -267,7 +267,7 @@ class TraceMixin:
                 f"哈希命中 #{best.id} 的原图不可用: "
                 f"{best.file_path or best.image_url or '未知路径'}"
             )
-            yield event.plain_result(f"{title}，但原图文件已不存在或无法访问（详情见机器人日志）。")
+            yield event.plain_result(f"{title}（原图不可用）")
 
     # ------------------------------------------------------------------
     # 向量引擎
@@ -307,14 +307,12 @@ class TraceMixin:
                 f" 相似度 {h['score'] * 100:.1f}%"
                 for h in hits[:top_n]
             ]
-            return "miss", event.plain_result(
-                self._miss_message(
-                    f"❌ 向量库中未找到相似度达标的原图"
-                    f"（阈值 {self.vector.threshold * 100:.0f}%）。",
-                    candidate_lines,
-                    empty_note="（向量库中暂无图床图片，等待图床上传侧钩子入库）",
-                )
+            logger.info(
+                "向量比对未命中（阈值 %.0f%%）；候选：%s",
+                self.vector.threshold * 100,
+                "；".join(candidate_lines) if candidate_lines else "无",
             )
+            return "miss", event.plain_result("❌ 向量比对失败")
         except VectorEngineError as e:
             logger.warning(f"向量检索出错: {getattr(e, 'detail', e)}")
             return "error", str(e)
@@ -329,7 +327,8 @@ class TraceMixin:
         """严格向量引擎：只用向量库，出错直接提示。"""
         kind, item = await self._vector_search_one(event, seg)
         if kind == "error":
-            yield event.plain_result(f"⚠️ 向量检索引擎错误：{item}")
+            logger.warning(f"向量比对不可用: {item}")
+            yield event.plain_result("⚠️ 向量比对失败")
         elif kind == "hit":
             async for result in item:
                 yield result
@@ -338,6 +337,9 @@ class TraceMixin:
 
     async def _trace_auto(self, event: AstrMessageEvent, seg) -> AsyncGenerator:
         """auto 引擎：向量优先，未命中或引擎不可用时回退哈希。
+
+        聊天里只输出一行结论：命中时「xx 比对成功，相似度 xx%」，两腿都失败
+        时「比对失败」；候选、阈值与回退原因明细只进日志。
 
         图片只解析一次：解析时用 compute_features_with_mime 同时完成格式校验与
         感知特征，向量腿拿 MIME、哈希腿拿 features，两边都不再为同一张图重复
@@ -359,23 +361,18 @@ class TraceMixin:
             if kind == "nofile":
                 yield item
                 return
-            hash_empty = self._hash_pool_size() == 0
+            # 向量未命中/不可用：明细只进日志，不再往聊天里发中间提示
             if kind == "miss":
-                yield item
-                if hash_empty:
-                    yield event.plain_result("（哈希图库为空，无兜底可执行）")
-                    return
-                yield event.plain_result("尝试哈希比对：")
-            else:  # error
-                logger.info(f"auto 引擎回退哈希：{item}")
-                if hash_empty:
-                    yield event.plain_result(
-                        "⚠️ 向量引擎不可用，且哈希图库为空，无兜底可执行。"
-                        "可发送 /登记原图 或执行 /溯源重扫 建库。"
-                    )
-                    return
-                yield event.plain_result("⚠️ 向量引擎不可用，改用哈希比对：")
-            async for it in self._trace_hash(event, seg, resolved=resolved):
+                logger.info("向量比对未命中，回退哈希")
+            else:
+                logger.info(f"向量引擎不可用，回退哈希：{item}")
+            hash_empty = self._hash_pool_size() == 0
+            if hash_empty:
+                yield event.plain_result("❌ 比对失败（哈希图库为空）")
+                return
+            async for it in self._trace_hash(
+                event, seg, resolved=resolved, miss_text="❌ 比对失败"
+            ):
                 yield it
         finally:
             if resolved.is_tmp:
@@ -414,28 +411,31 @@ class TraceMixin:
             )
 
         if multi:
-            header = f"✅ 向量检索命中 {len(hits)} 张（按相似度降序），图片发送可能有延迟"
+            header = f"✅ 向量比对成功，最高相似度 {hits[0]['score'] * 100:.1f}%（{len(hits)} 张）"
         else:
-            header = f"✅ 向量检索命中（相似度 {hits[0]['score'] * 100:.1f}%），图片发送可能有延迟"
+            header = f"✅ 向量比对成功，相似度 {hits[0]['score'] * 100:.1f}%"
 
         blocks = []
         for idx, hit in enumerate(hits, 1):
             payload = hit.get("payload") or {}
             file_name = payload.get("file_name") or str(hit.get("id")).rsplit("/", 1)[-1]
-            fields = []
-            if multi:
-                fields.append(f"相似度 {hit['score'] * 100:.1f}%")
             width, height = payload.get("width"), payload.get("height")
-            if width and height:
-                fields.append(f"{width}x{height}")
-            if payload.get("created_at"):
-                fields.append(str(payload["created_at"]))
-            prefix = f"{idx}." if multi else ""
-            block = {
-                "prefix": prefix,
-                "file_name": str(file_name or ""),
-                "fields": fields,
-            }
+            image_url = str(payload.get("image_url") or "")
+            logger.info(
+                "向量比对命中 %s 相似度 %.1f%% 名称=%s 尺寸=%sx%s 入库=%s 直链=%s",
+                hit.get("id"),
+                hit["score"] * 100,
+                file_name or "-",
+                width or "-",
+                height or "-",
+                payload.get("created_at") or "-",
+                image_url or "-",
+            )
+            block = {}
+            if multi:
+                block["prefix"] = f"{idx}."
+            if file_name:
+                block["file_name"] = str(file_name)
             if width and height:
                 # 供回传计划判断是否需要图床缩放，以及压缩标识是否成立
                 block["width"] = width
@@ -445,23 +445,31 @@ class TraceMixin:
                 # 图床侧钩子（img-indexer）入库时已记录原图体积，直接用：
                 # 回传计划因此不必再探测原图尺寸，省一次往返与一次图床处理
                 block["size_bytes"] = size_bytes
-            image_url = str(payload.get("image_url") or "")
             if image_url:
                 block["url"] = image_url
             else:
-                block["fields"].append("该条目没有可用直链，可能已被删除")
+                logger.warning("向量命中 %s 没有可用直链，跳过回传", hit.get("id"))
+                continue
             blocks.append(block)
         prompt_via_onebot = False
         prompt_task = None
+        delivery_header = ""
         if self._can_send_via_onebot(event):
             # 提示与图片并行发出：提示只走一次 call_action，串行 await 会让图片
             # 晚一个完整往返才起步。两条消息都在同一条 OneBot 连接上按顺序下发，
             # 提示先入队，正常情况下仍先到达。
             prompt_task = asyncio.create_task(self._send_prompt(event, header))
+        elif self._delivery_target(event).offbox_upload:
+            # QQ 官方机器人被动回复有次数上限（每个 msg_id 最多 5 条）：把标题
+            # 并进首张图的消息正文，少占一条回复；接管通道会按「首图 content」
+            # 原样发送，回退链也会把标题拼在同一条消息里。
+            delivery_header = header
         else:
             yield event.plain_result(header)
         try:
-            async for result in self._yield_delivery(event, "", blocks, mark_compressed=True):
+            async for result in self._yield_delivery(
+                event, delivery_header, blocks, mark_compressed=True
+            ):
                 yield result
             if prompt_task is not None:
                 # 只为 stop_event 决策等待提示结果；图片可能已经交付，不再回滚。

@@ -86,7 +86,7 @@ astrbot_plugin_weibo_suite/  # = 仓库根
 │                             #   118 键手工表），推送与 F3 清洗共用，推送表情翻译覆盖率顺带提升
 ├─ views/
 │  └─ dashboard/              # 统一 WebUI（index.html/app.js/style.css + 子页模块）
-├─ scripts/                   # build_release.py / build_weibo_map.py（保留）/ verify_phash.py
+├─ scripts/                   # build_release.py / gen_settings_map.py / verify_cleaner_golden.py / perf_dashboard/
 ├─ tests/                     # 合并两侧测试 + 新增
 └─ data/                      # emoji-props.json 等**随插件分发**的数据文件（从 Node 项目迁入）
 ```
@@ -214,7 +214,7 @@ astrbot_plugin_weibo_suite/  # = 仓库根
 **入库**：
 - **archive.db 即文案库（修正 2）**：清洗结果写 archive.db（posts.cleaned_text + 清洗时间），`/签到` weibo 模式改为**直接查库取文案**（按 uid 分组、排除已删除）；CSV/MD 文件降级为「导入 / 导出 / 外部交换格式」——`weibo_posts.py` 解析器保留作导入路径（存量 CSV 经它进库）；**`weibo_post_map.json` 映射表取消**（文案↔图对应就是 posts↔media 连接查询），`build_weibo_map.py` 退役（职责由 CSV→archive.db 导入替代），「映射表比源旧」健康检查随之取消；
 - **全量重建**：回填 / 对账发现缺口后，从 archive.db 原始正文整体重跑清洗（按 mid 幂等）；
-- **文案→图片映射自动化**：F2 上传成功后，把「文案 ↔ 图床图片」写进 `weibo_post_map.json`（替代手工跑 `build_weibo_map.py`；该脚本保留，作为存量数据的一次性回填工具）；
+- **文案→图片映射自动化**：F2 上传成功后，把「文案 ↔ 图床图片」写进 archive.db（posts↔media 连接查询），不再维护 `weibo_post_map.json`，也不再依赖已退役的 `build_weibo_map.py`；
 - 质量门禁：把 Node 项目 44 项审计中**文本清洗层（B 层）与 Emoji 层（C 层）**移植为 pytest 断言，作为 cleaner 的回归测试。
 
 **验收**：以两账号现网成品 CSV 为**黄金基准**——同一批原始数据经插件 cleaner 处理后，与 `output/微博原创文案_<uid>.csv` 逐条 diff 为零差异（这是最强的回归验证，基准数据现成）。
@@ -313,7 +313,7 @@ astrbot_plugin_weibo_suite/  # = 仓库根
 1. **`trace.*` 配置前缀——取消**。已核实两 schema 键集零碰撞（转发 45 键 vs 识图 23 键完全不相交），前缀只是给迁移器增加 60 个键的改名映射，零收益。
 2. **CSV/MD 文案库文件 + weibo_post_map.json 双份存储——取消**。archive.db 既已是中心账本，再维护一套文件库 + JSON 映射就是同一份数据的第三、第四份副本，还会引出「映射表比源旧」这类自找的健康检查。文案库=DB；文件只作导入/导出格式。
 3. **media 表「已传群相册」参与去重——修正为仅观测**。KV 台账的 30 天 TTL 是上线验证过的业务规则（用户删图后可重传），DB 永久去重会悄悄改变这个语义。深审确认 KV key 实为 pid 级标记，与 DB 的 mid+pid 语义也不同，混用会出对不上的账。
-4. **`build_weibo_map.py` 保留——退役**。职责由 CSV→archive.db 导入替代。
+4. **`build_weibo_map.py`——退役**。职责由 CSV→archive.db 导入替代，脚本已从仓库移除。
 
 ---
 

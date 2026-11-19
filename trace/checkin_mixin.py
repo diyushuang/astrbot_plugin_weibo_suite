@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import io
 import os
 import random
 import secrets
 from urllib.parse import (
     unquote,
-    urlparse,
 )
 
 from astrbot.api import (
@@ -25,16 +23,12 @@ try:
         read_bytes,
         sanitize_error_text,
     )
-    from ..shared.http import (
-        read_limited_bytes,
-    )
     from .checkin_card import (
         DEFAULT_QUOTES,
         compose_poster,
     )
     from .image_delivery import (
         build_original_url,
-        qq_upload_safe_image,
         upgrade_to_https,
     )
     from .random_media import (
@@ -57,7 +51,6 @@ except ImportError:  # 兼容插件以独立模块方式加载
     )
     from image_delivery import (  # type: ignore[no-redef]
         build_original_url,
-        qq_upload_safe_image,
         upgrade_to_https,
     )
     from random_media import (  # type: ignore[no-redef]
@@ -76,18 +69,6 @@ except ImportError:  # 兼容插件以独立模块方式加载
     from astrbot_plugin_weibo_suite.shared.common import (  # type: ignore[no-redef]
         read_bytes,
         sanitize_error_text,
-    )
-    from astrbot_plugin_weibo_suite.shared.http import (  # type: ignore[no-redef]
-        read_limited_bytes,
-    )
-
-try:
-    from .constants import (
-        QQ_TRANSCODE_MAX_PIXELS,
-    )
-except ImportError:  # 兼容插件以独立模块方式加载
-    from constants import (  # type: ignore[no-redef]
-        QQ_TRANSCODE_MAX_PIXELS,
     )
 
 
@@ -553,162 +534,3 @@ class CheckinMixin:
             thumbnail_prechecked=bool(random_settings.get("send_thumbnail", True)),
         ):
             yield result
-
-    @staticmethod
-    def _bed_file_id(url: str) -> str:
-        """从图床直链里取出文件 id（即 S3 对象键）。
-
-        图床直链形如 `{base}/file/{id}`，id 可能含中文与 `@`/`#`（故 URL 里是
-        百分号编码的），必须 unquote 还原成原始键才能算出同一个点 id。取不到
-        返回空串，由调用方按「无替身」处理。
-        """
-        path = urlparse(str(url or "")).path
-        marker = "/file/"
-        index = path.find(marker)
-        if index < 0:
-            return ""
-        return unquote(path[index + len(marker) :]).strip()
-
-    async def _offbox_pipeline(
-        self,
-        event: AstrMessageEvent,
-        header: str,
-        blocks: list[dict],
-        *,
-        mark_compressed: bool = False,
-    ) -> tuple[list[dict], bool]:
-        """第三方转存平台的两个前置动作合一：格式体检 → 上传通道接管。
-
-        顺序不可交换：体检可能把「假 jpg」换成本地转码 JPEG（path）或缩略图
-        替身 URL，上传通道必须拿着**改写后**的 block 才能决定发 URL 还是发
-        分片（path 只能分片）。合并前这是 _yield_delivery 里两段独立 hook，
-        很容易出现「改写了 blocks 却忘了把它交给下一步」这类顺序错误。
-
-        返回 (最终 blocks, 是否已投递完毕)：handled 为真时调用方只需标记已
-        发送并 stop_event，不要再走任何原生回传分支（否则会重复投递）。
-        """
-        blocks = await self._offbox_rewrite_blocks(blocks)
-        handled = await self._qq_upload_takeover(
-            event, header, blocks, mark_compressed=mark_compressed
-        )
-        return blocks, handled
-
-    async def _offbox_rewrite_blocks(self, blocks: list[dict]) -> list[dict]:
-        """对 blocks 里每个待发 URL 做官方富媒体格式体检，按需改写发送形态。
-
-        体检点放在 _yield_delivery（三条回传路径的汇合处）：标准格式原样
-        保留（只花一次 16 字节嗅探）；假格式可解码 → 换成本地 JPEG path；
-        不可解码 → 换成缩略图替身 URL。全部体检失败按原样保留——体检是
-        增强，不能反过来挡住发送。
-        """
-        settings = self._random_settings()
-        rewritten: list[dict] = []
-        for block in blocks:
-            url = str(block.get("url") or "")
-            if not url or block.get("path"):
-                rewritten.append(block)
-                continue
-            try:
-                outcome = await self._offbox_image_delivery(url, settings)
-            except Exception as exc:
-                logger.warning(f"qq_official 图片格式体检异常，按原样交付: {exc}")
-                outcome = None
-            if outcome is None:
-                rewritten.append(block)
-                continue
-            kind, value = outcome
-            new_block = dict(block)
-            if kind == "path":
-                new_block.pop("url", None)
-                new_block["path"] = value
-                # 转码产物属于本次投递：由 _yield_delivery 在发送完成后清理
-                new_block["_tmp_owned"] = True
-            else:
-                new_block["url"] = value
-            rewritten.append(new_block)
-        return rewritten
-
-    async def _offbox_image_delivery(self, url: str, settings: dict) -> tuple[str, str] | None:
-        """qq_official 图片交付体检：返回 (方式, 值)；None 表示按原 URL 交付。
-
-        官方富媒体上传只收标准 JPEG/PNG/GIF；图床里存在扩展名 .jpg、实为
-        HEIF/AVIF/WEBP（微博 live 图等）的文件，原样交付必被打回「富媒体文件
-        格式不支持」。处置分两级：
-        - "path"：PIL 可解码的假格式 → 转码为 JPEG 落盘，本地字节交付；
-        - "url"：PIL 解不了的（如未装 pillow-heif 的 HEIC）→ 换发同一点的
-          缩略图替身直链（img-indexer 预生成的真 JPEG）。
-        文件头能放行、或两级兜底都失败时返回 None（按原样交付——体检是增强，
-        不能反过来挡住发送）。
-        """
-        try:
-            client = await self._get_http()
-            limit = self._download_limit_bytes()
-            async with await client.request("GET", url, timeout=self._download_timeout()) as resp:
-                if not 200 <= resp.status < 300:
-                    return None
-                head = await resp.content.read(16)
-                if qq_upload_safe_image(head):
-                    return None
-                # 嗅探已消费前 16 字节：转码必须用完整字节，把 head 拼回去，
-                # 否则 PIL 拿到的是缺了文件头的残缺流，解码必败。
-                # 上限按完整响应体算：read_limited_bytes 会拿 Content-Length 与
-                # limit 比较，若传 limit-len(head) 会把恰好等于上限的文件误拒。
-                rest = await read_limited_bytes(resp, limit)
-                data = head + rest
-                if len(data) > limit:
-                    logger.warning(f"qq_official 图片超过体检上限，按原样交付: {len(data)} 字节")
-                    return None
-        except Exception as exc:
-            logger.warning(f"qq_official 图片格式体检失败，按原样交付: {exc}")
-            return None
-        path = await asyncio.to_thread(self._write_transcoded_jpeg, data)
-        if path:
-            return ("path", path)
-        file_id = self._bed_file_id(url)
-        if file_id and self.vector.qdrant_ready:
-            try:
-                thumb = await self.vector.thumb_url_for(file_id)
-            except Exception:
-                thumb = None
-            if thumb:
-                lan_hosts = self._lan_url_hosts(settings)
-                if lan_hosts:
-                    # 图片由适配器本机下载，替身直链同样收进内网源
-                    thumb = swap_url_origin(
-                        thumb, str(settings.get("lan_base_url") or ""), lan_hosts
-                    )
-                logger.info(f"qq_official 假格式且不可转码，改发缩略图替身: {file_id}")
-                return ("url", thumb)
-        return None
-
-    def _write_transcoded_jpeg(self, data: bytes) -> str | None:
-        """把任意可解码图片字节转存为 JPEG 临时文件，返回路径；失败返回 None。"""
-        try:
-            import pillow_heif
-
-            pillow_heif.register_heif_opener()  # 幂等：让 Image.open 直解 HEIC
-        except ImportError:
-            pass
-        try:
-            from PIL import Image, ImageOps
-        except ImportError:
-            logger.warning("PIL 不可用，无法转码非标准格式图片，按原样交付")
-            return None
-        path = ""
-        try:
-            with Image.open(io.BytesIO(data)) as image:
-                if image.width * image.height > QQ_TRANSCODE_MAX_PIXELS:
-                    logger.warning(f"qq_official 待转码图片像素过大，跳过转码: {image.size}")
-                    return None
-                fixed = ImageOps.exif_transpose(image)
-                if fixed.mode not in ("RGB", "L"):
-                    fixed = fixed.convert("RGB")
-                path = os.path.join(self.tmp_dir, f"qqsafe_{secrets.token_hex(8)}.jpg")
-                fixed.save(path, format="JPEG", quality=92)
-            logger.info(f"qq_official 图片格式体检：已转码为 JPEG 交付 {path}")
-            return path
-        except Exception as exc:
-            if path:
-                self._remove_quiet(path)  # 半截临时文件不能留给 24h TTL 兜底
-            logger.warning(f"图片转码失败，按原样交付: {exc}")
-            return None

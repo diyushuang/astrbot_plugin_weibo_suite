@@ -41,6 +41,15 @@ try:
         image_bytes_ok,
         image_file_ok,
     )
+    from .format_triage import (
+        inspect_image_delivery,
+        offbox_pipeline,
+        rewrite_blocks,
+        write_transcoded_jpeg,
+    )
+    from .image_bed import (
+        bed_file_id,
+    )
     from .image_delivery import (
         CompressionEvidence,
         DeliveryTarget,
@@ -60,6 +69,9 @@ try:
         send_diagnosis,
         sniff_image_format,
     )
+    from .qq_upload_mixin import (
+        cap_qq_media_blocks,
+    )
     from .random_media import (
         RANDOM_ENDPOINT_DEFAULT,
         RandomMediaClient,
@@ -74,6 +86,15 @@ except ImportError:  # 兼容插件以独立模块方式加载
     from features import (  # type: ignore[no-redef]
         image_bytes_ok,
         image_file_ok,
+    )
+    from format_triage import (  # type: ignore[no-redef]
+        inspect_image_delivery,
+        offbox_pipeline,
+        rewrite_blocks,
+        write_transcoded_jpeg,
+    )
+    from image_bed import (  # type: ignore[no-redef]
+        bed_file_id,
     )
     from image_delivery import (  # type: ignore[no-redef]
         CompressionEvidence,
@@ -93,6 +114,9 @@ except ImportError:  # 兼容插件以独立模块方式加载
         prepare_image_bytes,
         send_diagnosis,
         sniff_image_format,
+    )
+    from qq_upload_mixin import (  # type: ignore[no-redef]
+        cap_qq_media_blocks,
     )
     from random_media import (  # type: ignore[no-redef]
         RANDOM_ENDPOINT_DEFAULT,
@@ -196,6 +220,33 @@ class DeliveryMixin:
         if base_host:
             hosts.append(base_host)
         return tuple(host for host in hosts if host)
+
+    # ------------------------------------------------------------------
+    # 格式体检与图床对象键：薄委托，业务实现见 format_triage / image_bed
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _bed_file_id(url: str) -> str:
+        return bed_file_id(url)
+
+    async def _offbox_pipeline(
+        self,
+        event: AstrMessageEvent,
+        header: str,
+        blocks: list[dict],
+        *,
+        mark_compressed: bool = False,
+    ) -> tuple[list[dict], bool]:
+        return await offbox_pipeline(self, event, header, blocks, mark_compressed=mark_compressed)
+
+    async def _offbox_rewrite_blocks(self, blocks: list[dict]) -> list[dict]:
+        return await rewrite_blocks(self, blocks)
+
+    async def _offbox_image_delivery(self, url: str, settings: dict) -> tuple[str, str] | None:
+        return await inspect_image_delivery(self, url, settings)
+
+    def _write_transcoded_jpeg(self, data: bytes) -> str | None:
+        return write_transcoded_jpeg(self, data)
 
     @staticmethod
     def _delivery_target(event: AstrMessageEvent) -> DeliveryTarget:
@@ -837,6 +888,11 @@ class DeliveryMixin:
         owned_paths: list[str] = []
         try:
             if target.offbox_upload:
+                # QQ 官方被动回复每个 msg_id 最多 5 条：多图命中超过上限时第 6 张
+                # 起必然失败，先截断并把说明并进标题（写进 block 会被配文覆盖）。
+                blocks, cap_note = cap_qq_media_blocks(blocks)
+                if cap_note:
+                    header = f"{header}\n{cap_note}" if header else cap_note
                 # 第三方转存平台的两个前置动作（格式体检 → 上传通道接管）收在一个
                 # 入口里：前者可能把假格式换成 path/缩略图 URL，后者必须拿着改写后
                 # 的 block 才能判断该走 URL 还是分片，顺序不可交换

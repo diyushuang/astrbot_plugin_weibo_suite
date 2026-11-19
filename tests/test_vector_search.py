@@ -412,7 +412,9 @@ def use_embed_responses(engine, responses, monkeypatch):
         delays.append(delay)
 
     engine._http_getter = get_client
-    monkeypatch.setattr("astrbot_plugin_weibo_suite.trace.vector_search.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr(
+        "astrbot_plugin_weibo_suite.trace.embedding_client.asyncio.sleep", fake_sleep
+    )
     return client, delays
 
 

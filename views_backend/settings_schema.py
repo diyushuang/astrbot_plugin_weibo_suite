@@ -255,7 +255,7 @@ FIELD_META: dict[str, dict[str, Any]] = {
         "单次溯源最多图片", unit="张", min=1, max=10, step=1, advanced=True
     ),
     "basic.hash_size": _f("感知哈希精度", unit="格", advanced=True),
-    "basic.top_n": _f("未命中候选数", unit="张", min=0, max=50, step=1, advanced=True),
+    "basic.top_n": _f("未命中日志候选数", unit="张", min=0, max=50, step=1, advanced=True),
     # ---------------- image_bed ----------------
     "image_bed.mode": _f("图床模式", danger=True),
     "image_bed.api_url": _f("上传接口地址", placeholder="https://bed.example.com/api/v1/upload"),

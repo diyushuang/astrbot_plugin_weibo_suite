@@ -19,224 +19,63 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import contextlib
-import hashlib
-import io
 import os
-import random
-import secrets
-import time
-from collections.abc import AsyncGenerator
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from types import SimpleNamespace
-from urllib.parse import unquote, urlparse, urlsplit
 
-import aiohttp
-import astrbot.api.message_components as Comp
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import AstrMessageEvent
 from astrbot.api.star import Context, Star, StarTools
 
 from ..shared.errorlog import install_error_log, remove_error_log
 
 try:
-    from ..shared.common import (
-        AI_VERIFY_MAX_CANDIDATES,
-        COMPRESS_CONCURRENCY,
-        DOWNLOAD_CHUNK_SIZE,
-        DOWNLOAD_TIMEOUT,
-        MEMORY_DOWNLOAD_MAX_BYTES,
-        ONEBOT_IMAGE_TIMEOUT,
-        PLAN_TOTAL_TIMEOUT,
-        PROBE_CONCURRENCY,
-        PROBE_TIMEOUT,
-        QQ_URL_COOLDOWN_SECONDS,
-        RESCAN_BATCH_SIZE,
-        RESCAN_PROGRESS_EVERY,
-        SCALED_VERIFY_COOLDOWN_SECONDS,
-        SCAN_CONCURRENCY,
-        TMP_MAX_AGE_SECONDS,
-        as_float,
-        as_int,
-        bool_or,
-        is_blank,
-        is_qq_image_bed_host,
-        read_bytes,
-        sanitize_error_text,
-        truthy,
-    )
-    from ..shared.http import GuardedHttpClient, read_limited_bytes
-    from .checkin_card import DEFAULT_QUOTES, QuoteLibrary, compose_poster
+    from ..shared.common import as_int
+    from ..shared.http import GuardedHttpClient
+    from .checkin_card import DEFAULT_QUOTES, QuoteLibrary
     from .checkin_store import CheckinStore
     from .features import (
         ImageFeatures,
         avif_available,
-        compute_features,
-        compute_features_with_mime,
         heif_available,
-        image_bytes_ok,
-        image_file_ok,
-        image_mime,
-        is_degenerate_phash,
         phash_hex_len,
     )
     from .hash_index import REMOTE_HASH_PAYLOAD_KEYS, HashIndex
-    from .image_bed import MODE_CFB, ImageBedClient, redact_url
-    from .image_delivery import (
-        CompressionEvidence,
-        DeliveryTarget,
-        SendOutcome,
-        bounded_int,
-        build_imgbed_file_url,
-        build_original_url,
-        build_scaled_url,
-        choose_qq_upload_channel,
-        classify_probe_status,
-        classify_send_error,
-        compression_evidence,
-        content_length_from_headers,
-        deduplicate_vector_hits,
-        delivery_settings,
-        delivery_target,
-        is_napcat_parseable_url,
-        is_public_http_url,
-        is_scaling_capability_rejection,
-        is_scaling_needed,
-        prefer_inline_bytes,
-        prefer_url_direct,
-        prepare_image_bytes,
-        qq_upload_safe_image,
-        qq_upload_settings,
-        send_diagnosis,
-        sniff_image_format,
-        upgrade_to_https,
-    )
+    from .image_bed import MODE_CFB, ImageBedClient
+    from .image_delivery import DeliveryTarget, SendOutcome
     from .library import DEGENERATE_SKIP, ImageLibrary
     from .media_history import MediaHistory
-    from .random_media import (
-        RANDOM_ENDPOINT_DEFAULT,
-        RandomMediaClient,
-        RandomMediaError,
-        clean_display_name,
-        extract_directory,
-        is_thumbnail_url,
-        media_filename,
-        media_kind,
-        pick_default_directory,
-        strip_leading_decoration,
-        swap_url_origin,
-    )
+    from .random_media import RandomMediaClient, RandomMediaError
     from .vector_search import VectorEngine, VectorEngineError
-    from .weibo_posts import (
-        WeiboPost,
-        load_post_map,
-        load_posts_from_dir,
-        map_is_stale,
-        parse_weibo_text,
-        posts_from_archive_rows,
-    )
+    from .weibo_posts import WeiboPost
+
 except ImportError:  # 兼容插件以独立模块方式加载
-    from checkin_card import DEFAULT_QUOTES, QuoteLibrary, compose_poster  # type: ignore[no-redef]
+    from checkin_card import DEFAULT_QUOTES, QuoteLibrary  # type: ignore[no-redef]
     from checkin_store import CheckinStore  # type: ignore[no-redef]
     from features import (  # type: ignore[no-redef]
         ImageFeatures,
         avif_available,
-        compute_features,
-        compute_features_with_mime,
         heif_available,
-        image_bytes_ok,
-        image_file_ok,
-        image_mime,
-        is_degenerate_phash,
         phash_hex_len,
     )
     from hash_index import REMOTE_HASH_PAYLOAD_KEYS, HashIndex  # type: ignore[no-redef]
-    from image_bed import MODE_CFB, ImageBedClient, redact_url  # type: ignore[no-redef]
+    from image_bed import MODE_CFB, ImageBedClient  # type: ignore[no-redef]
     from image_delivery import (  # type: ignore[no-redef]
-        CompressionEvidence,
         DeliveryTarget,
         SendOutcome,
-        bounded_int,
-        build_imgbed_file_url,
-        build_original_url,
-        build_scaled_url,
-        choose_qq_upload_channel,
-        classify_probe_status,
-        classify_send_error,
-        compression_evidence,
-        content_length_from_headers,
-        deduplicate_vector_hits,
-        delivery_settings,
-        delivery_target,
-        is_napcat_parseable_url,
-        is_public_http_url,
-        is_scaling_capability_rejection,
-        is_scaling_needed,
-        prefer_inline_bytes,
-        prefer_url_direct,
-        prepare_image_bytes,
-        qq_upload_safe_image,
-        qq_upload_settings,
-        send_diagnosis,
-        sniff_image_format,
-        upgrade_to_https,
     )
     from library import DEGENERATE_SKIP, ImageLibrary  # type: ignore[no-redef]
     from media_history import MediaHistory  # type: ignore[no-redef]
     from random_media import (  # type: ignore[no-redef]
-        RANDOM_ENDPOINT_DEFAULT,
         RandomMediaClient,
         RandomMediaError,
-        clean_display_name,
-        extract_directory,
-        is_thumbnail_url,
-        media_filename,
-        media_kind,
-        pick_default_directory,
-        strip_leading_decoration,
-        swap_url_origin,
     )
     from vector_search import VectorEngine, VectorEngineError  # type: ignore[no-redef]
-    from weibo_posts import (  # type: ignore[no-redef]
-        WeiboPost,
-        load_post_map,
-        load_posts_from_dir,
-        map_is_stale,
-        parse_weibo_text,
-        posts_from_archive_rows,
-    )
+    from weibo_posts import WeiboPost  # type: ignore[no-redef]
 
     from astrbot_plugin_weibo_suite.shared.common import (  # type: ignore[no-redef]
-        AI_VERIFY_MAX_CANDIDATES,
-        COMPRESS_CONCURRENCY,
-        DOWNLOAD_CHUNK_SIZE,
-        DOWNLOAD_TIMEOUT,
-        MEMORY_DOWNLOAD_MAX_BYTES,
-        ONEBOT_IMAGE_TIMEOUT,
-        PLAN_TOTAL_TIMEOUT,
-        PROBE_CONCURRENCY,
-        PROBE_TIMEOUT,
-        QQ_URL_COOLDOWN_SECONDS,
-        RESCAN_BATCH_SIZE,
-        RESCAN_PROGRESS_EVERY,
-        SCALED_VERIFY_COOLDOWN_SECONDS,
-        SCAN_CONCURRENCY,
-        TMP_MAX_AGE_SECONDS,
-        as_float,
         as_int,
-        bool_or,
-        is_blank,
-        is_qq_image_bed_host,
-        read_bytes,
-        sanitize_error_text,
-        truthy,
     )
-    from astrbot_plugin_weibo_suite.shared.http import (
-        GuardedHttpClient,  # type: ignore[no-redef]
-        read_limited_bytes,  # type: ignore[no-redef]
+    from astrbot_plugin_weibo_suite.shared.http import (  # type: ignore[no-redef]
+        GuardedHttpClient,
     )
 
 try:
@@ -249,17 +88,11 @@ try:
         _QQ_KEY_MAP,
         _SCALAR_PATHS,
         _STREAM_WRITE_BATCH_BYTES,
-        BUCKET_LEGACY_FIELDS,
         BUCKET_MODES,
-        BUCKET_REQUIRED,
         DEGENERATE_MESSAGE,
         IMAGE_EXTS,
-        ONEBOT_SEND_TIMEOUT,
         PLUGIN_NAME,
-        QQ_IMAGE_FILE_TYPE,
-        QQ_TRANSCODE_MAX_PIXELS,
         ResolvedImage,
-        _describe_bad_image,
     )
     from .delivery_mixin import DeliveryMixin
     from .library_mixin import LibraryMixin
@@ -286,17 +119,11 @@ except ImportError:  # 兼容插件以独立模块方式加载
         _QQ_KEY_MAP,
         _SCALAR_PATHS,
         _STREAM_WRITE_BATCH_BYTES,
-        BUCKET_LEGACY_FIELDS,
         BUCKET_MODES,
-        BUCKET_REQUIRED,
         DEGENERATE_MESSAGE,
         IMAGE_EXTS,
-        ONEBOT_SEND_TIMEOUT,
         PLUGIN_NAME,
-        QQ_IMAGE_FILE_TYPE,
-        QQ_TRANSCODE_MAX_PIXELS,
         ResolvedImage,
-        _describe_bad_image,
     )
 
 
@@ -370,8 +197,8 @@ class ImageTracePlugin(
         except Exception as exc:
             logger.error(f"签到数据库初始化失败，/签到 将不可用: {exc}")
         self._quote_library_cache: QuoteLibrary | None = None
-        # 微博签到：文案源目录 + 预生成映射表。映射表由 scripts/build_weibo_map.py
-        # 离线生成，签到只读本地 JSON，不请求微博、不算 pHash。
+        # 微博签到：文案源目录 + 预生成映射表。映射表按 README 的格式离线
+        # 生成，签到只读本地 JSON，不请求微博、不算 pHash。
         self.weibo_dir = os.path.join(self.data_dir, "weibo")
         self.weibo_thumb_dir = os.path.join(self.weibo_dir, "thumbs")
         try:
@@ -549,35 +376,13 @@ class ImageTracePlugin(
 
 
 __all__ = [
-    "AI_VERIFY_MAX_CANDIDATES",
-    "BUCKET_LEGACY_FIELDS",
-    "BUCKET_MODES",
-    "BUCKET_REQUIRED",
-    "COMPRESS_CONCURRENCY",
     "DEFAULT_QUOTES",
     "DEGENERATE_MESSAGE",
     "DEGENERATE_SKIP",
-    "DOWNLOAD_CHUNK_SIZE",
-    "DOWNLOAD_TIMEOUT",
     "IMAGE_EXTS",
-    "MEMORY_DOWNLOAD_MAX_BYTES",
     "MODE_CFB",
-    "ONEBOT_IMAGE_TIMEOUT",
-    "ONEBOT_SEND_TIMEOUT",
-    "PLAN_TOTAL_TIMEOUT",
     "PLUGIN_NAME",
-    "PROBE_CONCURRENCY",
-    "PROBE_TIMEOUT",
-    "QQ_IMAGE_FILE_TYPE",
-    "QQ_TRANSCODE_MAX_PIXELS",
-    "QQ_URL_COOLDOWN_SECONDS",
-    "RANDOM_ENDPOINT_DEFAULT",
     "REMOTE_HASH_PAYLOAD_KEYS",
-    "RESCAN_BATCH_SIZE",
-    "RESCAN_PROGRESS_EVERY",
-    "SCALED_VERIFY_COOLDOWN_SECONDS",
-    "SCAN_CONCURRENCY",
-    "TMP_MAX_AGE_SECONDS",
     "_FORCE_TOKENS",
     "_FORCE_TRIM_CHARS",
     "_LAYOUT_VERSION",
@@ -585,17 +390,10 @@ __all__ = [
     "_QQ_KEY_MAP",
     "_SCALAR_PATHS",
     "_STREAM_WRITE_BATCH_BYTES",
-    "AstrBotConfig",
-    "AstrMessageEvent",
-    "AsyncGenerator",
     "CheckinMixin",
     "CheckinStore",
-    "Comp",
-    "CompressionEvidence",
-    "Context",
     "DeliveryMixin",
     "DeliveryTarget",
-    "GuardedHttpClient",
     "HashIndex",
     "ImageBedClient",
     "ImageFeatures",
@@ -604,7 +402,6 @@ __all__ = [
     "LibraryMixin",
     "MediaHistory",
     "OriginalMixin",
-    "Path",
     "QQUploadMixin",
     "QuoteLibrary",
     "RandomMediaClient",
@@ -612,92 +409,11 @@ __all__ = [
     "ResolveMixin",
     "ResolvedImage",
     "SendOutcome",
-    "SimpleNamespace",
-    "Star",
-    "StarTools",
     "StateMixin",
     "TraceMixin",
     "VectorEngine",
     "VectorEngineError",
     "WeiboPost",
-    "_describe_bad_image",
-    "aiohttp",
-    "annotations",
-    "as_float",
-    "as_int",
-    "asyncio",
     "avif_available",
-    "base64",
-    "bool_or",
-    "bounded_int",
-    "build_imgbed_file_url",
-    "build_original_url",
-    "build_scaled_url",
-    "choose_qq_upload_channel",
-    "classify_probe_status",
-    "classify_send_error",
-    "clean_display_name",
-    "compose_poster",
-    "compression_evidence",
-    "compute_features",
-    "compute_features_with_mime",
-    "content_length_from_headers",
-    "contextlib",
-    "dataclass",
-    "date",
-    "datetime",
-    "deduplicate_vector_hits",
-    "delivery_settings",
-    "delivery_target",
-    "extract_directory",
-    "hashlib",
     "heif_available",
-    "image_bytes_ok",
-    "image_file_ok",
-    "image_mime",
-    "install_error_log",
-    "io",
-    "is_blank",
-    "is_degenerate_phash",
-    "is_napcat_parseable_url",
-    "is_public_http_url",
-    "is_qq_image_bed_host",
-    "is_scaling_capability_rejection",
-    "is_scaling_needed",
-    "is_thumbnail_url",
-    "load_post_map",
-    "load_posts_from_dir",
-    "logger",
-    "map_is_stale",
-    "media_filename",
-    "media_kind",
-    "os",
-    "parse_weibo_text",
-    "phash_hex_len",
-    "pick_default_directory",
-    "posts_from_archive_rows",
-    "prefer_inline_bytes",
-    "prefer_url_direct",
-    "prepare_image_bytes",
-    "qq_upload_safe_image",
-    "qq_upload_settings",
-    "random",
-    "read_bytes",
-    "read_limited_bytes",
-    "redact_url",
-    "remove_error_log",
-    "sanitize_error_text",
-    "secrets",
-    "send_diagnosis",
-    "sniff_image_format",
-    "strip_leading_decoration",
-    "swap_url_origin",
-    "time",
-    "timedelta",
-    "timezone",
-    "truthy",
-    "unquote",
-    "upgrade_to_https",
-    "urlparse",
-    "urlsplit",
 ]

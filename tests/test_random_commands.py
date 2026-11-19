@@ -726,7 +726,7 @@ async def test_trace_hash_path_still_hits(make_plugin, imgbed, make_event, tmp_p
     results = await _collect(plugin.trace(event))
 
     assert results, "溯源应回传命中结果"
-    assert "溯源命中" in _chain_text(results[0])
+    assert "哈希比对成功" in _chain_text(results[0])
 
 
 async def test_trace_accepts_heic_query_image(make_plugin, imgbed, make_event, tmp_path):
@@ -764,7 +764,7 @@ async def test_trace_accepts_heic_query_image(make_plugin, imgbed, make_event, t
     results = await _collect(plugin.trace(event))
 
     assert results, "HEIC 查询图应当正常溯源"
-    assert "溯源命中" in _chain_text(results[0])
+    assert "哈希比对成功" in _chain_text(results[0])
 
 
 async def test_original_image_not_reported_missing_when_bed_denies_access(
@@ -1145,6 +1145,31 @@ async def test_random_video_lan_mode_uses_lan_url_for_aiocqhttp(make_plugin, img
     videos = [seg for seg in results[0].chain if isinstance(seg, Video)]
     assert len(videos) == 1
     assert image_ref(videos[0]).startswith(imgbed.base_url)
+
+
+async def test_random_video_non_mp4_falls_back_to_file_for_qq_official(
+    make_plugin, imgbed, make_event
+):
+    """QQ 官方只支持 MP4：其它容器改发文件卡片，避免一次必然失败的发送。"""
+    from astrbot.api.message_components import File, Video
+
+    plugin = make_plugin(random_media={"base_url": imgbed.base_url})
+
+    class _FakeRandomClient:
+        async def fetch(self, _directory, _content_type):
+            return f"{imgbed.base_url}/file/v.mkv"
+
+    plugin._random_media_client = _FakeRandomClient()
+
+    results = await _collect(
+        plugin.random_video(make_event("/随机视频", origin="q1", platform="qq_official"))
+    )
+
+    chain = results[0].chain or []
+    assert not any(isinstance(seg, Video) for seg in chain)
+    files = [seg for seg in chain if isinstance(seg, File)]
+    assert len(files) == 1, "非 MP4 视频应改发文件卡片"
+    assert "仅支持 MP4" in _chain_text(results[0])
 
 
 async def test_random_image_mention_prefix_only_on_aiocqhttp(make_plugin, imgbed, make_event):

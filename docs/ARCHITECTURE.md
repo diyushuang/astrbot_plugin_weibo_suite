@@ -96,15 +96,21 @@ graph TD
 
 ### 溯源域 `trace/`
 
-`trace/main.py` 只是域入口 mixin（约 640 行，负责装配与指令转发），历史体量早已
+`trace/main.py` 只是域入口 mixin（约 390 行，负责装配与指令转发），历史体量早已
 按能力拆成若干 mixin：`trace_mixin.py`（溯源检索）、`library_mixin.py`（图库重扫与状态）、
-`original_mixin.py`（原图修复/投递）、`delivery_mixin.py`（投递通道选择）、
+`original_mixin.py`（原图修复/投递）、`delivery_mixin.py`（投递通道选择与格式体检委托）、
 `qq_upload_mixin.py`（QQ 上传）、`checkin_mixin.py`（签到）、`random_media.py`（随机图）。
 其余模块都是可独立测试的纯逻辑或窄客户端：
 
-- `features.py`（pHash/dHash/aHash）、`hash_index.py`、`vector_search.py`、`library.py`：
+- `features.py`（pHash/dHash/aHash）、`hash_index.py`、`library.py`：
   检索双引擎与本地图库。
-- `image_bed.py`、`s3_store.py`：图床与对象存储客户端。
+- `vector_search.py`（配置/HTTP/集合校验门面）+ `embedding_client.py`
+  （向量化）+ `qdrant_client.py`（检索、反查、登记）+ `vector_errors.py`：
+  向量引擎按职责拆分，三者共用一个 `VectorEngine` 实例。
+- `image_bed.py`（门面/重试/降级）+ `storage_local.py`（本地与通用 HTTP）
+  + `storage_cfb.py`（CloudFlare-ImgBed）+ `storage_object.py`（R2/OCI）
+  + `storage_utils.py`（纯函数）：图床与对象存储按后端拆分。
+- `format_triage.py`：qq_official 假格式体检与转码改写。
 - `image_delivery.py`、`media_history.py`：投递纯函数与会话级历史。
 - `checkin_card.py`、`checkin_store.py`、`weibo_posts.py`：签到。
 
