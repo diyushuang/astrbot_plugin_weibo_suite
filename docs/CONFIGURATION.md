@@ -4,7 +4,7 @@
 
 配置在 AstrBot 管理面板中打开：**插件 → 本插件 → 配置**，保存后写入 AstrBot 的插件配置文件。也可以直接编辑该 JSON 文件，但不推荐：AstrBot 加载时会按 schema 做一次完整性检查，schema 里没有声明的键会被丢弃，类型不符的值会被纠正，手改很容易被静默覆盖。
 
-配置分为 15 个一级分组，另有若干用于旧版本兼容的顶层键，合计 179 个分组键（以 `_conf_schema.json` 当前内容为准，改 schema 时这份计数要一起改）。这 15 组在管理面板的「设置」页里被归入 5 个主题页（监控与推送 / 归档与管线 / 图床与存储 / 溯源与签到 / 多平台订阅），逐键映射见 [设置页键映射](./SETTINGS_MAP.md)：
+配置分为 16 个一级分组，另有若干用于旧版本兼容的顶层键，合计 187 个分组键（以 `_conf_schema.json` 当前内容为准，改 schema 时这份计数要一起改）。这 16 组在管理面板的「设置」页里被归入 5 个主题页（监控与推送 / 归档与管线 / 图床与存储 / 溯源与签到 / 多平台订阅），逐键映射见 [设置页键映射](./SETTINGS_MAP.md)：
 
 | 分组 | 键数 | 作用 |
 | --- | --- | --- |
@@ -13,6 +13,7 @@
 | `album` | 11 | NapCat 群相册上传 |
 | `archive` | 5 | 增量归档与全量回填 |
 | `pipeline` | 9 | 图床与向量管线（默认关闭） |
+| `collector` | 6 | 重点博主带图原创微博采集（默认关闭） |
 | `copylib` | 1 | 签到文案库自动清洗 |
 | `basic` | 8 | 溯源引擎、本地图库、哈希参数 |
 | `delivery` | 14 | NapCat 与 QQ 官方机器人的图片/视频通道 |
@@ -21,7 +22,7 @@
 | `random_media` | 10 | 随机图/随机视频接口 |
 | `checkin` | 12 | 每日签到 |
 | `vector_search` | 13 | Qdrant 向量检索与多模态 embedding |
-| `limits` | 4 | 下载体积上限与图床哈希缓存 |
+| `limits` | 6 | 下载体积上限、图床哈希缓存与首次启动反向收录 |
 | `sns` | 28 | 多平台订阅（抖音 / 小红书 / Instagram） |
 
 ## 敏感字段与脱敏
@@ -184,6 +185,32 @@ NapCat 群相册上传。
 - `categories` 决定 `{category}` 的取值：键既可以是 uid 也可以是昵称，命中不到时会用默认分类，所以新增博主后要记得补映射。
 - `auto_queue` 关掉后归档不会自动入队，需要手动执行 `微博 管线补跑`；历史上传场景建议关了它再批量补，避免和在线监控抢带宽。
 - 两个模板里的占位符要写全，尤其 `{index}`：去掉它会让同一条帖子的多张图生成同名文件，后上传的覆盖先上传的。
+
+## collector
+
+重点博主带图原创微博自动采集，默认关闭。它不复制图床/缩略图/向量逻辑：
+命中后先旁路归档，再走 `pipeline.auto_queue` 的既有链路，因此依赖
+`archive.enabled`、`archive.auto_archive` 与 `pipeline.enabled` 同时开启。
+
+| 键 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | 启用重点博主采集 |
+| `accounts` | list | `[]` | 每行 `uid|别名|分类目录`；别名用于 `{account}` 占位符，分类留空时回落 `pipeline.categories` |
+| `include_retweets` | bool | `false` | 连转发帖一起采集（默认只收原创） |
+| `allow_retweet_from_uids` | list | `[]` | 转发例外：原微博作者是这些 uid 或昵称时仍采集 |
+| `min_images` | int | `1` | 至少几张配图才采集（1–9） |
+| `skip_push` | bool | `false` | 只收图、不推送这些博主的帖子 |
+
+调参建议与常见坑：
+
+- `accounts` 的 uid 必须是纯数字；同一 uid 重复出现时**后一行覆盖前一行**。三列写法最稳妥：`2106192855|赵今麦|12、日常分享`；只写 `uid|别名` 不会把别名误当分类。赵今麦工作室的 uid 是 `6670517617`，可写成 `6670517617|赵今麦工作室|12、日常分享`（分类目录换成图床里的实际名称）。
+- `collector.accounts` 不会自动把账号加入轮询：重点博主必须同时出现在 `monitor.monitored_uids` 里（或先执行 `微博 添加 <uid>`），否则监控根本看不到他们的新微博。`微博 采集状态` 与面板会给未加入监控的账号标「未加入监控」，但不会替你自动添加。
+- 采集发生在「已见标记之后、时效/关键词过滤之前」，所以重点博主的旧帖补发、含过滤词或超过 `monitor.max_post_age_minutes` 的帖子仍会进图床；它也不受 `pipeline.enabled_uids` 拦截。普通博主的行为完全不变。
+- 原创判定默认只看 `is_retweet=false`。工作室转发艺人本人时，把艺人 uid 填进 `allow_retweet_from_uids` 即可只放行这一种转发；`include_retweets=true` 会放行全部转发，范围更大，慎用。
+- `min_images` 先按时间线卡片的配图数快速判定，命中候选后会强制调用一次详情补图再复核，避免九宫格卡片被截断成 0 张而漏采。
+- 分类解析优先级：`pipeline.categories` 里的同名 uid/昵称优先，`collector.accounts` 的第三列只补空缺。若发现分类仍是旧值，先检查 `pipeline.categories` 是否已有同名键。
+- `skip_push=true` 只在**采集成功**后跳过推送；采集失败（例如归档未开启）仍按原规则推送，避免既没入库又丢消息。
+- 采集不会重新实现去重：同一 mid 仍由归档库与管线按既有幂等规则处理，重复轮询不会产生重复图床对象。
 
 ## copylib
 
@@ -391,7 +418,7 @@ Qdrant 向量检索与多模态 embedding。
 
 ## limits
 
-下载体积与图床哈希缓存。
+下载体积、图床哈希缓存与首次启动的反向收录检查。
 
 | 键 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
@@ -399,9 +426,14 @@ Qdrant 向量检索与多模态 embedding。
 | `remote_hash_enabled` | bool | `true` | 图床哈希索引 |
 | `remote_hash_ttl` | int | `21600` | 哈希缓存有效期（秒） |
 | `remote_hash_max_points` | int | `0` | 哈希拉取上限（0 = 不限） |
+| `bed_audit_on_start` | bool | `true` | 首次启动补录图床未收录图片 |
+| `bed_audit_max_files` | int | `0` | 单次图床扫描上限（0 = 不限） |
 
 调参建议与常见坑：
 
+- `bed_audit_on_start` 只在「首次加载 / 图床或 Qdrant 配置变化」时跑一次：后台枚举图床里的微博图，先按文件名比对 Qdrant `file_name` 与直链，文件名没命中才下载算 pHash，再按内容查 Qdrant 与本地图库；两边都没命中才补登记。补录只写索引，**不会重新上传图床**。
+- `bed_audit_max_files` 为 `0` 表示不限量；图床很大时首次扫描会明显拖慢后台任务，调试列表鉴权可先设 `200`。手动 `微博 图床检查` 时也可以带数量上限。
+- 自动检查只支持 `cloudflare_imgbed` 与 `local`：前者走 `GET /api/manage/list`，后者遍历 `local_dir`；R2/OCI 没有现成列表客户端，generic_http 没有列表接口，都会明确报「无法枚举」而不是假装检查通过。
 - `remote_hash_enabled` 打开后启动时会从图床拉取预置 pHash，让哈希引擎也能反查图床里的图片；它只需要配置 Qdrant 地址，不依赖 embedding，所以没配向量模型也能用。
 - `remote_hash_ttl` 默认 6 小时，超期或缓存为空时重建；切换 `basic.hash_size` 后旧精度的缓存会自动失效，无需手动清。
 - `remote_hash_max_points` 为 `0` 表示不限量，图床很大时首次拉取会明显拖慢启动；调试阶段建议设成 50 先验证链路。

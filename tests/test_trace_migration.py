@@ -55,7 +55,7 @@ def test_trace_command_and_llm_tool_surface_are_preserved():
 
     # 入口同时注册了微博指令组的子指令，这里只校验溯源域的 12 条没有丢失。
     assert len(commands) >= 12
-    assert llm_tools == ["send_random_media"]
+    assert set(llm_tools) == {"send_image_by_name", "send_random_media"}
     assert {
         "trace",
         "register_image",

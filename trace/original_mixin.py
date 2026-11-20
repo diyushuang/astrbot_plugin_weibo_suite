@@ -298,7 +298,8 @@ class OriginalMixin:
             "本会话还没有回传过图片。/原图 也可直接按文件名到图床取原图：\n"
             "· /原图 文件名 —— 直接把图床里的原图取回来（无需先回传）\n"
             "· /原图 —— 取本会话最近回传过的图片的原图\n"
-            "· 引用一张图发送 /原图 —— 按该图文件名到图床取原图"
+            "· 引用一张图发送 /原图 —— 按该图文件名到图床取原图\n"
+            "· /固定图 是 /原图 的别名，适合按采集生成的文件名取固定图"
         )
 
     async def _reverse_original(
@@ -602,7 +603,7 @@ class OriginalMixin:
     async def original_image(self, event: AstrMessageEvent):
         """重发最近回传过的图片的原图；也可直接按文件名到图床取（/原图 风景.jpg）"""
         session = self._session_key(event)
-        query = self._strip_command(event.message_str or "", ("原图",)).strip(" \t:：,，")
+        query = self._strip_command(event.message_str or "", ("原图", "固定图")).strip(" \t:：,，")
         name = ""
         url = ""
         # 引用图里的**原始**直链/名字：保留 `thumbnails/` 路径段，供缩略图判定与
@@ -672,18 +673,25 @@ class OriginalMixin:
                 return
         # R6：/原图 只发 URL、不落地字节——剥离 ImgBed 处理参数还原未处理原文件，
         # 并强制 url 通道 + 禁用本地回退
+        async for result in self._deliver_original_image(event, name, url, source=source):
+            yield result
+
+    async def _deliver_original_image(
+        self, event: AstrMessageEvent, name: str, url: str, *, source: str = "lookup"
+    ):
+        """把已解析出的原图直链发出去；/原图 与 sendImageByName 共用。"""
         final_url = build_original_url(url)
         # 最后一次校验：走到这里说明上游每一条路径都「自认为」拿到的是原图，
         # 但只要最终直链仍指向缩略图目录，就绝不能发出去——静默发出一张 720px
-        # 小图，用户只会觉得「/原图 又没生效」，比明确报错难排查得多。
+        # 小图，用户只会觉得「取原图又没生效」，比明确报错难排查得多。
         if is_thumbnail_url(final_url):
-            logger.warning(f"/原图 最终直链仍是缩略图，已拒绝发送: {redact_url(final_url)}")
+            logger.warning(f"取原图最终直链仍是缩略图，已拒绝发送: {redact_url(final_url)}")
             yield event.plain_result(
                 f"取到的「{name}」仍是图床里的缩略图直链，已中止发送；"
-                "请改用原图文件名，或先 /溯源 命中该图后再发 /原图。"
+                "请改用原图文件名，或先 /溯源 命中该图后再取原图。"
             )
             return
-        logger.info(f"/原图 发出（来源={source}）: {name} <- {redact_url(final_url)}")
+        logger.info(f"取原图发出（来源={source}）: {name} <- {redact_url(final_url)}")
         block = {"url": final_url, "file_name": name}
         async for result in self._yield_delivery(
             event,
@@ -691,6 +699,25 @@ class OriginalMixin:
             [block],
             mode_override="url",
             allow_local_fallback=False,
+        ):
+            yield result
+
+    async def send_image_by_name(self, event: AstrMessageEvent, name: str):
+        """LLM 工具：按图床文件名发送固定图片（不依赖会话历史）。"""
+        settings = self._random_settings()
+        if not settings.get("enable_llm", True):
+            yield event.plain_result("LLM 调用图片发送已被禁用（random_media.enable_llm=false）")
+            return
+        query = strip_leading_decoration(str(name or "").strip()) or str(name or "").strip()
+        if not query:
+            yield event.plain_result("用法：按文件名发送图床里的指定图片")
+            return
+        resolved_name, url, message = await self._lookup_imgbed_file(query)
+        if not url:
+            yield event.plain_result(message)
+            return
+        async for result in self._deliver_original_image(
+            event, resolved_name or query, url, source="llm-fixed"
         ):
             yield result
 

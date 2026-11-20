@@ -1049,6 +1049,7 @@ function nodeTab(node) {
   if (
     ids.has("archive-card") ||
     ids.has("pipeline-card") ||
+    ids.has("collector-card") ||
     ids.has("rules-card") ||
     ids.has("kw-rules-card")
   )
@@ -1198,6 +1199,48 @@ function renderPipeline(data) {
   els["pipeline-status"].textContent = lines.join("\n");
 }
 
+function renderCollector(data) {
+  const status = data.status || {};
+  const enabled = Boolean(status.enabled);
+  els["collector-badge"].textContent = enabled
+    ? status.skip_push
+      ? "只收图"
+      : "采集已启用"
+    : status.configured
+      ? "未配置账号"
+      : "未启用";
+  els["collector-badge"].className = `badge ${enabled ? "ok" : "warn"}`;
+  const lines = [];
+  if (!data.available) {
+    lines.push("当前插件版本没有采集状态接口。");
+  } else if (!status.configured) {
+    lines.push("未启用：在设置页开启「重点博主采集」并填入 uid|别名|分类目录。");
+  } else if (!enabled) {
+    lines.push("已开启但没有配置账号（collector.accounts 为空）。");
+  } else {
+    for (const item of status.accounts || []) {
+      const states = item.states || {};
+      lines.push(
+        `${item.account}（${item.uid}）· ${item.category} · 帖子 ${item.posts || 0} · 图片 ${item.images || 0}`
+      );
+      lines.push(
+        `  vector ${states.vector || 0} / 失败 ${item.failed || 0} · ${item.random_command || ""}`
+        + (item.monitored ? "" : " · 未加入监控")
+      );
+    }
+    const deps = status.dependencies || {};
+    const missing = [];
+    if (!deps.archive) missing.push("archive.enabled");
+    if (!deps.auto_archive) missing.push("archive.auto_archive");
+    if (!deps.download_originals) missing.push("archive.download_originals");
+    if (!deps.pipeline) missing.push("pipeline.enabled");
+    if (!deps.pipeline_services) missing.push("图床/向量服务");
+    if (missing.length) lines.push(`依赖缺口：${missing.join("、")}`);
+  }
+  if (status.last_error) lines.push(`最近错误：${status.last_error}`);
+  els["collector-status"].textContent = lines.join("\n") || "暂无数据";
+}
+
 function renderNaming(data) {
   if (namingDirty) return;
   els["naming-directory"].value = data.naming_directory || "";
@@ -1297,6 +1340,7 @@ const cache = {
   archive: null,
   pipeline: null,
   naming: null,
+  collector: null,
   copylib: null,
   copylibList: null,
   trace: null,
@@ -1368,6 +1412,18 @@ async function loadPipeline(force = false) {
     renderNaming(cache.naming);
   }
   await Promise.all(jobs);
+}
+
+async function loadCollector(force = false) {
+  if (!needFetch("collector", force)) {
+    if (cache.collector) renderCollector(cache.collector);
+    return;
+  }
+  const data = await safeGet("collector/status", "collector-status", "collector-badge");
+  if (!data) return;
+  cache.collector = data;
+  markFetched("collector");
+  renderCollector(data);
 }
 
 async function loadCopylib(force = false) {
@@ -1628,7 +1684,7 @@ async function loadAll() {
     jobs.push(loadOverview());
   }
   if (currentTab === "monitor") jobs.push(loadPreview());
-  else if (currentTab === "archive") jobs.push(loadArchive(), loadPipeline());
+  else if (currentTab === "archive") jobs.push(loadArchive(), loadPipeline(), loadCollector());
   else if (currentTab === "copylib") jobs.push(loadCopylib());
   else if (currentTab === "trace") jobs.push(loadTrace());
   else if (currentTab === "sns") jobs.push(loadSns());
@@ -2335,7 +2391,7 @@ async function init() {
     confirm: confirmDialog,
     status: (message, tone) => setStatus(message, tone || ""),
   });
-  // 设置页启动时不拉配置（179 个键的请求只在真正看得见时发）；
+  // 设置页启动时不拉配置（187 个键的请求只在真正看得见时发）；
   // 但如果带着 #settings 深链进来，切页动作发生在 initSettings 之前，这里补一次。
   if (currentTab === "settings") settingsOnShown();
   tabsReady = true;

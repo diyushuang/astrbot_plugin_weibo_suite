@@ -4,8 +4,8 @@
 `views_backend/settings_schema.py` 生成，请勿手改。
 
 - 主题页：5 个（另有 1 个「关于与安全」页，不含配置键）
-- schema 可见分组：15 个
-- 配置键：179 个；可写：179 个
+- schema 可见分组：16 个
+- 配置键：187 个；可写：187 个
 - 脱敏字段：16 个
 
 | 页面 | 分组 | 配置键 | 短标签 | 控件 | 可写 | 默认值 | 范围 / 选项 | 备注 |
@@ -83,6 +83,12 @@
 | 归档与管线 | 图床与向量管线 | `pipeline.max_attempts` | 单张最大尝试 | 数字 | 是 | 3 | 1–10 次 |  |
 | 归档与管线 | 图床与向量管线 | `pipeline.thumb_size` | 缩略图长边 | 数字 | 是 | 720 | 64–2048 像素 |  |
 | 归档与管线 | 图床与向量管线 | `pipeline.thumb_quality` | 缩略图质量 | 数字 | 是 | 72 | 1–100 % |  |
+| 归档与管线 | 重点博主采集 | `collector.enabled` | 启用重点博主采集 | 开关 | 是 | false |  | 危险 |
+| 归档与管线 | 重点博主采集 | `collector.accounts` | 重点博主列表 | 列表（每行一项） | 是 | [] | 每行一项 |  |
+| 归档与管线 | 重点博主采集 | `collector.include_retweets` | 连转发一起采集 | 开关 | 是 | false |  |  |
+| 归档与管线 | 重点博主采集 | `collector.allow_retweet_from_uids` | 转发例外原作者 | 列表（每行一项） | 是 | [] | 每行一项 |  |
+| 归档与管线 | 重点博主采集 | `collector.min_images` | 最少配图数 | 数字 | 是 | 1 | 1–9 张 |  |
+| 归档与管线 | 重点博主采集 | `collector.skip_push` | 只收图不推送 | 开关 | 是 | false |  |  |
 | 归档与管线 | 文案库 | `copylib.auto_clean` | 归档后自动清洗 | 开关 | 是 | true |  |  |
 | 图床与存储 | 图床上传 | `image_bed.mode` | 图床模式 | 下拉 | 是 | local | local=仅本地副本 / generic_http=通用 HTTP 图床 / cloudflare_imgbed=CloudFlare-ImgBed | 危险 |
 | 图床与存储 | 图床上传 | `image_bed.api_url` | 上传接口地址 | 单行文本 | 是 |  |  | 图床模式 = 通用 HTTP 图床 |
@@ -139,6 +145,8 @@
 | 溯源与签到 | 限制与缓存 | `limits.remote_hash_enabled` | 图床哈希索引 | 开关 | 是 | true |  | 高级 |
 | 溯源与签到 | 限制与缓存 | `limits.remote_hash_ttl` | 哈希缓存有效期 | 数字 | 是 | 21600 | 60–604800 秒 | 高级 |
 | 溯源与签到 | 限制与缓存 | `limits.remote_hash_max_points` | 哈希拉取上限 | 数字 | 是 | 0 | 0–1000000 点 | 高级 |
+| 溯源与签到 | 限制与缓存 | `limits.bed_audit_on_start` | 首次启动图床补录 | 开关 | 是 | true |  |  |
+| 溯源与签到 | 限制与缓存 | `limits.bed_audit_max_files` | 图床扫描上限 | 数字 | 是 | 0 | 0–1000000 个 | 高级 |
 | 溯源与签到 | 随机图 | `random_media.base_url` | 图床站点地址 | 单行文本 | 是 |  |  |  |
 | 溯源与签到 | 随机图 | `random_media.lan_base_url` | 内网直连地址 | 单行文本 | 是 |  |  |  |
 | 溯源与签到 | 随机图 | `random_media.api_endpoint` | 随机图接口路径 | 单行文本 | 是 | /random |  |  |

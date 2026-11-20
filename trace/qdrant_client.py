@@ -87,6 +87,9 @@ class VectorPointInput:
     height: int | None = None
     mime: str = ""
     src: str = ""
+    # 图床侧真正落地的文件名（如「【微博@博主】20240101-01：标题.jpg」）。
+    # 为空时沿用 Path(path).name，兼容未传该字段的旧调用方。
+    file_name: str = ""
 
 
 class QdrantMixin:
@@ -856,7 +859,7 @@ class QdrantMixin:
                 "id": point_id,
                 "vector": vector,
                 "payload": self._point_payload(
-                    file_name=Path(entry.path).name,
+                    file_name=entry.file_name or Path(entry.path).name,
                     path=entry.path,
                     image_url=entry.image_url,
                     mime=entry.mime,

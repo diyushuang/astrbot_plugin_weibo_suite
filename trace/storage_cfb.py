@@ -1,9 +1,10 @@
-"""CloudFlare-ImgBed 官方 REST API 后端（上传 / 删除）。"""
+"""CloudFlare-ImgBed 官方 REST API 后端（上传 / 删除 / 列表）。"""
 
 from __future__ import annotations
 
 import json
-from urllib.parse import urlencode
+import posixpath
+from urllib.parse import quote, urlencode
 
 import aiohttp
 
@@ -17,9 +18,9 @@ except Exception:  # 兼容独立模块加载/本地自测环境
 try:
     from ..shared.common import USER_AGENT
     from ..shared.http import read_limited_text
-    from .storage_utils import clean_folder
+    from .storage_utils import BedFile, clean_folder
 except ImportError:  # 兼容插件以独立模块方式加载
-    from storage_utils import clean_folder  # type: ignore[no-redef]
+    from storage_utils import BedFile, clean_folder  # type: ignore[no-redef]
 
     from astrbot_plugin_weibo_suite.shared.common import USER_AGENT  # type: ignore[no-redef]
     from astrbot_plugin_weibo_suite.shared.http import (  # type: ignore[no-redef]
@@ -149,6 +150,135 @@ class CloudflareImgBedMixin:
         if not url.startswith(("http://", "https://")):
             raise RuntimeError(f"未能从上传响应提取到图片直链: {body[:200]}")
         return url
+
+    async def _list_cf(self, *, limit: int = 0) -> list:
+        """枚举图床文件，返回 `BedFile` 列表。
+
+        官方 `GET /api/manage/list` 是分页接口（`start` / `count`），这里按
+        100 条一页翻到空页或达到 limit。`recursive=true` 是必须的：微博原图
+        在 `{分类}/【微博图集@博主】/` 子目录里，不递归只会看到根目录。
+
+        鉴权与上传保持同一套优先级：Bearer Token > `authCode` 请求头 >
+        旧站点的 `?authCode=`（只在 401/403 时回落一次）。列表接口若被站点
+        版本差异拒绝，错误信息会带上状态码，由巡检层明确报「检查失败」，不能
+        伪装成「没有未收录图片」。
+        """
+        base = self._cf_base()
+        if not base:
+            raise ValueError("未配置 cfi_base_url，无法枚举 CloudFlare-ImgBed 文件")
+        token = str(self.config.get("cfi_token") or "").strip()
+        auth_code = str(self.config.get("cfi_auth_code") or "").strip()
+        if not token and not auth_code:
+            raise ValueError("未配置 cfi_token / cfi_auth_code，无法通过图床列表鉴权")
+        page_size = 100
+        start = 0
+        use_query_auth = {"on": False}
+        entries: list = []
+        seen_names: set = set()
+        while True:
+            params = {
+                "start": start,
+                "count": page_size,
+                "recursive": "true",
+            }
+            if use_query_auth["on"] and auth_code:
+                params["authCode"] = auth_code
+            api_url = f"{base}/api/manage/list?{urlencode(params)}"
+
+            def prepare(_url: str, method: str, cross_origin: bool = False) -> dict:
+                headers = {"User-Agent": USER_AGENT}
+                if token and not cross_origin:
+                    headers["Authorization"] = f"Bearer {token}"
+                if auth_code and not cross_origin and not use_query_auth["on"]:
+                    headers["authCode"] = auth_code
+                return {"headers": headers}
+
+            client = await self._http_getter()
+            async with await client.request(
+                "GET", api_url, prepare=prepare, timeout=self._timeout()
+            ) as resp:
+                body = await read_limited_text(resp)
+                status = resp.status
+            if status in (401, 403) and auth_code and not use_query_auth["on"]:
+                use_query_auth["on"] = True
+                if not getattr(self, "_cf_authcode_query_warned", False):
+                    self._cf_authcode_query_warned = True
+                    logger.warning(
+                        "图床列表接口不认 authCode 请求头，已回落到 ?authCode= 查询串"
+                        "（建议升级站点或改用 API Token，鉴权码出现在 URL 里会进访问日志）"
+                    )
+                continue
+            if not 200 <= status < 300:
+                raise RuntimeError(f"CloudFlare-ImgBed 列表返回 HTTP {status}: {body[:500]}")
+
+            try:
+                payload = json.loads(body)
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"CloudFlare-ImgBed 列表响应不是 JSON: {body[:200]}") from e
+            if isinstance(payload, dict):
+                files = payload.get("files")
+                total = payload.get("totalCount")
+            elif isinstance(payload, list):
+                files = payload
+                total = len(payload)
+            else:
+                files = None
+                total = None
+            if not isinstance(files, list):
+                raise RuntimeError(f"CloudFlare-ImgBed 列表响应缺少 files 数组: {body[:200]}")
+            if not files:
+                break
+            for item in files:
+                entry = self._cf_bed_file(base, item)
+                if entry is None or entry.name in seen_names:
+                    continue
+                seen_names.add(entry.name)
+                entries.append(entry)
+                if limit > 0 and len(entries) >= limit:
+                    return entries
+            start += len(files)
+            if isinstance(total, int):
+                if total > 0 and start >= total:
+                    break
+            elif start > 0 and len(seen_names) < start:
+                # 站点没有 totalCount，又忽略 start 返回同一页时，新名字数会
+                # 小于已翻过的条数；此时停手，避免无限循环。
+                break
+        return entries
+
+    @staticmethod
+    def _cf_bed_file(base: str, item: object) -> BedFile | None:
+        """把列表接口的一条记录收敛成 BedFile；认不出名字就跳过。"""
+        if not isinstance(item, dict):
+            return None
+        name = str(item.get("name") or "").strip().lstrip("/")
+        metadata = item.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        if not name:
+            name = str(metadata.get("FileName") or "").strip()
+        if not name:
+            return None
+        file_name = str(metadata.get("FileName") or "").strip() or posixpath.basename(name)
+        directory = str(metadata.get("Directory") or "").strip()
+        if not directory:
+            directory = posixpath.dirname(name)
+            if directory:
+                directory += "/"
+        try:
+            timestamp = int(metadata.get("TimeStamp") or 0)
+        except (TypeError, ValueError):
+            timestamp = 0
+        # 管理页/上传接口都用 /file/{name}；中文与 @ 必须编码，斜杠保留目录层级
+        url = f"{base}/file/{quote(name, safe='/')}"
+        return BedFile(
+            name=name,
+            file_name=file_name,
+            url=url,
+            directory=directory,
+            timestamp=timestamp,
+            file_id=name,
+        )
 
     async def _cf_delete(self, token: str, file_id: str) -> bool:
         """按官方文档调用 POST /api/manage/delete/batch 删除单个文件。"""

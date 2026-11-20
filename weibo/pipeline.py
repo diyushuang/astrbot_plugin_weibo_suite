@@ -18,18 +18,23 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import shutil
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from .pipeline_naming import (
     NamingContext,
-    category_map,
+    collector_accounts,
+    collector_alias,
+    collector_flags,
+    collector_post_allowed,
+    date_label,
+    merged_category_map,
     naming_templates,
     render_directory,
     render_filename,
@@ -53,7 +58,6 @@ except ImportError:  # pragma: no cover - 真实插件里一定存在
 
 _CFB_MODES = ("", "cloudflare_imgbed")
 _VECTOR_RANK = MEDIA_STATES.index("vector") if "vector" in MEDIA_STATES else len(MEDIA_STATES) - 1
-_WEIBO_TZ = timezone(timedelta(hours=8))
 _BACKOFF_MIN = 5.0
 _BACKOFF_MAX = 60.0
 _TRUE_TEXTS = ("1", "true", "yes", "on")
@@ -85,6 +89,7 @@ class _PipelinePoint:
     height: int | None = None
     mime: str = ""
     src: str = ""
+    file_name: str = ""
 
 
 def _pipeline_int(value: Any, default: int) -> int:
@@ -134,16 +139,7 @@ def _media_rank(row: Any) -> int:
 
 def _pipeline_date(timestamp: Any) -> str:
     """把帖子 created_at（秒级时间戳）转成命名用的 YYYY-MM-DD（微博东八区）。"""
-    try:
-        seconds = int(timestamp)
-    except (TypeError, ValueError):
-        seconds = 0
-    if seconds > 0:
-        try:
-            return datetime.fromtimestamp(seconds, _WEIBO_TZ).strftime("%Y-%m-%d")
-        except (OverflowError, OSError, ValueError):
-            pass
-    return datetime.now(_WEIBO_TZ).strftime("%Y-%m-%d")
+    return date_label(timestamp)
 
 
 def _pipeline_write_thumb(path: Path, data: bytes) -> None:
@@ -406,12 +402,15 @@ class PipelineMixin:
         queue = getattr(self, "_pipeline_queue", None)
         return queue.qsize() if queue is not None else 0
 
-    def pipeline_notify_archived(self, mid: str) -> bool:
+    def pipeline_notify_archived(self, mid: str, post: dict | None = None) -> bool:
         """归档落库后的同步回调：满足条件则入队，任何异常都只记日志。
 
         archive.py 在 _archive_save_post 里直接同步调用（未 await），因此这里
-        不能 await、不做网络。四个拒绝分支：未 bind 服务 / 未启用 / auto_queue
-        关闭 / 该博主不在 enabled_uids；其余情况交给 pipeline_enqueue 去重。
+        不能 await、不做网络。拒绝分支：未 bind 服务 / 未启用 / auto_queue
+        关闭 / 该博主不在 enabled_uids（collector 账号除外）/ collector 的
+        原创规则不满足；其余情况交给 pipeline_enqueue 去重。
+
+        post 传入时直接用已解析字段，避免为 collector 判定再做一次同步 DB 读。
         """
         mid = str(mid or "").strip()
         try:
@@ -421,16 +420,66 @@ class PipelineMixin:
                 return False
             if not self._pipeline_bool("auto_queue", True):
                 return False
+            specs = self._pipeline_collector_specs()
             uids = self._pipeline_enabled_uids()
-            if uids:
-                uid = self._pipeline_post_uid(mid)
-                if not uid or uid not in uids:
+            if uids or specs:
+                uid = ""
+                if isinstance(post, dict):
+                    uid = str(post.get("uid") or "").strip()
+                if not uid:
+                    uid = self._pipeline_post_uid(mid)
+                if uid and uid in specs:
+                    if not self._pipeline_collector_allows(uid, post=post):
+                        return False
+                elif uids and (not uid or uid not in uids):
                     return False
             return self.pipeline_enqueue(mid)
         except Exception as exc:
             self._pipeline_last_error = str(exc)[:200]
             logger.warning(f"图床管线入队失败（mid={mid}）：{exc}")
             return False
+
+    def _pipeline_collector_specs(self) -> dict:
+        """只有 collector.enabled=true 时才把账号视为“必须进管线”。"""
+        config = getattr(self, "config", None)
+        config = config if callable(getattr(config, "get", None)) else {}
+        if not collector_flags(config).enabled:
+            return {}
+        return collector_accounts(config)
+
+    def _pipeline_collector_allows(
+        self, uid: str, *, post: dict | None = None, row: Any = None
+    ) -> bool:
+        """collector 账号的原创规则；非 collector 时一律放行。"""
+        config = getattr(self, "config", None)
+        config = config if callable(getattr(config, "get", None)) else {}
+        if str(uid or "").strip() not in collector_accounts(config):
+            return True
+        flags = collector_flags(config)
+        if not flags.enabled:
+            return True
+        data = post if isinstance(post, dict) else (dict(row) if row is not None else {})
+        raw_json = str(_row_get(data, "raw_json", "") or "")
+        orig_name = str(_row_get(data, "orig_name", "") or "")
+        if not orig_name and raw_json:
+            try:
+                raw = json.loads(raw_json)
+                if isinstance(raw, dict):
+                    orig_name = str(raw.get("orig_name") or "")
+            except (TypeError, ValueError):
+                orig_name = ""
+        pics = data.get("pics") if isinstance(data.get("pics"), list) else []
+        pic_count = len(pics) or _pipeline_int(_row_get(data, "media_total", 0), 0)
+        if not pic_count:
+            pic_count = _pipeline_int(_row_get(data, "pic_total", 0), 0)
+        # 归档行没有 orig_uid；转发例外只能靠 orig_name（raw_json/monitor post）
+        return collector_post_allowed(
+            flags,
+            is_retweet=bool(_row_get(data, "is_retweet", 0)),
+            orig_uid=str(_row_get(data, "orig_uid", "") or ""),
+            orig_name=orig_name,
+            pic_count=pic_count,
+        )
 
     def _pipeline_post_uid(self, mid: str) -> str:
         store = self._pipeline_store()
@@ -626,12 +675,13 @@ class PipelineMixin:
             return stats
 
         post = await self._pipeline_post_row(store, mid)
-        account = str(_row_get(post, "author", "") or "")
         uid = str(_row_get(post, "uid", "") or "")
         config = getattr(self, "config", None)
         config = config if callable(getattr(config, "get", None)) else {}
+        # collector 的别名优先：图床既有目录可能写的是「赵今麦」而不是接口昵称。
+        account = collector_alias(config, uid) or str(_row_get(post, "author", "") or "")
         dir_template, file_template = naming_templates(config)
-        mapping = category_map(config)
+        mapping = merged_category_map(config)
         category = resolve_category(mapping, uid=uid, account=account)
         day = _pipeline_date(_row_get(post, "created_at", 0))
         title = title_from_text(str(_row_get(post, "text", "") or ""))
@@ -722,7 +772,12 @@ class PipelineMixin:
                             raise RuntimeError(
                                 str(getattr(result, "message", "") or "图床返回失败")
                             )
-                        await asyncio.to_thread(store.mark_media, mid, pid, "bed")
+                        # 原图直链必须随 bed 状态落库：补跑时（缩略图/向量失败后重试）
+                        # 要靠它跳过重传，也要保证最终写进 Qdrant 的是图床永久地址，
+                        # 而不是会失效的微博源站 CDN 地址。
+                        await asyncio.to_thread(
+                            store.mark_media, mid, pid, "bed", image_url=original_url
+                        )
                         stats["uploaded"] += 1
                     # 缩略图与原图分开目录，同名也只会落在自己的子目录里；
                     # 文件名保持不变，图床 thumbnails/ 的命名约定不受影响。
@@ -739,7 +794,12 @@ class PipelineMixin:
                                 str(getattr(thumb_result, "message", "") or "缩略图上传失败")
                             )
                         await asyncio.to_thread(
-                            store.mark_media, mid, pid, "thumb", thumb_url=thumb_url
+                            store.mark_media,
+                            mid,
+                            pid,
+                            "thumb",
+                            image_url=original_url,
+                            thumb_url=thumb_url,
                         )
                         stats["thumbed"] += 1
                     file_size = self._pipeline_file_size(local)
@@ -756,6 +816,7 @@ class PipelineMixin:
                             height=height,
                             mime=str(mime or ""),
                             src="weibo",
+                            file_name=filename,
                         )
                     )
                     planned.append(
@@ -961,6 +1022,7 @@ class PipelineMixin:
         except Exception as exc:
             return {"scanned": 0, "queued": 0, "error": f"读取缺口帖失败：{str(exc)[:160]}"}
         allowed = self._pipeline_enabled_uids()
+        specs = self._pipeline_collector_specs()
         scanned = 0
         queued = 0
         for row in rows:
@@ -968,7 +1030,11 @@ class PipelineMixin:
             if not mid:
                 continue
             scanned += 1
-            if allowed and str(_row_get(row, "uid", "") or "") not in allowed:
+            uid = str(_row_get(row, "uid", "") or "")
+            if uid and uid in specs:
+                if not self._pipeline_collector_allows(uid, row=row):
+                    continue
+            elif allowed and uid not in allowed:
                 continue
             if self.pipeline_enqueue(mid):
                 queued += 1

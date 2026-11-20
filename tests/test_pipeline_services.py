@@ -643,3 +643,35 @@ async def test_upsert_file_keeps_legacy_payload_shape(monkeypatch):
         "created_at",
         "channel",
     }
+
+
+async def test_upsert_file_batch_prefers_explicit_file_name(monkeypatch):
+    """批量通道必须用图床渲染名写 payload，而不是归档本地 <pid>.jpg。"""
+    engine = _enabled_engine()
+    puts = []
+
+    async def embed_file(_path, *, mime=None):
+        return [0.1, 0.2]
+
+    async def request_json(method, url, *, json_body=None, headers=None):
+        if method == "GET":
+            return {
+                "result": {"config": {"params": {"vectors": {"size": 2, "distance": "Cosine"}}}}
+            }
+        puts.append(json_body)
+        return {"result": {}}
+
+    monkeypatch.setattr(engine, "embed_file", embed_file)
+    monkeypatch.setattr(engine, "_request_json", request_json)
+    rendered = "【微博@赵今麦】20261120-01：示例标题.jpg"
+    entries = [
+        VectorPointInput(
+            path="/archive/2106192855/5001/p1.jpg",
+            point_key="phash:name",
+            image_url="https://img.example.com/12、日常分享/【微博图集@赵今麦】/x.jpg",
+            file_name=rendered,
+        )
+    ]
+
+    assert await engine.upsert_file_batch(entries) == 1
+    assert puts[0]["points"][0]["payload"]["file_name"] == rendered

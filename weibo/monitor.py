@@ -29,7 +29,7 @@ class MonitorMixin:
 
         own_text = _clean_text(str(mb.get("text") or ""), limit)
         own_raw = str(mb.get("text") or "")
-        orig_name, orig_text, orig_id = "", "", ""
+        orig_name, orig_text, orig_id, orig_uid = "", "", "", ""
         orig_raw = ""
         orig_is_long = False
         is_retweet = "retweeted_status" in mb
@@ -38,6 +38,7 @@ class MonitorMixin:
             rt_mb = mb.get("retweeted_status") or {}
             rt_user = rt_mb.get("user") or {}
             orig_name = str(rt_user.get("screen_name") or "")
+            orig_uid = str(rt_user.get("id") or "")
             orig_raw = str(rt_mb.get("text") or "")
             orig_text = _clean_text(orig_raw, limit)
             orig_id = str(rt_mb.get("id") or rt_mb.get("mid") or "")
@@ -83,6 +84,7 @@ class MonitorMixin:
             "raw_text": own_raw,
             "is_retweet": is_retweet,
             "orig_name": orig_name,
+            "orig_uid": orig_uid,
             "orig_text": orig_text,
             "orig_raw_text": orig_raw,
             "orig_id": orig_id,
@@ -262,17 +264,44 @@ class MonitorMixin:
         show_full = bool(self.config.get("show_full_weibo_text", False))
         # 图片数上限：消息带图与相册上传共用（0/异常值回退默认）
         max_imgs = self._int_cfg("album_max_images", DEFAULT_MAX_IMAGES) or DEFAULT_MAX_IMAGES
+        flags_fn = getattr(self, "_collector_flags_ref", None)
+        collector_flags_value = flags_fn() if callable(flags_fn) else None
         for post in reversed(new_posts):  # 旧→新依次入队
             if len(self.pending) >= PENDING_HARD_LIMIT:
-                # 队列满时停下，别把剩余新微博标成已见：留到下一轮再处理。
-                # （以前是标记后丢弃最新一条，积压时反而永久漏掉最新微博。）
-                logger.warning("待推送队列已满，本轮停止检查，剩余微博留到下一轮")
-                break
+                # skip_push 的重点博主不走推送队列，队列满时仍可继续采集；
+                # 其它帖子照旧停下，别把剩余新微博标成已见（留到下一轮再推）。
+                collector_only = bool(
+                    collector_flags_value
+                    and collector_flags_value.enabled
+                    and collector_flags_value.skip_push
+                    and callable(getattr(self, "collector_is_account", None))
+                    and self.collector_is_account(post.get("uid"))
+                )
+                if not collector_only:
+                    logger.warning("待推送队列已满，本轮停止检查，剩余微博留到下一轮")
+                    break
+                logger.info("待推送队列已满，collector.skip_push 开启，继续采集重点博主")
             seen.add(post["id"])
             seen_list.append(post["id"])
             # 每标记一条就写回 info：取消/异常打断时 terminate 落盘的 seen_ids
             # 必须包含已经入队的条目，否则重启后同一条会被再推一遍。
             info["seen_ids"] = seen_list[-SEEN_IDS_LIMIT:]
+            # 重点博主采集在时效/关键词过滤之前：采集不依赖推送规则，
+            # 归档失败也只 warning，绝不阻断下面的正常推送链。
+            consider = getattr(self, "collector_consider", None)
+            if callable(consider):
+                try:
+                    await consider(post)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning(f"collector 采集异常（mid={post.get('id')}）：{e}")
+            if (
+                post.get("_collector_collected")
+                and collector_flags_value
+                and collector_flags_value.skip_push
+            ):
+                continue
             if self._is_expired(post.get("created_ts", 0.0)):
                 continue
             if post["is_retweet"] and not include_rt:
@@ -294,7 +323,11 @@ class MonitorMixin:
             # 增量归档：挂在「通过全部过滤、确定要推」之后，pics/videos 已补全。
             # 归档是旁路：任何异常只 warning，绝不阻塞推送；archive_post 内部只
             # 落库 + 入队，不再发网络请求，所以这里不会拖慢 _check_account。
-            if self._archive_enabled() and self._archive_bool("auto_archive", True):
+            if (
+                self._archive_enabled()
+                and self._archive_bool("auto_archive", True)
+                and not post.get("_collector_collected")
+            ):
                 try:
                     await self.archive_post(post)
                 except Exception as e:  # 归档失败绝不阻塞推送

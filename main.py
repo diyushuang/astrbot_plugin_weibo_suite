@@ -216,10 +216,20 @@ class WeiboSuitePlugin(_WeiboMonitorPlugin, _SnsCommandsMixin):
         async for result in self._trace_plugin.original_repair(event):
             yield result
 
-    @filter.command("原图")
+    @filter.command("原图", alias={"固定图"})
     async def original_image(self, event: AstrMessageEvent):
         """按图片名直取图床中的原图"""
         async for result in self._trace_plugin.original_image(event):
+            yield result
+
+    @filter.llm_tool(name="sendImageByName")
+    async def send_image_by_name(self, event: AstrMessageEvent, name: str):
+        """按图床文件名发送指定图片（固定图）。
+
+        Args:
+            name(string): 图库文件名，可带扩展名；多级目录文件名也可带目录。
+        """
+        async for result in self._trace_plugin.send_image_by_name(event, name):
             yield result
 
     @filter.llm_tool(name="sendRandomMedia")
@@ -407,6 +417,19 @@ class WeiboSuitePlugin(_WeiboMonitorPlugin, _SnsCommandsMixin):
     async def weibo_pipeline_status(self, event: AstrMessageEvent):
         """查看图床与向量管线状态"""
         async for result in super().weibo_pipeline_status(event):
+            yield result
+
+    @weibo.command("图床检查", alias={"收录检查", "图床补录"})
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def weibo_bed_audit(self, event: AstrMessageEvent, args_text: str = ""):
+        """检查并补录图床里未被收录的微博图片（管理员）"""
+        async for result in self._trace_plugin.bed_audit(event, args_text):
+            yield result
+
+    @weibo.command("采集状态")
+    async def weibo_collector_status(self, event: AstrMessageEvent):
+        """查看重点博主采集的账号、计数与依赖"""
+        async for result in super().weibo_collector_status(event):
             yield result
 
     @weibo.command("管线补跑")

@@ -4,6 +4,8 @@
 的密钥与路径推导在同源、同桶、越界场景下的拒绝，和 S3 错误详情不做实体转义。
 """
 
+from urllib.parse import unquote
+
 import pytest
 
 from astrbot_plugin_weibo_suite.trace import image_bed
@@ -15,6 +17,7 @@ from astrbot_plugin_weibo_suite.trace.image_bed import (
     upload_error_status,
 )
 from astrbot_plugin_weibo_suite.trace.s3_store import _s3_error_detail, uri_encode_path
+from astrbot_plugin_weibo_suite.trace.storage_utils import BedListUnsupported
 
 
 async def get_client():
@@ -219,6 +222,100 @@ async def test_cf_upload_does_not_fall_back_on_non_auth_errors(tmp_path):
     with pytest.raises(RuntimeError, match="HTTP 500"):
         await client._upload_cf(str(src))
     assert len(fake.calls) == 1
+
+
+async def test_cf_list_paginates_and_builds_file_url(tmp_path):
+    page1 = {
+        "files": [
+            {
+                "name": "12、日常/【微博图集@博主】/【微博@博主】20260101-1：图.jpg",
+                "metadata": {
+                    "FileName": "【微博@博主】20260101-1：图.jpg",
+                    "Directory": "12、日常/【微博图集@博主】/",
+                    "TimeStamp": 1767196800000,
+                },
+            },
+            {"name": "other/a.jpg", "metadata": {"FileName": "a.jpg"}},
+        ],
+        "totalCount": 3,
+    }
+    page2 = {
+        "files": [
+            {"name": "other/b.jpg", "metadata": {"FileName": "b.jpg"}},
+        ],
+        "totalCount": 3,
+    }
+    fake = _FakeHttpClient(
+        [
+            _FakeResponse(200, __import__("json").dumps(page1, ensure_ascii=False)),
+            _FakeResponse(200, __import__("json").dumps(page2, ensure_ascii=False)),
+        ]
+    )
+    client = _cf_client(tmp_path, fake)
+
+    entries = await client.list_files()
+
+    assert len(entries) == 3
+    assert entries[0].file_name == "【微博@博主】20260101-1：图.jpg"
+    assert entries[0].timestamp == 1767196800000
+    assert entries[0].url.startswith("https://img.example.com/file/")
+    assert "【微博@" in unquote(entries[0].url)
+    assert len(fake.calls) == 2
+    assert "start=0" in fake.calls[0]["url"]
+    assert "recursive=true" in fake.calls[0]["url"]
+    assert "start=2" in fake.calls[1]["url"]
+    assert fake.calls[0]["headers"].get("authCode") == "SECRET123"
+
+
+async def test_cf_list_continues_after_short_page_without_total(tmp_path):
+    """站点不返回 totalCount 且一页不足 100 条时，不能把第一页当最后一页。"""
+    first = {"files": [{"name": "a.jpg", "metadata": {"FileName": "a.jpg"}}]}
+    second = {"files": [{"name": "b.jpg", "metadata": {"FileName": "b.jpg"}}]}
+    fake = _FakeHttpClient(
+        [
+            _FakeResponse(200, __import__("json").dumps(first)),
+            _FakeResponse(200, __import__("json").dumps(second)),
+            _FakeResponse(200, '{"files":[]}'),
+        ]
+    )
+    client = _cf_client(tmp_path, fake)
+
+    entries = await client.list_files()
+
+    assert [entry.file_name for entry in entries] == ["a.jpg", "b.jpg"]
+    assert len(fake.calls) == 3
+
+
+async def test_cf_list_falls_back_to_query_auth_once(tmp_path):
+    fake = _FakeHttpClient(
+        [
+            _FakeResponse(401, '{"error":"unauthorized"}'),
+            _FakeResponse(200, '{"files":[],"totalCount":0}'),
+        ]
+    )
+    client = _cf_client(tmp_path, fake)
+
+    assert await client.list_files() == []
+    assert len(fake.calls) == 2
+    assert "authCode" not in fake.calls[1]["headers"]
+    assert "authCode=SECRET123" in fake.calls[1]["url"]
+
+
+async def test_list_supports_local_and_rejects_generic_http(tmp_path):
+    image_dir = tmp_path / "plugin" / "images"
+    image_dir.mkdir(parents=True)
+    (image_dir / "【微博@博主】20260101-1：图.jpg").write_bytes(b"x")
+    (image_dir / "sub").mkdir()
+    (image_dir / "sub" / "a.txt").write_text("x", encoding="utf-8")
+
+    local = make_client({"mode": "local"}, tmp_path / "plugin")
+    entries = await local.list_files()
+    assert [entry.name for entry in entries] == ["【微博@博主】20260101-1：图.jpg"]
+    assert entries[0].local_path.endswith("【微博@博主】20260101-1：图.jpg")
+
+    generic = make_client({"mode": "generic_http"}, tmp_path / "plugin")
+    with pytest.raises(BedListUnsupported):
+        await generic.list_files()
 
 
 # ----------------------------------------------------------------------

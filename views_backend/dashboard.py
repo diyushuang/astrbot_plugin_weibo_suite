@@ -209,6 +209,7 @@ def register_dashboard(
             ["GET", "POST"],
             "读取/保存命名模板与分类映射",
         ),
+        (f"/{plugin_name}/collector/status", api.collector_status, ["GET"], "重点博主采集状态"),
         (f"/{plugin_name}/copylib/overview", api.copylib_overview, ["GET"], "文案库总览"),
         (f"/{plugin_name}/copylib/list", api.copylib_list, ["GET", "POST"], "最近文案"),
         (
@@ -1195,6 +1196,28 @@ class DashboardAPI:
             return error_response(self._safe_error(result["error"]), status_code=409)
         self._record_unified(f"补跑图床管线，入队 {result.get('queued', 0)} 帖")
         return json_response(result)
+
+    async def collector_status(self):
+        """重点博主采集的只读快照；旧版插件没有该方法时返回 available=false。"""
+        fn = getattr(self.p, "collector_status", None)
+        if not callable(fn):
+            return json_response(
+                {
+                    "available": False,
+                    "status": {
+                        "enabled": False,
+                        "configured": False,
+                        "accounts": [],
+                        "dependencies": {},
+                        "last_error": "",
+                    },
+                }
+            )
+        try:
+            status = await asyncio.to_thread(fn)
+        except Exception as exc:
+            return error_response(f"读取采集状态失败：{self._safe_error(exc)}", status_code=500)
+        return json_response({"available": True, "status": status})
 
     async def pipeline_naming(self):
         body = await self._body()

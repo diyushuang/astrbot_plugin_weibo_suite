@@ -136,6 +136,8 @@ def add_post(
     state="downloaded",
     attempts=0,
     local=True,
+    is_retweet=False,
+    raw_json="",
 ):
     store.upsert_post(
         {
@@ -145,6 +147,8 @@ def add_post(
             "created_at": created,
             "text": text,
             "pic_total": count,
+            "is_retweet": 1 if is_retweet else 0,
+            "raw_json": raw_json,
         }
     )
     items = [
@@ -591,6 +595,76 @@ def test_notify_archived_four_reject_branches_and_accept(tmp_path):
     assert host.pipeline_notify_archived(MID) is False  # 已在队列里
 
 
+def test_notify_archived_collector_bypasses_enabled_uids_and_filters_retweets(tmp_path):
+    store = make_store(tmp_path)
+    add_post(store, tmp_path, "5001", uid=UID)
+    host = make_host(
+        tmp_path,
+        store,
+        services=make_services(),
+        config={"enabled": True, "enabled_uids": ["2002"]},
+    )
+    host.config["collector"] = {"enabled": True, "accounts": ["1001|赵今麦|分类"]}
+    host._pipeline_started = True
+    original = {"uid": UID, "is_retweet": False, "pics": [{"pid": "p1"}]}
+    assert host.pipeline_notify_archived("5001", post=original) is True
+    assert host.pipeline_queue_size() == 1  # 绕过 enabled_uids
+
+    add_post(store, tmp_path, "5002", uid=UID)
+    blocked = {"uid": UID, "is_retweet": True, "orig_uid": "999", "pics": [{"pid": "p1"}]}
+    assert host.pipeline_notify_archived("5002", post=blocked) is False
+    assert host.pipeline_queue_size() == 1
+
+    add_post(store, tmp_path, "5003", uid=UID)
+    host.config["collector"]["allow_retweet_from_uids"] = ["2106192855"]
+    allowed = {
+        "uid": UID,
+        "is_retweet": True,
+        "orig_uid": "2106192855",
+        "pics": [{"pid": "p1"}],
+    }
+    assert host.pipeline_notify_archived("5003", post=allowed) is True
+    assert host.pipeline_queue_size() == 2
+
+
+async def test_backfill_collector_bypasses_enabled_uids_and_filters_retweets(tmp_path):
+    store = make_store(tmp_path)
+    add_post(store, tmp_path, "6001", uid=UID)
+    add_post(
+        store,
+        tmp_path,
+        "6002",
+        uid=UID,
+        is_retweet=True,
+        raw_json='{"orig_name": "别人"}',
+    )
+    add_post(
+        store,
+        tmp_path,
+        "6003",
+        uid=UID,
+        is_retweet=True,
+        raw_json='{"orig_name": "2106192855"}',
+    )
+    add_post(store, tmp_path, "6004", uid="3003")
+    host = make_host(
+        tmp_path,
+        store,
+        services=make_services(),
+        config={"enabled": True, "enabled_uids": ["2002"]},
+    )
+    host.config["collector"] = {
+        "enabled": True,
+        "accounts": ["1001|赵今麦|分类"],
+        "allow_retweet_from_uids": ["2106192855"],
+    }
+    host._pipeline_started = True
+
+    result = await host.pipeline_backfill(limit=20)
+    assert result == {"scanned": 4, "queued": 2}
+    assert host.pipeline_queue_size() == 2
+
+
 def test_enqueue_tolerates_missing_config_section(tmp_path):
     host = FakeHost(store=make_store(tmp_path), services=make_services())
     host.config = {}
@@ -849,3 +923,34 @@ async def test_pipeline_start_refills_pending_posts_from_archive(tmp_path):
         assert host.pipeline_queue_size() == 0
     finally:
         await host.pipeline_stop()
+
+
+async def test_bed_url_persisted_and_reused_after_vector_failure(tmp_path):
+    """原图直链要随 bed 状态落库：向量失败补跑时不能再退回微博源站地址。"""
+    store = make_store(tmp_path)
+    add_post(store, tmp_path)
+    bed, vector = FakeBed(), FakeVector(error="向量服务不可用")
+    host = make_host(tmp_path, store, services=make_services(bed, vector, FakeLibrary()))
+
+    first = await host.pipeline_run_post(MID)
+
+    assert first["uploaded"] == 2
+    assert first["thumbed"] == 2
+    assert first["vectored"] == 0
+    rows = store.list_media(MID)
+    assert all(row["state"] == "thumb" for row in rows)
+    bed_urls = [row["url"] for row in rows]
+    assert all(url.startswith("https://cdn.example/") for url in bed_urls)
+
+    retry_bed, retry_vector = FakeBed(), FakeVector()
+    retry_host = make_host(
+        tmp_path, store, services=make_services(retry_bed, retry_vector, FakeLibrary())
+    )
+
+    second = await retry_host.pipeline_run_post(MID)
+
+    assert second["uploaded"] == 0
+    assert second["thumbed"] == 0
+    assert second["vectored"] == 2
+    assert retry_bed.calls == []
+    assert [entry.image_url for entry in retry_vector.batches[0]] == bed_urls

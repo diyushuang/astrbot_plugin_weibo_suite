@@ -73,6 +73,7 @@ graph TD
 | `napcat_album.py` | NapCat OneBot 扩展相册接口客户端 |
 | `archive.py` / `archive_db.py` | 归档编排 / 纯同步 SQLite 存储层 |
 | `pipeline.py` / `pipeline_naming.py` | 图床→缩略图→向量管线 / 命名模板渲染 |
+| `collector.py` | 重点博主采集：原创判定、强制补图、旁路归档与状态快照（不复制管线逻辑） |
 | `copylib.py` / `cleaner.py` | 文案库编排 / 清洗纯函数 |
 | `parser.py` / `runtime.py` | 帖子 JSON 解析纯函数 / 运行时开关（暂停、熔断）快照 |
 | `commands.py` / `constants.py` | 微博域指令实现（由 `main.py` 注册） / 域内常量 |
@@ -96,10 +97,11 @@ graph TD
 
 ### 溯源域 `trace/`
 
-`trace/main.py` 只是域入口 mixin（约 390 行，负责装配与指令转发），历史体量早已
+`trace/main.py` 只是域入口 mixin（约 400 行，负责装配与指令转发），历史体量早已
 按能力拆成若干 mixin：`trace_mixin.py`（溯源检索）、`library_mixin.py`（图库重扫与状态）、
 `original_mixin.py`（原图修复/投递）、`delivery_mixin.py`（投递通道选择与格式体检委托）、
-`qq_upload_mixin.py`（QQ 上传）、`checkin_mixin.py`（签到）、`random_media.py`（随机图）。
+`qq_upload_mixin.py`（QQ 上传）、`checkin_mixin.py`（签到）、`bed_audit_mixin.py`
+（图床反向收录检查的启动补全/状态/指令）、`random_media.py`（随机图）。
 其余模块都是可独立测试的纯逻辑或窄客户端：
 
 - `features.py`（pHash/dHash/aHash）、`hash_index.py`、`library.py`：
@@ -108,8 +110,11 @@ graph TD
   （向量化）+ `qdrant_client.py`（检索、反查、登记）+ `vector_errors.py`：
   向量引擎按职责拆分，三者共用一个 `VectorEngine` 实例。
 - `image_bed.py`（门面/重试/降级）+ `storage_local.py`（本地与通用 HTTP）
-  + `storage_cfb.py`（CloudFlare-ImgBed）+ `storage_object.py`（R2/OCI）
-  + `storage_utils.py`（纯函数）：图床与对象存储按后端拆分。
+  + `storage_cfb.py`（CloudFlare-ImgBed，含 `/api/manage/list` 枚举）
+  + `storage_object.py`（R2/OCI）+ `storage_utils.py`（纯函数与 `BedFile`）：
+  图床与对象存储按后端拆分。
+- `bed_audit.py`：图床反向巡检的纯逻辑（微博图片识别、文件名归一、Qdrant
+  payload 快照、按 pHash 补录）；只写 Qdrant/图库，不调用 `store()`。
 - `format_triage.py`：qq_official 假格式体检与转码改写。
 - `image_delivery.py`、`media_history.py`：投递纯函数与会话级历史。
 - `checkin_card.py`、`checkin_store.py`、`weibo_posts.py`：签到。
@@ -130,12 +135,13 @@ sequenceDiagram
     M->>V: _pace() 限速 + 游客身份
     V-->>M: 时间线 JSON
     M->>M: 解析、建基线、增量判定
-    M->>P: 新帖进入推送队列
+    M->>M: 重点博主？seen 之后、过滤之前 collector_consider
+    M->>P: 新帖进入推送队列（skip_push 且已采集则跳过）
     P-->>P: 渲染模板、@全体闸门、取消/重试
-    M->>A: 命中即增量归档
+    M->>A: 命中即增量归档（collector 命中时不重复归档）
     A->>DB: 写 posts / media 六态
     A->>A: 原图旁路下载（可在面板暂停/续跑）
-    A->>PL: pipeline.auto_queue 时入队
+    A->>PL: pipeline.auto_queue 时入队（collector 账号绕过 enabled_uids）
     PL->>PL: 原图上传 → 720px 缩略图 → pHash/向量入库
     PL->>DB: 回写六态进度
 ```
@@ -144,6 +150,14 @@ sequenceDiagram
 
 - **归档是旁路，永远不能反压推送。** 归档下载队列满时丢弃并在面板计数，
   绝不阻塞监控主链。
+- **重点博主采集也走旁路，但绕开推送过滤。** `collector_consider` 在 seen
+  标记之后、时效/关键词/转发过滤之前执行，只改变命中账号的归档时机；
+  它先强制补一次配图详情，再按原创规则复核，失败只 warning，不阻断原推送链。
+  `collector.skip_push=true` 时，只有**采集成功**的帖子才会跳过推送，避免丢消息。
+- **采集不复制管线。** 它只调用 `archive_post(source="collector")`，图床上传、
+  720×72 缩略图、pHash/向量仍由 `pipeline.py` 既有流程完成；`pipeline_notify_archived`
+  对 collector 账号绕过 `pipeline.enabled_uids`，但仍受 `pipeline.enabled` 与
+  `auto_queue` 约束。
 - **推送与已读解耦。** 只有真正投递成功的 post id 才 `mark_seen`；`_deliver`
   返回 `delivered` 列表，调用方据此标记，避免"推失败也当已读"。
 - **归档是原图唯一按需下载方。** 下游读本地副本，失败时按设计回退远端 URL。

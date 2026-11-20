@@ -214,6 +214,7 @@ def test_registered_routes_cover_all_tabs(monkeypatch):
         "pipeline/status",
         "pipeline/retry",
         "pipeline/naming",
+        "collector/status",
         "copylib/overview",
         "copylib/list",
         "copylib/import",
@@ -230,8 +231,8 @@ def test_registered_routes_cover_all_tabs(monkeypatch):
         "settings",
         "settings/save",
     } <= paths
-    # 原 35 条保持不变，新增设置页 2 条，合计 37 条。
-    assert len(Plugin.context.routes) == 37
+    # 原 35 条保持不变，新增设置页 2 条与采集状态 1 条，合计 38 条。
+    assert len(Plugin.context.routes) == 38
 
 
 def test_dashboard_markup_has_all_tabs_and_actions():
@@ -259,6 +260,7 @@ def test_dashboard_markup_has_all_tabs_and_actions():
         "pipeline/status",
         "pipeline/retry",
         "pipeline/naming",
+        "collector/status",
         "copylib/overview",
         "copylib/list",
         "copylib/import",
@@ -275,8 +277,28 @@ def test_dashboard_markup_has_all_tabs_and_actions():
     ):
         assert endpoint in js
     assert "AstrBotPluginView" in js
+    assert 'id="collector-card"' in html
+    assert "function renderCollector(" in js
+    assert "function loadCollector(" in js
+    assert 'ids.has("collector-card")' in js
     assert '[data-theme="dark"]' in css
     assert ".tab-panel.active" in css
+
+
+async def test_collector_status_falls_back_and_wraps(api, monkeypatch):
+    """旧版插件没有 collector_status 时不能 500；有方法时统一包在 status 里。"""
+    missing = await api.collector_status()
+    assert missing.status_code == 200
+    assert missing.payload["available"] is False
+    assert missing.payload["status"]["accounts"] == []
+
+    api.p.collector_status = lambda: {
+        "enabled": True,
+        "accounts": [{"uid": "1001", "account": "博主A"}],
+    }
+    wrapped = await api.collector_status()
+    assert wrapped.payload["available"] is True
+    assert wrapped.payload["status"]["accounts"][0]["uid"] == "1001"
 
 
 async def test_archive_overview_and_list(api):

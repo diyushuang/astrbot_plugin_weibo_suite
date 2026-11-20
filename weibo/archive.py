@@ -350,7 +350,12 @@ class ArchiveMixin:
             notify = getattr(self, "pipeline_notify_archived", None)
             if callable(notify):
                 try:
-                    notify(mid)
+                    try:
+                        # 新版签名带 post：collector 判定不需要再读一次 DB；
+                        # 单测桩/旧实现只收 mid，回退到老调用。
+                        notify(mid, post)
+                    except TypeError:
+                        notify(mid)
                 except Exception as e:  # 管线入队失败绝不能反过来让归档失败
                     logger.warning(f"图床管线入队失败（mid={mid}）: {e}")
             return True, queued

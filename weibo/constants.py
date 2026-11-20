@@ -7,7 +7,7 @@ from datetime import timedelta, timezone
 from urllib.parse import quote
 
 PLUGIN_NAME = "astrbot_plugin_weibo_suite"
-PLUGIN_VERSION = "v0.9.5"
+PLUGIN_VERSION = "v0.11.0"
 
 WEIBO_HOME_URL = "https://m.weibo.cn/"
 WEIBO_INDEX_URL = "https://m.weibo.cn/api/container/getIndex"
@@ -304,6 +304,7 @@ USAGE = (
     "微博归档查询 [uid] [页码] - 查看归档微博（每页 10 条）\n"
     "微博对账 [uid] - 核对归档完整性（管理员）\n"
     "微博管线状态 - 查看图床/向量管线的队列与六态进度\n"
+    "微博采集状态 - 查看重点博主的采集计数、监控状态、依赖与随机图目录\n"
     "微博管线补跑 - 把归档库里没跑完图床/向量的帖子重新入队（管理员）\n"
     "微博文案库 [uid] - 查看文案库清洗进度与账号分布\n"
     "微博文案列表 [uid] [关键词] - 查看文案（默认最近 10 条）\n"

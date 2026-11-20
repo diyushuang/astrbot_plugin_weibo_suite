@@ -18,6 +18,7 @@ from astrbot_plugin_weibo_suite.weibo.pipeline_naming import (
     THUMBNAIL_FOLDER,
     NamingContext,
     category_map,
+    date_label,
     naming_templates,
     normalize_relative_dir,
     render_directory,
@@ -304,3 +305,12 @@ def test_normalize_relative_dir_rules():
     assert normalize_relative_dir("../..") == ""
     assert normalize_relative_dir("  a / b  ") == "a/b"
     assert normalize_relative_dir(None) == ""
+
+
+def test_date_label_uses_china_timezone():
+    """命名日期必须按东八区：服务器 UTC 时跨零点不能落到前一天。"""
+    import datetime as dt
+
+    ts = dt.datetime(2025, 12, 31, 16, 30, tzinfo=dt.timezone.utc).timestamp()
+    assert date_label(ts) == "2026-01-01"
+    assert len(date_label("bad")) == 10

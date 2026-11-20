@@ -695,6 +695,7 @@ class ArchiveStore:
             rows = connection.execute(
                 "SELECT p.mid AS mid, p.uid AS uid, p.author AS author,"
                 " p.created_at AS created_at, p.pic_total AS pic_total,"
+                " p.is_retweet AS is_retweet, p.raw_json AS raw_json,"
                 " COUNT(m.pid) AS media_total,"
                 f" {done_expr}"
                 " AS media_done"
@@ -913,9 +914,15 @@ class ArchiveStore:
     # ------------------------------------------------------------------
 
     def upsert_media(self, mid: str, items: Sequence[Mapping[str, Any]]) -> int:
-        """写入帖子下的图片行；冲突时只补 url/alt_url/ext/kind，返回新增条数。"""
+        """写入帖子下的图片行；冲突时只补 url/alt_url/ext/kind，返回新增条数。
+
+        ``url`` 一旦已被图床管线写成永久直链（state_rank >= bed）就不再被源站
+        URL 覆盖：重复归档（回填重放、collector 二次入库）带的是会失效的微博
+        CDN 地址，覆盖会让 /随机图、签到卡片和下一次补跑全部退回临时地址。
+        """
         mid = str(mid)
         inserted = 0
+        url_guard_rank = _MEDIA_STATE_RANK.get("bed", 3)
         with self._lock:
             connection = self._connection()
             if connection is None:
@@ -963,13 +970,14 @@ class ArchiveStore:
                 else:
                     connection.execute(
                         "UPDATE media SET"
-                        " url = CASE WHEN ? <> '' THEN ? ELSE url END,"
+                        " url = CASE WHEN ? <> '' AND state_rank < ? THEN ? ELSE url END,"
                         " alt_url = CASE WHEN ? <> '' THEN ? ELSE alt_url END,"
                         " ext = CASE WHEN ? <> '' THEN ? ELSE ext END,"
                         " kind = CASE WHEN ? <> '' THEN ? ELSE kind END"
                         " WHERE mid = ? AND pid = ?",
                         (
                             url,
+                            url_guard_rank,
                             url,
                             alt_url,
                             alt_url,
@@ -1047,8 +1055,8 @@ class ArchiveStore:
     ) -> None:
         """推进媒体状态；rank 只前进不后退，状态推进时写对应时间戳列。
 
-        ``image_url`` 只用于「复用图库里已有的图」时回填直链：空串视为未提供，
-        不会把行上已有的 URL 覆盖成空。
+        ``image_url`` 是这张图的永久直链（图床上传成功后的 url，或复用图库时
+        回填的 url）：空串视为未提供，不会把行上已有的 URL 覆盖成空。
         """
         if state not in _MEDIA_STATE_RANK:
             raise ValueError(f"非法的媒体状态: {state}")

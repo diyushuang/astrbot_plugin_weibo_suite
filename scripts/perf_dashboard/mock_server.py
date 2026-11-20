@@ -191,7 +191,7 @@ def build_overview() -> dict:
         )
     activity.reverse()
     return {
-        "version": "v0.9.5",
+        "version": "v0.10.0",
         "status": {
             "poll_running": True,
             "checking": False,
@@ -430,7 +430,7 @@ def build_settings() -> dict:
                 if field["key"] in values:
                     values[field["key"]] = field.get("default")
     return {
-        "version": "v0.9.5",
+        "version": "v0.10.0",
         "generated_ts": NOW,
         "counts": CATALOG["counts"],
         "pages": pages,

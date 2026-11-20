@@ -26,7 +26,11 @@
 - **整条微博归档**：监控命中即增量归档，支持全量回填、断点续跑、风控自动暂停；
   SQLite 账本记录帖子与媒体六态，原图按需下载。
 - **图床与向量管线**：原图上传 → 缩略图 → pHash/向量入库一条链路，支持
-  CloudFlare-ImgBed、通用 HTTP 图床与 R2/OCI 兼容对象存储。
+  CloudFlare-ImgBed、通用 HTTP 图床与 R2/OCI 兼容对象存储。首次启动会反向
+  枚举图床里已有的微博图，按文件名与图片 pHash 双核实后补进索引，不重复上传。
+- **重点博主采集**：指定的重点博主（如艺人本人与工作室）发原创带图微博时，
+  绕过推送关键词与时效过滤直接归档，按图床既有目录/文件名规则上传并建向量；
+  可用 `/随机图 <目录>` 或 `/固定图 <文件名>` 取用。
 - **图片溯源与签到**：pHash + 向量双引擎找原图，签到卡片文案直接读归档正文。
 - **多平台订阅**：三条取数通道（浏览器 / Cookie HTTP / RSS），风控友好调度，
   保号优先。
@@ -57,6 +61,14 @@ pip install -r requirements.txt
 2. 在目标群里执行 `微博 绑定`，把这个群设为推送目标；
 3. 确认 `monitor.poll_interval`（默认 120 秒）没有低到会被微博限流。
 
+要启用「重点博主带图原创采集」，再打开 `collector.enabled`，把博主按
+`uid|别名|分类目录` 逐行填进 `collector.accounts`（例如
+`2106192855|赵今麦|12、日常分享`），并确保 `archive.enabled` 与
+`pipeline.enabled` 已开启。`collector.skip_push=true` 可只收图、不推送。
+赵今麦工作室的 uid 是 `6670517617`，第二行按同样的分类目录填写即可；分类目录
+请改成你图床里实际使用的名称。两个 uid 都要同时加入 `monitor.monitored_uids`
+（或先 `微博 添加`），采集才会看到他们的新微博。
+
 归档、图床管线、多平台订阅默认是关闭或保守的，按需打开。全部配置项见
 [配置手册](docs/CONFIGURATION.md)。
 
@@ -65,7 +77,7 @@ pip install -r requirements.txt
 ### 微博监控转发
 
 免 Cookie 的游客身份轮询、推送队列（含取消与重试）、@全体闸门、视频直发、
-群相册（含实况图转 GIF 与 pid 级去重）。指令入口是 `微博` 分组，共 30 条，
+群相册（含实况图转 GIF 与 pid 级去重）。指令入口是 `微博` 分组，共 32 条，
 全部列在[指令手册](docs/COMMANDS.md)。
 
 ### 整条微博归档
@@ -87,6 +99,14 @@ pip install -r requirements.txt
 图床支持 CloudFlare-ImgBed、通用 HTTP 图床、R2/OCI 兼容对象存储；图床上传的
 鉴权码默认走 `authCode` 请求头（不进 URL），老站点只认 `?authCode=` 时会自动
 回落一次并告警。R2/OCI 大文件上传走流式摘要，不再把整个文件读进内存。
+
+**反向收录检查**：首次启动（或图床/Qdrant 配置变化）会自动枚举图床里已有的
+微博图，先按文件名比对 Qdrant 的 `file_name` 与直链，文件名没命中才下载算
+pHash，再按内容查 Qdrant 与本地图库；两边都没命中才补登记。补录只写索引，
+**不会再次上传图床**，同图异名/一次扫描内的同一 pHash 只留一条。自动枚举
+目前覆盖 `cloudflare_imgbed`（`GET /api/manage/list` 分页）与 `local`（遍历
+`local_dir`）；R2/OCI 与 generic_http 没有可用列表接口，会明确报「无法枚举」。
+手动复查用 `微博 图床检查`，`dry` 只查不写。
 
 OCI 的 S3 兼容端点默认用新域
 `https://<namespace>.compat.objectstorage.<region>.oci.customer-oci.com`；
@@ -143,9 +163,9 @@ DCT 归一化实现与 `imagehash` 库并不完全等价，阈值尚未与该库
 
 | 文档 | 内容 |
 | --- | --- |
-| [指令手册](docs/COMMANDS.md) | 53 条指令的别名、权限、参数与示例 |
-| [配置手册](docs/CONFIGURATION.md) | 15 个配置分组、179 个配置键、敏感字段与旧布局迁移键 |
-| [面板说明](docs/WEBUI.md) | 八个页签、37 条面板路由、全量设置页、鉴权边界、常见问题 |
+| [指令手册](docs/COMMANDS.md) | 55 条指令的别名、权限、参数与示例 |
+| [配置手册](docs/CONFIGURATION.md) | 16 个配置分组、187 个配置键、敏感字段与旧布局迁移键 |
+| [面板说明](docs/WEBUI.md) | 八个页签、38 条面板路由、全量设置页、鉴权边界、常见问题 |
 | [架构说明](docs/ARCHITECTURE.md) | 分层与依赖方向、一条微博的完整路径、生命周期、存储布局、已知取舍 |
 | [安全策略](SECURITY.md) | 漏洞报告渠道、支持版本、设计上的安全边界 |
 | [更新日志](CHANGELOG.md) | 逐版本记录，按「症状 → 根因 → 修复」写 |
@@ -159,7 +179,7 @@ DCT 归一化实现与 `imagehash` 库并不完全等价，阈值尚未与该库
 ├── main.py                 # 唯一注册指令的入口（@filter 只出现在这里）
 ├── constants.py            # 跨域共享常量
 ├── metadata.yaml           # AstrBot 插件元数据
-├── _conf_schema.json       # 面板配置 schema（15 个分组）
+├── _conf_schema.json       # 面板配置 schema（16 个分组）
 ├── logo.png                # 插件市场图标（1:1）
 ├── requirements.txt
 ├── weibo/                  # 微博监控、归档、管线、文案清洗
@@ -170,7 +190,7 @@ DCT 归一化实现与 `imagehash` 库并不完全等价，阈值尚未与该库
 ├── views_backend/          # 面板 API 路由
 ├── data/                   # 随包分发的静态资源（emoji-props.json）
 ├── scripts/                # 发布包构建与黄金样本校验
-├── tests/                  # 1200+ 用例
+├── tests/                  # 1400+ 用例
 └── docs/                   # 指令 / 配置 / 面板 / 架构 / 计划
 ```
 

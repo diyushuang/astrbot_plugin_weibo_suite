@@ -185,11 +185,17 @@ class ApiMixin:
         覆盖外层微博与转发原微博两处，每条最多 2 次请求；任一获取失败安全回退
         摘要。已实测 /statuses/extend 游客身份可用（ok=1，data.longTextContent
         为含 HTML 的全文）。
+
+        `text_full` 是归档补全留下的完成标记：collector 先归档再走推送时，
+        这里不再对同一帖重复拉一次全文。
         """
+        if post.get("text_full"):
+            return
         if post["id"] and post.get("is_long"):
             full = await self._fetch_long_text(post["id"])
             if full:
                 post["text"] = full
+                post["text_full"] = 1
         if post["is_retweet"] and post.get("orig_id") and post.get("orig_is_long"):
             full = await self._fetch_long_text(str(post["orig_id"]))
             if full:
@@ -288,7 +294,7 @@ class ApiMixin:
         detail = data.get("data")
         return detail if isinstance(detail, dict) else None
 
-    async def _ensure_full_pics(self, post: dict[str, Any]) -> None:
+    async def _ensure_full_pics(self, post: dict[str, Any], *, force: bool = False) -> None:
         """超 9 图微博的识别补全：时间线卡片的 pics 不齐时补拉详情核对。
 
         线上出现过 18 图微博只识别到 9 张：时间线卡片对超 9 图帖的 pics
@@ -312,20 +318,32 @@ class ApiMixin:
           识别的继续，图片补全不反过来挡推送；
         - 拉到的详情挂到 post["_show_detail"]，_apply_video 的兜底详情
           直接复用它，同一帖不花第二次请求（条目入队时该字段被丢弃）。
+
+        force=True 供 collector 使用：即使推送侧的消息带图/相册上传都关着，
+        重点博主也必须补全图集；`_pics_full_checked` 保证 collector 与推送
+        两条路径同一帖只补一次（失败不置位，留给下一轮重试）。
         """
-        if not (
+        if post.get("_pics_full_checked"):
+            return
+        if not force and not (
             bool(self.config.get("message_with_images", True))
             or bool(self.config.get("album_enabled", True))
         ):
             return
         total = int(post.get("pic_total") or 0)
         have = post.get("pics") or []
-        # pic_num 不可知时按"卡片只带前 9 张"的截断形态兜底核对一次
+        # pic_num 不可知时按"卡片只带前 9 张"的截断形态兜底核对一次；
+        # collector 的 force 路径还要覆盖「卡片一张图都没带、pic_num 也为 0」
+        # 的形态——此时不拉详情就永远判不出到底有没有图。
         need = total > len(have) if total > 0 else len(have) == 9
+        if force and (not have or total <= 0):
+            need = True
         if not need:
+            post["_pics_full_checked"] = True
             return
         pid = str(post.get("id") or "")
         if not pid:
+            post["_pics_full_checked"] = True
             return
         detail = await self._fetch_status_detail(pid, "完整图片")
         if detail is None:
@@ -337,6 +355,7 @@ class ApiMixin:
             )
             return
         post["_show_detail"] = detail
+        post["_pics_full_checked"] = True
         rt = detail.get("retweeted_status")
         full = _extract_pics(detail, rt if isinstance(rt, dict) else None)
         merged = list(have)

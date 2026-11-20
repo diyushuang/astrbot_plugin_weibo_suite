@@ -12,6 +12,7 @@ from .album import AlbumMixin
 from .api import ApiMixin
 from .archive import ArchiveMixin
 from .archive_db import ArchiveStore
+from .collector import CollectorMixin
 from .commands import CommandsMixin
 from .copylib import CopylibMixin
 from .monitor import MonitorMixin
@@ -187,6 +188,7 @@ class WeiboMonitorPlugin(
     VisitorMixin,
     ApiMixin,
     MonitorMixin,
+    CollectorMixin,
     PusherMixin,
     AlbumMixin,
     ArchiveMixin,

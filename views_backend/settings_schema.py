@@ -1,4 +1,4 @@
-"""设置页目录：把 `_conf_schema.json` 的 15 个可见分组映射到主题页。
+"""设置页目录：把 `_conf_schema.json` 的 16 个可见分组映射到主题页。
 
 设计约束：
 
@@ -22,7 +22,7 @@ from typing import Any
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = PLUGIN_ROOT / "_conf_schema.json"
 
-# 主题页：同组配置不跨页，跨页不重复。15 个可见分组全部落在前 5 页，第 6 页
+# 主题页：同组配置不跨页，跨页不重复。16 个可见分组全部落在前 5 页，第 6 页
 # 只放版本/覆盖/安全说明，不含配置键。
 PAGES: tuple[dict[str, Any], ...] = (
     {
@@ -34,8 +34,8 @@ PAGES: tuple[dict[str, Any], ...] = (
     {
         "id": "archive-pipeline",
         "title": "归档与管线",
-        "summary": "归档账本、全量回填、图床向量管线与文案库的自动清洗。",
-        "groups": ("archive", "pipeline", "copylib"),
+        "summary": "归档账本、全量回填、图床向量管线、重点博主采集与文案库的自动清洗。",
+        "groups": ("archive", "pipeline", "collector", "copylib"),
     },
     {
         "id": "storage",
@@ -95,6 +95,11 @@ GROUP_META: dict[str, dict[str, str]] = {
         "summary": "归档后自动上传、缩略图规格、命名模板与失败重试。",
         "accent": "amber",
     },
+    "collector": {
+        "title": "重点博主采集",
+        "summary": "原创带图即归档，不受推送关键词与时效过滤影响。",
+        "accent": "amber",
+    },
     "copylib": {
         "title": "文案库",
         "summary": "归档正文是否自动进入文案清洗流程。",
@@ -122,7 +127,7 @@ GROUP_META: dict[str, dict[str, str]] = {
     },
     "limits": {
         "title": "限制与缓存",
-        "summary": "单图下载上限、图床哈希索引与缓存刷新。",
+        "summary": "单图下载上限、图床哈希索引、首次启动反向收录与缓存刷新。",
         "accent": "teal",
     },
     "random_media": {
@@ -243,6 +248,13 @@ FIELD_META: dict[str, dict[str, Any]] = {
     "pipeline.max_attempts": _f("单张最大尝试", unit="次", min=1, max=10, step=1),
     "pipeline.thumb_size": _f("缩略图长边", unit="像素", min=64, max=2048, step=8),
     "pipeline.thumb_quality": _f("缩略图质量", unit="%", min=1, max=100, step=1),
+    # ---------------- collector ----------------
+    "collector.enabled": _f("启用重点博主采集", danger=True),
+    "collector.accounts": _f("重点博主列表", placeholder="uid|别名|分类目录"),
+    "collector.include_retweets": _f("连转发一起采集"),
+    "collector.allow_retweet_from_uids": _f("转发例外原作者"),
+    "collector.min_images": _f("最少配图数", unit="张", min=1, max=9, step=1),
+    "collector.skip_push": _f("只收图不推送"),
     # ---------------- copylib ----------------
     "copylib.auto_clean": _f("归档后自动清洗"),
     # ---------------- basic ----------------
@@ -344,6 +356,10 @@ FIELD_META: dict[str, dict[str, Any]] = {
     ),
     "limits.remote_hash_max_points": _f(
         "哈希拉取上限", unit="点", min=0, max=1000000, step=100, advanced=True
+    ),
+    "limits.bed_audit_on_start": _f("首次启动图床补录"),
+    "limits.bed_audit_max_files": _f(
+        "图床扫描上限", unit="个", min=0, max=1000000, step=100, advanced=True
     ),
     # ---------------- sns ----------------
     "sns.enabled": _f("启用多平台订阅", danger=True),
@@ -470,10 +486,10 @@ def load_schema(path: Path | None = None) -> dict[str, Any]:
 
 
 def visible_schema_groups(schema: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
-    """返回 15 个可见分组（object 且有 items，且没有 invisible 标记）。
+    """返回 16 个可见分组（object 且有 items，且没有 invisible 标记）。
 
     旧布局的顶层镜像键是标量或 dict，不在此列；`invisible` 的隐藏镜像也不在
-    此列。这样设置页只处理真正面向用户的 179 个分组键。
+    此列。这样设置页只处理真正面向用户的 187 个分组键。
     """
     data = schema if schema is not None else load_schema()
     groups = {

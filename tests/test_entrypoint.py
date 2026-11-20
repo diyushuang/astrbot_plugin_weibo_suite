@@ -125,6 +125,42 @@ def _sns_subcommand(node: ast.AST) -> str | None:
     return None
 
 
+def test_collector_status_and_fixed_image_entrypoints_registered():
+    """采集状态、/固定图 别名与按名取图的 LLM 工具都必须落在入口模块。"""
+    body = _plugin_class_body()
+    methods = {node.name: node for node in body if isinstance(node, ast.AsyncFunctionDef)}
+
+    collector = methods.get("weibo_collector_status")
+    assert collector is not None, "缺少 微博 采集状态 入口"
+    decorators = _decorator_names(collector)
+    assert any("采集状态" in text for text in decorators), decorators
+
+    original = methods.get("original_image")
+    assert original is not None, "缺少 /原图 入口"
+    decorators = _decorator_names(original)
+    assert any("固定图" in text and "alias" in text for text in decorators), decorators
+
+    fixed = methods.get("send_image_by_name")
+    assert fixed is not None, "缺少 sendImageByName 工具"
+    decorators = _decorator_names(fixed)
+    assert any("sendImageByName" in text for text in decorators), decorators
+    args = [arg.arg for arg in fixed.args.args]
+    assert "event" in args and "name" in args, args
+
+
+def test_bed_audit_entrypoint_registered_as_admin():
+    """图床反向补录会写向量/图库，入口必须在 main.py 且挂管理员门。"""
+    body = _plugin_class_body()
+    methods = {node.name: node for node in body if isinstance(node, ast.AsyncFunctionDef)}
+    handler = methods.get("weibo_bed_audit")
+    assert handler is not None, "缺少 微博 图床检查 入口"
+    decorators = " ".join(_decorator_names(handler))
+    assert "图床检查" in decorators, decorators
+    assert "PermissionType.ADMIN" in decorators, decorators
+    forwards = [ast.unparse(n.iter) for n in ast.walk(handler) if isinstance(n, ast.AsyncFor)]
+    assert any("bed_audit" in text for text in forwards), forwards
+
+
 def test_sns_command_group_is_declared_in_entry_module():
     """`订阅` 指令组必须完整出现在 main.py，且与聊天帮助里列出的子指令一致。"""
     body = _plugin_class_body()

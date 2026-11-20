@@ -328,6 +328,45 @@
       }
     }
   },
+  "collector": {
+    "type": "object",
+    "description": "重点博主图集采集",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "default": false,
+        "description": "启用重点博主采集（默认关闭）"
+      },
+      "accounts": {
+        "type": "list",
+        "default": [],
+        "description": "重点博主列表（每行 uid|别名|分类目录）",
+        "hint": "例：2106192855|赵今麦|12、日常分享。别名用于 {account} 占位符，可对齐图床既有目录；分类留空则回落 pipeline.categories。"
+      },
+      "include_retweets": {
+        "type": "bool",
+        "default": false,
+        "description": "连转发帖一起采集（默认只收原创）"
+      },
+      "allow_retweet_from_uids": {
+        "type": "list",
+        "default": [],
+        "description": "这些原作者的转发仍采集（每行一个 uid 或昵称）",
+        "hint": "用于「工作室转发本人」：填 2106192855 即可只放行转发赵今麦的帖子。"
+      },
+      "min_images": {
+        "type": "int",
+        "default": 1,
+        "description": "至少几张配图才采集",
+        "hint": "范围 1–9；低于该数量的帖子不会归档进图床。"
+      },
+      "skip_push": {
+        "type": "bool",
+        "default": false,
+        "description": "只收图、不推送这些博主的帖子"
+      }
+    }
+  },
   "copylib": {
     "type": "object",
     "description": "签到文案库",
@@ -1152,6 +1191,19 @@
         "type": "int",
         "default": 0,
         "hint": "0=不限；调试时设小值（如 50）先验证链路。",
+        "collapsed": true
+      },
+      "bed_audit_on_start": {
+        "description": "【选填】首次启动补录图床未收录图片",
+        "type": "bool",
+        "default": true,
+        "hint": "首次加载或图床/Qdrant 配置变化后，后台枚举图床里的微博图片，按文件名与 pHash 双核实后补进向量库；只登记已有图片，不会重复上传图床。"
+      },
+      "bed_audit_max_files": {
+        "description": "【选填】单次图床扫描上限",
+        "type": "int",
+        "default": 0,
+        "hint": "0=不限；调试时可设小值（如 200）先验证列表鉴权与补录链路。",
         "collapsed": true
       }
     }

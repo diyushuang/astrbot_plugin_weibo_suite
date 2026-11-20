@@ -151,6 +151,16 @@ async def test_original_image_strips_imgbed_processing_params(make_plugin, imgbe
     assert url == f"{imgbed.base_url}/file/x.jpg"
 
 
+async def test_fixed_image_alias_uses_same_original_lookup(make_plugin, imgbed, make_event):
+    """`/固定图` 是 `/原图` 的别名：参数剥离与直链还原必须完全一致。"""
+    plugin = make_plugin(random_media={"base_url": imgbed.base_url})
+
+    results = await _collect(plugin.original_image(make_event("/固定图 x.jpg", origin="fresh")))
+
+    assert results[0].kind == "chain"
+    assert image_ref(_chain_images(results[0])[0]) == f"{imgbed.base_url}/file/x.jpg"
+
+
 async def test_original_image_reports_missing_name_on_bed(
     make_plugin, imgbed, make_event, monkeypatch
 ):

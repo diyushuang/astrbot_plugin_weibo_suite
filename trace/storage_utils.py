@@ -37,6 +37,32 @@ class StoreResult:
     message: str = ""
 
 
+@dataclass(frozen=True)
+class BedFile:
+    """图床内一个可枚举的文件。
+
+    `name` 是床内相对路径（可能含目录），`file_name` 是展示/入库用的文件名。
+    `local_path` 只在 local 模式有值；其它后端为空，需要按 `url` 下载。
+    """
+
+    name: str
+    file_name: str
+    url: str = ""
+    directory: str = ""
+    size: int = 0
+    timestamp: int = 0
+    file_id: str = ""
+    local_path: str = ""
+
+
+class BedListUnsupported(NotImplementedError):
+    """当前图床模式没有可用的文件枚举接口。
+
+    单独用异常类型而不是返回空列表：空列表会被上层误读成「图床里没有微博图」，
+    从而把「无法检查」静默写成「检查通过」。
+    """
+
+
 def extract_json_path(data: Any, path: str) -> Any:
     """按点号路径从嵌套 JSON 中取值，支持数组下标（如 data.links.0.url）。
 

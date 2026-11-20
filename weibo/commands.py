@@ -1,4 +1,4 @@
-"""「微博」23 条管理指令。"""
+"""「微博」分组指令实现（注册集中在 main.py）。"""
 
 from __future__ import annotations
 
@@ -726,6 +726,49 @@ class CommandsMixin:
         # 与心跳都被卡住。统计本身对一致性没有要求，丢进线程池即可。
         text = await asyncio.to_thread(self.format_pipeline_status)
         yield event.plain_result(text)
+
+    async def weibo_collector_status(self, event: AstrMessageEvent):
+        """查看重点博主采集的账号、计数、依赖与随机图目录"""
+        # collector_status 里有 count_posts/media_stats 两次 sqlite 查询，同样
+        # 放线程池，避免账号多时卡住事件循环。
+        status = await asyncio.to_thread(self.collector_status)
+        lines = ["重点博主采集："]
+        if not status.get("configured"):
+            lines.append("状态：未启用（collector.enabled=false）")
+        elif not status.get("enabled"):
+            lines.append("状态：已开启但没有配置账号（collector.accounts 为空）")
+        else:
+            lines.append(
+                "状态：已启用"
+                + ("（只收图，不推送）" if status.get("skip_push") else "")
+                + f"，最少 {status.get('min_images', 1)} 张图"
+            )
+        for item in status.get("accounts") or []:
+            states = item.get("states") or {}
+            lines.append(
+                f"- {item.get('account')}（{item.get('uid')}）｜分类 {item.get('category')}"
+                f"｜帖子 {item.get('posts', 0)}｜图片 {item.get('images', 0)}"
+                f"（vector {states.get('vector', 0)}，失败 {item.get('failed', 0)}）"
+                + ("" if item.get("monitored") else "｜未加入监控")
+            )
+            lines.append(f"  随机图：{item.get('random_command')}")
+        deps = status.get("dependencies") or {}
+        missing = []
+        if not deps.get("archive"):
+            missing.append("archive.enabled")
+        if not deps.get("auto_archive"):
+            missing.append("archive.auto_archive")
+        if not deps.get("download_originals"):
+            missing.append("archive.download_originals")
+        if not deps.get("pipeline"):
+            missing.append("pipeline.enabled")
+        if not deps.get("pipeline_services"):
+            missing.append("图床/向量服务")
+        if missing:
+            lines.append("依赖缺口：" + "、".join(missing))
+        if status.get("last_error"):
+            lines.append(f"最近错误：{status['last_error']}")
+        yield event.plain_result("\n".join(lines))
 
     async def weibo_pipeline_backfill(self, event: AstrMessageEvent):
         """把归档库里没跑完图床/向量的帖子重新入队（管理员）"""

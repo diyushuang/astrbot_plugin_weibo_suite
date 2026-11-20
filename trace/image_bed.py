@@ -48,6 +48,7 @@ try:
         UPLOAD_RETRY_ATTEMPTS,
         UPLOAD_RETRY_BASE_DELAY,
         UPLOAD_TERMINAL_STATUS,
+        BedListUnsupported,
         StoreResult,
         _clean_folder,
         _host_port,
@@ -74,6 +75,7 @@ except ImportError:  # 兼容插件以独立模块方式加载
         UPLOAD_RETRY_ATTEMPTS,
         UPLOAD_RETRY_BASE_DELAY,
         UPLOAD_TERMINAL_STATUS,
+        BedListUnsupported,  # type: ignore[no-redef]
         StoreResult,
         _clean_folder,
         _host_port,
@@ -123,6 +125,22 @@ class ImageBedClient(
         self._degraded_since = 0.0
 
     # ---------- 对外接口 ----------
+
+    async def list_files(self, *, limit: int = 0) -> list:
+        """枚举图床文件（仅实现支持列表的两种模式）。
+
+        `limit=0` 表示不限。返回值是 `storage_utils.BedFile` 列表；不支持枚举
+        的后端抛 `BedListUnsupported`，让调用方把「查不了」和「没有文件」分开。
+        """
+        if self.mode == MODE_CFB:
+            return await self._list_cf(limit=limit)
+        if self.mode == MODE_LOCAL:
+            return await self._list_local(limit=limit)
+        raise BedListUnsupported(
+            f"图床模式 {self.mode!r} 不支持文件枚举："
+            "目前只支持 cloudflare_imgbed 与 local；"
+            "R2 / OCI 请改用 S3 控制台核对，generic_http 没有列表接口。"
+        )
 
     async def store(self, src_path: str, *, folder: str = "") -> StoreResult:
         """登记原图的落库：优先上传图床/对象存储，失败回退本地副本。

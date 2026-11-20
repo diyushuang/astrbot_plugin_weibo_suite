@@ -761,3 +761,19 @@ def test_list_media_bulk_issues_ceil_queries_at_default_chunk(store):
 
 def test_list_media_bulk_empty_input(store):
     assert store.list_media_bulk([]) == {}
+
+
+def test_upsert_media_does_not_overwrite_url_after_bed(store):
+    """图床已给出永久直链后，重复归档带来的源站 URL 不能再覆盖它。"""
+    store.upsert_post(make_post())
+    store.upsert_media("1001", [{"pid": "p1", "url": "https://wx.example/0.jpg"}])
+    store.mark_media("1001", "p1", "bed", image_url="https://cdn.example/final.jpg")
+
+    store.upsert_media(
+        "1001", [{"pid": "p1", "url": "https://wx.example/refreshed.jpg", "kind": "live"}]
+    )
+
+    row = store.get_media("1001", "p1")
+    assert row["url"] == "https://cdn.example/final.jpg"
+    assert row["kind"] == "live"
+    assert row["state"] == "bed"

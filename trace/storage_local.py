@@ -24,9 +24,9 @@ try:
         USER_AGENT,
     )
     from ..shared.http import read_limited_text
-    from .storage_utils import extract_json_path
+    from .storage_utils import BedFile, extract_json_path
 except ImportError:  # 兼容插件以独立模块方式加载
-    from storage_utils import extract_json_path  # type: ignore[no-redef]
+    from storage_utils import BedFile, extract_json_path  # type: ignore[no-redef]
 
     from astrbot_plugin_weibo_suite.shared.common import (  # type: ignore[no-redef]
         USER_AGENT,
@@ -38,6 +38,56 @@ except ImportError:  # 兼容插件以独立模块方式加载
 
 class LocalHttpBackendMixin:
     """依赖宿主 ImageBedClient 上的 local_dir / config / _http_getter。"""
+
+    async def _list_local(self, *, limit: int = 0) -> list:
+        """枚举本地模式图床目录。
+
+        本地副本没有公开直链，`url` 留空；巡检层只把它补进 pHash 图库，
+        不会写进 Qdrant（没有 `image_url` 的向量点命中后也发不出去）。
+        遍历放线程里，避免大目录的 os.walk 卡住事件循环。
+        """
+        return await asyncio.to_thread(self._list_local_sync, limit)
+
+    def _list_local_sync(self, limit: int = 0) -> list:
+        entries: list = []
+        root = os.path.abspath(self.local_dir)
+        for current, _subdirs, names in os.walk(root):
+            for name in names:
+                if os.path.splitext(name)[1].lower() not in {
+                    ".jpg",
+                    ".jpeg",
+                    ".png",
+                    ".webp",
+                    ".gif",
+                    ".heic",
+                    ".heif",
+                    ".bmp",
+                    ".tif",
+                    ".tiff",
+                }:
+                    continue
+                path = os.path.join(current, name)
+                rel = os.path.relpath(path, root).replace("\\", "/")
+                directory = os.path.dirname(rel)
+                if directory:
+                    directory += "/"
+                try:
+                    size = os.path.getsize(path)
+                except OSError:
+                    size = 0
+                entries.append(
+                    BedFile(
+                        name=rel,
+                        file_name=name,
+                        directory=directory,
+                        size=size,
+                        file_id=rel,
+                        local_path=path,
+                    )
+                )
+                if limit > 0 and len(entries) >= limit:
+                    return entries
+        return entries
 
     async def _copy_local(self, src_path: str, folder: str = "") -> str:
         ext = os.path.splitext(src_path)[1].lower() or ".jpg"

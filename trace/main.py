@@ -1,7 +1,7 @@
 """AstrBot 图片溯源插件（门面模块）。
 
 业务实现按职责拆在 state/resolve/delivery/trace/library/original/checkin/qq_upload
-八个 mixin 中；本模块只保留常量再导出、插件类组装、初始化与生命周期，
+/bed_audit 九个 mixin 中；本模块只保留常量再导出、插件类组装、初始化与生命周期，
 对外符号与拆分前完全一致。
 
 群内发送或引用图片 + 触发指令 -> 提取图片 -> 按当前引擎检索原图并回传：
@@ -79,6 +79,7 @@ except ImportError:  # 兼容插件以独立模块方式加载
     )
 
 try:
+    from .bed_audit_mixin import BedAuditMixin
     from .checkin_mixin import CheckinMixin
     from .constants import (
         _FORCE_TOKENS,
@@ -102,6 +103,7 @@ try:
     from .state_mixin import StateMixin
     from .trace_mixin import TraceMixin
 except ImportError:  # 兼容插件以独立模块方式加载
+    from bed_audit_mixin import BedAuditMixin  # type: ignore[no-redef]
     from checkin_mixin import CheckinMixin  # type: ignore[no-redef]
     from delivery_mixin import DeliveryMixin  # type: ignore[no-redef]
     from library_mixin import LibraryMixin  # type: ignore[no-redef]
@@ -136,6 +138,7 @@ class ImageTracePlugin(
     OriginalMixin,
     CheckinMixin,
     QQUploadMixin,
+    BedAuditMixin,
     Star,
 ):
     """图片溯源插件主类。"""
@@ -182,6 +185,9 @@ class ImageTracePlugin(
         # 设置页保存后重建上述快照时串行化，避免两次保存并发替换到一半
         self._reinit_lock = asyncio.Lock()
         self._remote_hash_task: asyncio.Task | None = None
+        # 图床反向收录巡检：首次启动在后台补一次；锁防止手动命令与启动任务叠加
+        self._bed_audit_lock = asyncio.Lock()
+        self._bed_audit_task: asyncio.Task | None = None
         # 刷新失败/空结果的退避截止时间：否则每次 /溯源 都会重翻全量 Qdrant
         self._remote_hash_backoff_until = 0.0
         # 回传过的原图直链的历史（供 /原图 找回）；随机图客户端惰性构造
@@ -341,6 +347,7 @@ class ImageTracePlugin(
         # 而它要取的直链可能是历史里记下的内网地址
         self._random_settings()
         self._maybe_start_remote_hash_refresh()
+        self._maybe_start_bed_audit()
 
     async def terminate(self):
         errors: list[str] = []
@@ -348,6 +355,7 @@ class ImageTracePlugin(
         self._allowed_private_hosts.clear()
         remove_error_log(self)
         await self._stop_remote_hash_refresh(errors)
+        await self._stop_bed_audit(errors)
         if self._http is not None:
             try:
                 await self._http.close()

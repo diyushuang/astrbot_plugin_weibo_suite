@@ -1,6 +1,76 @@
 # 更新日志
 
-## Unreleased
+## v0.11.0 - 2026-11-20
+
+### 图床反向收录检查
+
+- **图床里已有、向量库没收录的微博图会被补回来**：新增图床反向巡检
+  （`trace/bed_audit.py` / `trace/bed_audit_mixin.py`），首次启动或图床/
+  Qdrant 配置变化后，后台枚举图床文件；只处理文件名带 `【微博@...】` 或
+  目录带 `【微博图集@...】` 的图片，`thumbnails/` 明确排除。
+- **文件名 + 图片内容双核实**：先归一 ` (1)` 撞名后缀，比对 Qdrant 的
+  `file_name` 与直链 basename；文件名没命中才下载图片算 pHash，再查 Qdrant
+  与本地图库。只有两边都没命中才补登记，同图异名不会产生第二条。
+- **绝不让图床重复收录**：补录只调用 `upsert_file_batch` 与
+  `library.add_if_absent`，不调用 `ImageBedClient.store()`；同一 pHash 在
+  一次扫描内只登记一条，重复图床文件直接跳过。
+- **CloudFlare-ImgBed 列表**：`ImageBedClient.list_files()` 支持
+  `cloudflare_imgbed` 的 `GET /api/manage/list` 分页（`start` / `count` /
+  `recursive`），鉴权沿用 Bearer Token / `authCode` 请求头，401/403 时只对
+  旧站点回落一次 `?authCode=`；`local` 模式走目录遍历。R2/OCI 与
+  generic_http 明确返回「不支持枚举」，不会把查不了写成检查通过。
+- **首次启动只补一次**：`limits.bed_audit_on_start` 默认开启；状态落在
+  数据目录 `bed_audit.json`，按图床/Qdrant 签名判断是否首次。失败退避
+  1 小时后重试，插件卸载/重载会取消后台任务。
+- 新增 `微博 图床检查`（别名 `收录检查` / `图床补录`，管理员），默认检查
+  并补录，`dry` 只查不写，数字参数限制单次枚举量。
+- 新增配置键 `limits.bed_audit_on_start`、`limits.bed_audit_max_files`；
+  设置页、`docs/SETTINGS_MAP.md`、README 与配置手册计数同步到 187 键。
+
+### 全量审查修复
+
+- **图床巡检不再漏删临时文件**：`BedAuditService._inspect` 在「退化 pHash」
+  「按内容判重」「本地图库命中」三个提前返回分支没有清理已下载的临时文件，
+  一轮扫描会在临时目录留下成百上千个副本；改为 `finally` 统一按 `keep_tmp`
+  清理，取消/异常路径一并覆盖。
+- **原图直链随 `bed` 状态落库**：原图上传成功时把图床永久 URL 写进媒体行，
+  缩略图/向量失败补跑不再把微博源站 CDN 地址当成最终直链写进 Qdrant，
+  也不会因为 `existing_url` 非空而误判「原图已传」。
+- **重复归档不覆盖已到图床的直链**：`upsert_media` 只对 `state_rank < bed`
+  的行补源站 URL；已上传的行保留图床直链，避免回填重放/collector 二次入库
+  把永久地址改回临时地址。
+- **采集状态预览与真实目录同一天**：目录预览的 `{date}` 统一走东八区
+  （新增 `pipeline_naming.date_label`），服务器跑 UTC 时跨零点不再显示前一天。
+- **设置页键数口径修正**：界面与后端注释里残留的 185 统一为实际值 187。
+- 图床巡检的手动 `limit` 只有在枚举被上限截断时才标 `partial`；文件数少于
+  上限说明已扫完，不再每次启动自动重跑。
+- 冒烟基线更新为 `1438 passed, 1 skipped`（新增 9 个图床巡检用例、4 个
+  列表分页/鉴权用例、1 个入口契约用例与 5 个本轮审查回归用例）。
+
+## v0.10.0 - 2026-11-20
+
+### 重点博主采集
+
+- **重点博主的带图原创微博会稳定进图床，而不是“刚好被推送规则放行”才进**：
+  原来的归档挂在大批推送过滤之后，命中关键词、超过时效或被 `pipeline.enabled_uids`
+  拦截的帖子根本不会入库。新增 `collector` 分组（6 个键，默认关闭），在 seen
+  标记之后、时效/关键词/转发过滤之前旁路调用 `archive_post(source="collector")`；
+  只对 `collector.accounts` 里的 uid 生效，普通账号行为不变。
+- **原创判定与转发例外可配置**：默认只收 `is_retweet=false`；`include_retweets`
+  可全收，`allow_retweet_from_uids` 只放行指定原作者（适合工作室转发本人）。
+  `min_images` 先按时间线卡片快速判定，命中候选后强制补一次详情再复核，避免
+  九宫格被截断成 0 张而漏采。
+- **采集绕过 `pipeline.enabled_uids` 但仍受管线总开关约束**：
+  `pipeline_notify_archived(mid, post)` 对 collector 账号直接放行，回填路径同样
+  按原创规则过滤；分类合并规则是 `pipeline.categories` 优先、collector 分类补缺，
+  `{account}` 优先用 collector 别名。
+- **固定图取不到的真根因修掉**：Qdrant payload 的 `file_name` 原来取归档本地
+  `<pid>.jpg`，与图床渲染名不一致，按文件名反查必然落空。`VectorPointInput` 增加
+  `file_name` 字段，`upsert_file_batch` 改用图床渲染名；`/原图` 新增 `固定图`
+  别名，并新增 `sendImageByName` LLM 工具。
+- **采集状态第一次可见**：新增 `微博 采集状态` 与管理面板 `/collector/status`
+  卡片，显示账号、图床目录、可复制的 `/随机图 <目录>`、帖子/图片六态计数、
+  依赖缺口与最近错误；`collector.skip_push=true` 时只收图、不推送。
 
 ### 接口与通道
 

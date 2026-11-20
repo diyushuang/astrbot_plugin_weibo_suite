@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
 DEFAULT_DIR_TEMPLATE = "{category}/【微博图集@{account}】/"
 DEFAULT_FILE_TEMPLATE = "【微博@{account}】{date}-{index}：{title}.jpg"
@@ -29,6 +31,25 @@ _PLACEHOLDER_RE = re.compile(r"\{([a-z_]+)\}")
 _LEADING_HASHTAG_RE = re.compile(r"^#[^#\n]{1,50}#\s*")
 _LEADING_MENTION_RE = re.compile(r"^@[\w·-]{1,30}\s*")
 _IMAGE_EXTS = frozenset({"jpg", "jpeg", "png", "webp", "gif", "heic", "heif", "bmp", "tif", "tiff"})
+# 微博 uid 是纯数字；collector.accounts 只接受这个形态，避免昵称/链接混进键。
+_UID_RE = re.compile(r"\d{2,20}")
+# 命名里的日期固定按微博所在的东八区算：服务器多半跑 UTC，用本地时间会让
+# 00:00–08:00 的帖子落到前一天的目录，面板预览也会与真实目录对不上。
+_WEIBO_TZ = timezone(timedelta(hours=8))
+
+
+def date_label(timestamp: Any = None) -> str:
+    """命名用日期（YYYY-MM-DD，东八区）；时间戳缺失/非法时取当前日期。"""
+    try:
+        seconds = int(timestamp) if timestamp not in (None, "") else 0
+    except (TypeError, ValueError):
+        seconds = 0
+    if seconds > 0:
+        try:
+            return datetime.fromtimestamp(seconds, _WEIBO_TZ).strftime("%Y-%m-%d")
+        except (OverflowError, OSError, ValueError):
+            pass
+    return datetime.now(_WEIBO_TZ).strftime("%Y-%m-%d")
 
 
 @dataclass(frozen=True)
@@ -44,6 +65,29 @@ class NamingContext:
     index: int  # 该帖内第几张，1 起
     title: str  # 取自正文的短标题
     ext: str = "jpg"
+
+
+@dataclass(frozen=True)
+class CollectorAccount:
+    """collector.accounts 里的一行：`uid|别名|分类目录`。
+
+    别名可省略（用接口昵称），分类可省略（回落 pipeline.categories）。
+    """
+
+    uid: str
+    alias: str = ""
+    category: str = ""
+
+
+@dataclass(frozen=True)
+class CollectorFlags:
+    """collector 分组的归一化开关（纯数据，不依赖宿主配置对象）。"""
+
+    enabled: bool = False
+    include_retweets: bool = False
+    allow_retweet_from: tuple[str, ...] = ()
+    min_images: int = 1
+    skip_push: bool = False
 
 
 def naming_templates(config: dict) -> tuple[str, str]:
@@ -81,6 +125,96 @@ def category_map(config: dict) -> dict[str, str]:
         if not clean_key or not clean_value:
             continue
         mapping[clean_key] = clean_value
+    return mapping
+
+
+def collector_accounts(config: dict) -> dict[str, CollectorAccount]:
+    """解析 `collector.accounts`：每行 `uid|别名|分类目录`。
+
+    - 别名/分类都可省略；两段式 `uid|别名` 不会把别名误当分类。
+    - 面板可能把 list 存成 JSON 字符串，这里一并兼容。
+    - uid 只接受数字（微博 uid），非法行跳过，绝不抛异常。
+    - 同 uid 重复时后出现的覆盖先出现的。
+    """
+    raw = _collector_section(config).get("accounts")
+    lines = _as_text_list(raw)
+    accounts: dict[str, CollectorAccount] = {}
+    for line in lines:
+        parts = [part.strip() for part in str(line).split("|")]
+        uid = parts[0] if parts else ""
+        if not uid or not _UID_RE.fullmatch(uid):
+            continue
+        alias = parts[1] if len(parts) > 1 else ""
+        category = "|".join(parts[2:]).strip() if len(parts) > 2 else ""
+        accounts[uid] = CollectorAccount(uid=uid, alias=alias, category=category)
+    return accounts
+
+
+def collector_category_map(config: dict) -> dict[str, str]:
+    """collector 账号里显式配置的分类（uid -> 目录），空分类不返回。"""
+    return {
+        uid: spec.category.strip()
+        for uid, spec in collector_accounts(config).items()
+        if spec.category.strip()
+    }
+
+
+def collector_flags(config: dict) -> CollectorFlags:
+    """读取并归一化 collector 开关；非法值一律回落安全默认。"""
+    section = _collector_section(config)
+    return CollectorFlags(
+        enabled=_bool_value(section.get("enabled"), False),
+        include_retweets=_bool_value(section.get("include_retweets"), False),
+        allow_retweet_from=_allow_tokens(section.get("allow_retweet_from_uids")),
+        min_images=_clamp_int(section.get("min_images"), 1, 1, 9),
+        skip_push=_bool_value(section.get("skip_push"), False),
+    )
+
+
+def collector_post_allowed(
+    flags: CollectorFlags,
+    *,
+    is_retweet: bool,
+    orig_uid: str = "",
+    orig_name: str = "",
+    pic_count: int = 0,
+) -> bool:
+    """一条帖子是否属于「带图原创」。
+
+    - 配图数不足 min_images：不收；
+    - 原创：收；
+    - 转发：include_retweets 开启时收；否则仅当原微博作者在例外名单里收。
+      例外名单同时匹配 uid 与昵称，兼容回填行没有 orig_uid 的场景。
+    """
+    if pic_count < flags.min_images:
+        return False
+    if not is_retweet:
+        return True
+    if flags.include_retweets:
+        return True
+    allow = set(flags.allow_retweet_from)
+    return bool(
+        (orig_uid and str(orig_uid).strip() in allow)
+        or (orig_name and str(orig_name).strip() in allow)
+    )
+
+
+def collector_alias(config: dict, uid: str) -> str:
+    """取 collector 配置里的展示别名；没有配置时返回空串。"""
+    spec = collector_accounts(config).get(str(uid or "").strip())
+    return spec.alias.strip() if spec else ""
+
+
+def merged_category_map(config: dict) -> dict[str, str]:
+    """合并分类映射：`pipeline.categories` 优先，collector 只补空缺的 uid。
+
+    这样老配置里已有的 uid/昵称映射不会被 collector 的新分类悄悄覆盖；
+    想让 collector 分类生效，把 pipeline.categories 里对应键删掉即可。
+    """
+    mapping = category_map(config)
+    for uid, category in collector_category_map(config).items():
+        if uid not in mapping:
+            mapping[uid] = category
     return mapping
 
 
@@ -186,6 +320,72 @@ def _pipeline_section(config: dict) -> dict:
     return section if isinstance(section, dict) else {}
 
 
+def _collector_section(config: dict) -> dict:
+    """取 config["collector"]；缺失或类型不对时返回空 dict。"""
+    if not isinstance(config, dict):
+        return {}
+    section = config.get("collector")
+    return section if isinstance(section, dict) else {}
+
+
+def _as_text_list(raw) -> list:
+    """把面板的 list / 换行文本 / JSON 数组统一成 list（非法值返回空）。"""
+    if isinstance(raw, (list, tuple)):
+        return list(raw)
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except (TypeError, ValueError):
+                return text.splitlines()
+            return list(parsed) if isinstance(parsed, list) else []
+        return text.splitlines()
+    return []
+
+
+def _allow_tokens(raw) -> tuple[str, ...]:
+    """允许转发的原作者：支持 list、逗号/换行分隔的字符串。"""
+    if isinstance(raw, str):
+        items = re.split(r"[,\n]+", raw)
+    elif isinstance(raw, (list, tuple, set)):
+        items = list(raw)
+    else:
+        return ()
+    tokens = []
+    for item in items:
+        token = str(item or "").strip()
+        if token:
+            tokens.append(token)
+    return tuple(dict.fromkeys(tokens))
+
+
+def _bool_value(value, default: bool) -> bool:
+    """面板可能把 bool 存成 "true"/"1"/"on"，这里按同一套真值表解析。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off", ""}:
+            return False
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+
+def _clamp_int(value, default: int, low: int, high: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(low, min(high, number))
+
+
 def _template_or_default(value, default: str) -> str:
     if isinstance(value, str):
         stripped = value.strip()
@@ -256,8 +456,16 @@ __all__ = [
     "DEFAULT_FILE_TEMPLATE",
     "MAX_SEGMENT_LEN",
     "THUMBNAIL_FOLDER",
+    "CollectorAccount",
+    "CollectorFlags",
     "NamingContext",
     "category_map",
+    "collector_accounts",
+    "collector_alias",
+    "collector_category_map",
+    "collector_flags",
+    "collector_post_allowed",
+    "merged_category_map",
     "naming_templates",
     "normalize_relative_dir",
     "render_directory",
